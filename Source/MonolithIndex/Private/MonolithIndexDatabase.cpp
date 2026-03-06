@@ -339,18 +339,17 @@ int64 FMonolithIndexDatabase::InsertAsset(const FIndexedAsset& Asset)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT OR REPLACE INTO assets (package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified) VALUES ('%s', '%s', '%s', '%s', '%s', %lld, '%s');"),
-		*Asset.PackagePath.Replace(TEXT("'"), TEXT("''")),
-		*Asset.AssetName.Replace(TEXT("'"), TEXT("''")),
-		*Asset.AssetClass.Replace(TEXT("'"), TEXT("''")),
-		*Asset.ModuleName.Replace(TEXT("'"), TEXT("''")),
-		*Asset.Description.Replace(TEXT("'"), TEXT("''")),
-		Asset.FileSizeBytes,
-		*Asset.LastModified.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT OR REPLACE INTO assets (package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Asset.PackagePath);
+	Stmt.SetBindingValueByIndex(2, Asset.AssetName);
+	Stmt.SetBindingValueByIndex(3, Asset.AssetClass);
+	Stmt.SetBindingValueByIndex(4, Asset.ModuleName);
+	Stmt.SetBindingValueByIndex(5, Asset.Description);
+	Stmt.SetBindingValueByIndex(6, Asset.FileSizeBytes);
+	Stmt.SetBindingValueByIndex(7, Asset.LastModified);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -410,17 +409,17 @@ int64 FMonolithIndexDatabase::InsertNode(const FIndexedNode& Node)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO nodes (asset_id, node_type, node_name, node_class, properties, pos_x, pos_y) VALUES (%lld, '%s', '%s', '%s', '%s', %d, %d);"),
-		Node.AssetId,
-		*Node.NodeType.Replace(TEXT("'"), TEXT("''")),
-		*Node.NodeName.Replace(TEXT("'"), TEXT("''")),
-		*Node.NodeClass.Replace(TEXT("'"), TEXT("''")),
-		*Node.Properties.Replace(TEXT("'"), TEXT("''")),
-		Node.PosX, Node.PosY
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO nodes (asset_id, node_type, node_name, node_class, properties, pos_x, pos_y) VALUES (?, ?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Node.AssetId);
+	Stmt.SetBindingValueByIndex(2, Node.NodeType);
+	Stmt.SetBindingValueByIndex(3, Node.NodeName);
+	Stmt.SetBindingValueByIndex(4, Node.NodeClass);
+	Stmt.SetBindingValueByIndex(5, Node.Properties);
+	Stmt.SetBindingValueByIndex(6, static_cast<int64>(Node.PosX));
+	Stmt.SetBindingValueByIndex(7, static_cast<int64>(Node.PosY));
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -457,16 +456,15 @@ int64 FMonolithIndexDatabase::InsertConnection(const FIndexedConnection& Conn)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO connections (source_node_id, source_pin, target_node_id, target_pin, pin_type) VALUES (%lld, '%s', %lld, '%s', '%s');"),
-		Conn.SourceNodeId,
-		*Conn.SourcePin.Replace(TEXT("'"), TEXT("''")),
-		Conn.TargetNodeId,
-		*Conn.TargetPin.Replace(TEXT("'"), TEXT("''")),
-		*Conn.PinType.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO connections (source_node_id, source_pin, target_node_id, target_pin, pin_type) VALUES (?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Conn.SourceNodeId);
+	Stmt.SetBindingValueByIndex(2, Conn.SourcePin);
+	Stmt.SetBindingValueByIndex(3, Conn.TargetNodeId);
+	Stmt.SetBindingValueByIndex(4, Conn.TargetPin);
+	Stmt.SetBindingValueByIndex(5, Conn.PinType);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -501,18 +499,17 @@ int64 FMonolithIndexDatabase::InsertVariable(const FIndexedVariable& Var)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO variables (asset_id, var_name, var_type, category, default_value, is_exposed, is_replicated) VALUES (%lld, '%s', '%s', '%s', '%s', %d, %d);"),
-		Var.AssetId,
-		*Var.VarName.Replace(TEXT("'"), TEXT("''")),
-		*Var.VarType.Replace(TEXT("'"), TEXT("''")),
-		*Var.Category.Replace(TEXT("'"), TEXT("''")),
-		*Var.DefaultValue.Replace(TEXT("'"), TEXT("''")),
-		Var.bIsExposed ? 1 : 0,
-		Var.bIsReplicated ? 1 : 0
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO variables (asset_id, var_name, var_type, category, default_value, is_exposed, is_replicated) VALUES (?, ?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Var.AssetId);
+	Stmt.SetBindingValueByIndex(2, Var.VarName);
+	Stmt.SetBindingValueByIndex(3, Var.VarType);
+	Stmt.SetBindingValueByIndex(4, Var.Category);
+	Stmt.SetBindingValueByIndex(5, Var.DefaultValue);
+	Stmt.SetBindingValueByIndex(6, static_cast<int64>(Var.bIsExposed ? 1 : 0));
+	Stmt.SetBindingValueByIndex(7, static_cast<int64>(Var.bIsReplicated ? 1 : 0));
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -552,17 +549,16 @@ int64 FMonolithIndexDatabase::InsertParameter(const FIndexedParameter& Param)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO parameters (asset_id, param_name, param_type, param_group, default_value, source) VALUES (%lld, '%s', '%s', '%s', '%s', '%s');"),
-		Param.AssetId,
-		*Param.ParamName.Replace(TEXT("'"), TEXT("''")),
-		*Param.ParamType.Replace(TEXT("'"), TEXT("''")),
-		*Param.ParamGroup.Replace(TEXT("'"), TEXT("''")),
-		*Param.DefaultValue.Replace(TEXT("'"), TEXT("''")),
-		*Param.Source.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO parameters (asset_id, param_name, param_type, param_group, default_value, source) VALUES (?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Param.AssetId);
+	Stmt.SetBindingValueByIndex(2, Param.ParamName);
+	Stmt.SetBindingValueByIndex(3, Param.ParamType);
+	Stmt.SetBindingValueByIndex(4, Param.ParamGroup);
+	Stmt.SetBindingValueByIndex(5, Param.DefaultValue);
+	Stmt.SetBindingValueByIndex(6, Param.Source);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -574,13 +570,13 @@ int64 FMonolithIndexDatabase::InsertDependency(const FIndexedDependency& Dep)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO dependencies (source_asset_id, target_asset_id, dependency_type) VALUES (%lld, %lld, '%s');"),
-		Dep.SourceAssetId, Dep.TargetAssetId,
-		*Dep.DependencyType.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO dependencies (source_asset_id, target_asset_id, dependency_type) VALUES (?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Dep.SourceAssetId);
+	Stmt.SetBindingValueByIndex(2, Dep.TargetAssetId);
+	Stmt.SetBindingValueByIndex(3, Dep.DependencyType);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -634,17 +630,16 @@ int64 FMonolithIndexDatabase::InsertActor(const FIndexedActor& Actor)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO actors (asset_id, actor_name, actor_class, actor_label, transform, components) VALUES (%lld, '%s', '%s', '%s', '%s', '%s');"),
-		Actor.AssetId,
-		*Actor.ActorName.Replace(TEXT("'"), TEXT("''")),
-		*Actor.ActorClass.Replace(TEXT("'"), TEXT("''")),
-		*Actor.ActorLabel.Replace(TEXT("'"), TEXT("''")),
-		*Actor.Transform.Replace(TEXT("'"), TEXT("''")),
-		*Actor.Components.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO actors (asset_id, actor_name, actor_class, actor_label, transform, components) VALUES (?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Actor.AssetId);
+	Stmt.SetBindingValueByIndex(2, Actor.ActorName);
+	Stmt.SetBindingValueByIndex(3, Actor.ActorClass);
+	Stmt.SetBindingValueByIndex(4, Actor.ActorLabel);
+	Stmt.SetBindingValueByIndex(5, Actor.Transform);
+	Stmt.SetBindingValueByIndex(6, Actor.Components);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -656,14 +651,13 @@ int64 FMonolithIndexDatabase::InsertTag(const FIndexedTag& Tag)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT OR IGNORE INTO tags (tag_name, parent_tag, reference_count) VALUES ('%s', '%s', %d);"),
-		*Tag.TagName.Replace(TEXT("'"), TEXT("''")),
-		*Tag.ParentTag.Replace(TEXT("'"), TEXT("''")),
-		Tag.ReferenceCount
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT OR IGNORE INTO tags (tag_name, parent_tag, reference_count) VALUES (?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Tag.TagName);
+	Stmt.SetBindingValueByIndex(2, Tag.ParentTag);
+	Stmt.SetBindingValueByIndex(3, static_cast<int64>(Tag.ReferenceCount));
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return GetOrCreateTag(Tag.TagName, Tag.ParentTag);
 }
 
@@ -684,12 +678,11 @@ int64 FMonolithIndexDatabase::GetOrCreateTag(const FString& TagName, const FStri
 	}
 
 	// Insert new
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO tags (tag_name, parent_tag) VALUES ('%s', '%s');"),
-		*TagName.Replace(TEXT("'"), TEXT("''")),
-		*ParentTag.Replace(TEXT("'"), TEXT("''"))
-	);
-	ExecuteSQL(SQL);
+	FSQLitePreparedStatement InsertStmt;
+	InsertStmt.Create(*Database, TEXT("INSERT INTO tags (tag_name, parent_tag) VALUES (?, ?);"));
+	InsertStmt.SetBindingValueByIndex(1, TagName);
+	InsertStmt.SetBindingValueByIndex(2, ParentTag);
+	InsertStmt.Execute();
 	return Database->GetLastInsertRowId();
 }
 
@@ -697,19 +690,20 @@ int64 FMonolithIndexDatabase::InsertTagReference(const FIndexedTagReference& Ref
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO tag_references (tag_id, asset_id, context) VALUES (%lld, %lld, '%s');"),
-		Ref.TagId, Ref.AssetId,
-		*Ref.Context.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO tag_references (tag_id, asset_id, context) VALUES (?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Ref.TagId);
+	Stmt.SetBindingValueByIndex(2, Ref.AssetId);
+	Stmt.SetBindingValueByIndex(3, Ref.Context);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 
 	// Update reference count
-	ExecuteSQL(FString::Printf(
-		TEXT("UPDATE tags SET reference_count = (SELECT COUNT(*) FROM tag_references WHERE tag_id = %lld) WHERE id = %lld;"),
-		Ref.TagId, Ref.TagId
-	));
+	FSQLitePreparedStatement UpdateStmt;
+	UpdateStmt.Create(*Database, TEXT("UPDATE tags SET reference_count = (SELECT COUNT(*) FROM tag_references WHERE tag_id = ?) WHERE id = ?;"));
+	UpdateStmt.SetBindingValueByIndex(1, Ref.TagId);
+	UpdateStmt.SetBindingValueByIndex(2, Ref.TagId);
+	UpdateStmt.Execute();
 
 	return Database->GetLastInsertRowId();
 }
@@ -722,15 +716,14 @@ int64 FMonolithIndexDatabase::InsertConfig(const FIndexedConfig& Config)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO configs (file_path, section, key, value) VALUES ('%s', '%s', '%s', '%s');"),
-		*Config.FilePath.Replace(TEXT("'"), TEXT("''")),
-		*Config.Section.Replace(TEXT("'"), TEXT("''")),
-		*Config.Key.Replace(TEXT("'"), TEXT("''")),
-		*Config.Value.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO configs (file_path, section, key, value) VALUES (?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Config.FilePath);
+	Stmt.SetBindingValueByIndex(2, Config.Section);
+	Stmt.SetBindingValueByIndex(3, Config.Key);
+	Stmt.SetBindingValueByIndex(4, Config.Value);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -742,17 +735,16 @@ int64 FMonolithIndexDatabase::InsertCppSymbol(const FIndexedCppSymbol& Symbol)
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO cpp_symbols (file_path, symbol_name, symbol_type, signature, line_number, parent_symbol) VALUES ('%s', '%s', '%s', '%s', %d, '%s');"),
-		*Symbol.FilePath.Replace(TEXT("'"), TEXT("''")),
-		*Symbol.SymbolName.Replace(TEXT("'"), TEXT("''")),
-		*Symbol.SymbolType.Replace(TEXT("'"), TEXT("''")),
-		*Symbol.Signature.Replace(TEXT("'"), TEXT("''")),
-		Symbol.LineNumber,
-		*Symbol.ParentSymbol.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO cpp_symbols (file_path, symbol_name, symbol_type, signature, line_number, parent_symbol) VALUES (?, ?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Symbol.FilePath);
+	Stmt.SetBindingValueByIndex(2, Symbol.SymbolName);
+	Stmt.SetBindingValueByIndex(3, Symbol.SymbolType);
+	Stmt.SetBindingValueByIndex(4, Symbol.Signature);
+	Stmt.SetBindingValueByIndex(5, static_cast<int64>(Symbol.LineNumber));
+	Stmt.SetBindingValueByIndex(6, Symbol.ParentSymbol);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
 }
 
@@ -764,15 +756,29 @@ int64 FMonolithIndexDatabase::InsertDataTableRow(const FIndexedDataTableRow& Row
 {
 	if (!IsOpen()) return -1;
 
-	FString SQL = FString::Printf(
-		TEXT("INSERT INTO datatable_rows (asset_id, row_name, row_data) VALUES (%lld, '%s', '%s');"),
-		Row.AssetId,
-		*Row.RowName.Replace(TEXT("'"), TEXT("''")),
-		*Row.RowData.Replace(TEXT("'"), TEXT("''"))
-	);
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO datatable_rows (asset_id, row_name, row_data) VALUES (?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Row.AssetId);
+	Stmt.SetBindingValueByIndex(2, Row.RowName);
+	Stmt.SetBindingValueByIndex(3, Row.RowData);
 
-	if (!ExecuteSQL(SQL)) return -1;
+	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
+}
+
+// ============================================================
+// Meta
+// ============================================================
+
+bool FMonolithIndexDatabase::WriteMeta(const FString& Key, const FString& Value)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Key);
+	Stmt.SetBindingValueByIndex(2, Value);
+	return Stmt.Execute();
 }
 
 // ============================================================

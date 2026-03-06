@@ -12,6 +12,12 @@
 #include "Indexers/MaterialIndexer.h"
 #include "Indexers/GenericAssetIndexer.h"
 #include "Indexers/DependencyIndexer.h"
+#include "Indexers/LevelIndexer.h"
+#include "Indexers/ConfigIndexer.h"
+#include "Indexers/DataTableIndexer.h"
+#include "Indexers/GameplayTagIndexer.h"
+#include "Indexers/CppIndexer.h"
+#include "Indexers/AnimationIndexer.h"
 
 void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -84,6 +90,12 @@ void UMonolithIndexSubsystem::RegisterDefaultIndexers()
 	RegisterIndexer(MakeShared<FMaterialIndexer>());
 	RegisterIndexer(MakeShared<FGenericAssetIndexer>());
 	RegisterIndexer(MakeShared<FDependencyIndexer>());
+	RegisterIndexer(MakeShared<FLevelIndexer>());
+	RegisterIndexer(MakeShared<FDataTableIndexer>());
+	RegisterIndexer(MakeShared<FGameplayTagIndexer>());
+	RegisterIndexer(MakeShared<FConfigIndexer>());
+	RegisterIndexer(MakeShared<FCppIndexer>());
+	RegisterIndexer(MakeShared<FAnimationIndexer>());
 }
 
 void UMonolithIndexSubsystem::StartFullIndex()
@@ -98,10 +110,6 @@ void UMonolithIndexSubsystem::StartFullIndex()
 
 	// Reset the database for a full re-index
 	Database->ResetDatabase();
-
-	// Mark that we've done the initial index
-	Database->BeginTransaction();
-	Database->CommitTransaction();
 
 	// Show notification
 	Notification = new FMonolithIndexNotification();
@@ -221,6 +229,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	int32 Indexed = 0;
 	int32 Errors = 0;
 
+	// Collect assets that have deep indexers for a second pass
+	struct FDeepIndexEntry
+	{
+		FAssetData AssetData;
+		int64 AssetId;
+		TSharedPtr<IMonolithIndexer> Indexer;
+	};
+	TArray<FDeepIndexEntry> DeepIndexQueue;
+
 	for (int32 i = 0; i < AllAssets.Num(); ++i)
 	{
 		if (bShouldStop) break;
@@ -241,10 +258,12 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			continue;
 		}
 
-		// NOTE: Deep asset loading (Blueprint graphs, Material nodes) is skipped during bulk indexing.
-		// Loading assets triggers the texture compiler pipeline which crashes when called from
-		// a background thread context. Metadata-only indexing (name, class, path, dependencies)
-		// is sufficient for FTS search. Deep inspection can be done on-demand per asset.
+		// Queue assets that have deep indexers (Blueprint, Material, etc.)
+		TSharedPtr<IMonolithIndexer>* FoundIndexer = Owner->ClassToIndexer.Find(IndexedAsset.AssetClass);
+		if (FoundIndexer && FoundIndexer->IsValid())
+		{
+			DeepIndexQueue.Add({ AssetData, AssetId, *FoundIndexer });
+		}
 
 		Indexed++;
 
@@ -266,7 +285,94 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 
 	DB->CommitTransaction();
 
-	UE_LOG(LogMonolithIndex, Log, TEXT("Indexing complete: %d assets indexed, %d errors"), Indexed, Errors);
+	UE_LOG(LogMonolithIndex, Log, TEXT("Metadata pass complete: %d assets indexed, %d errors"), Indexed, Errors);
+
+	// ============================================================
+	// Deep indexing pass — load assets on game thread in time-budgeted batches
+	// Assets must be loaded on the game thread to avoid texture compiler crashes.
+	// We process in small batches, yielding when the frame budget is exceeded.
+	// ============================================================
+	if (!bShouldStop && DeepIndexQueue.Num() > 0)
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Starting deep indexing pass for %d assets..."), DeepIndexQueue.Num());
+
+		constexpr int32 DeepBatchSize = 16;
+		constexpr double FrameBudgetSeconds = 0.016; // ~16ms per batch to stay interactive
+		TAtomic<int32> DeepIndexed{0};
+		TAtomic<int32> DeepErrors{0};
+		int32 TotalDeep = DeepIndexQueue.Num();
+
+		for (int32 BatchStart = 0; BatchStart < TotalDeep && !bShouldStop; BatchStart += DeepBatchSize)
+		{
+			int32 BatchEnd = FMath::Min(BatchStart + DeepBatchSize, TotalDeep);
+
+			// Capture the slice for this batch
+			TArray<FDeepIndexEntry> BatchSlice;
+			BatchSlice.Reserve(BatchEnd - BatchStart);
+			for (int32 j = BatchStart; j < BatchEnd; ++j)
+			{
+				BatchSlice.Add(DeepIndexQueue[j]);
+			}
+
+			FEvent* BatchEvent = FPlatformProcess::GetSynchEventFromPool(true);
+
+			AsyncTask(ENamedThreads::GameThread, [DB, BatchSlice = MoveTemp(BatchSlice), &DeepIndexed, &DeepErrors, FrameBudgetSeconds, BatchEvent]()
+			{
+				DB->BeginTransaction();
+				double BatchStartTime = FPlatformTime::Seconds();
+
+				for (const FDeepIndexEntry& Entry : BatchSlice)
+				{
+					// Load asset on game thread (safe for texture compiler)
+					UObject* LoadedAsset = Entry.AssetData.GetAsset();
+					if (LoadedAsset)
+					{
+						if (Entry.Indexer->IndexAsset(Entry.AssetData, LoadedAsset, *DB, Entry.AssetId))
+						{
+							DeepIndexed++;
+						}
+						else
+						{
+							DeepErrors++;
+						}
+					}
+					else
+					{
+						DeepErrors++;
+					}
+
+					// If we've exceeded our frame budget, commit what we have and yield
+					double Elapsed = FPlatformTime::Seconds() - BatchStartTime;
+					if (Elapsed > FrameBudgetSeconds)
+					{
+						DB->CommitTransaction();
+						DB->BeginTransaction();
+						BatchStartTime = FPlatformTime::Seconds();
+					}
+				}
+
+				DB->CommitTransaction();
+				BatchEvent->Trigger();
+			});
+
+			BatchEvent->Wait();
+			FPlatformProcess::ReturnSynchEventToPool(BatchEvent);
+
+			// Update progress — report deep pass as second half of overall progress
+			CurrentIndex = Indexed + BatchEnd;
+			TotalAssets = Indexed + TotalDeep;
+
+			AsyncTask(ENamedThreads::GameThread, [this]()
+			{
+				Owner->OnProgress.Broadcast(CurrentIndex.Load(), TotalAssets.Load());
+			});
+
+			UE_LOG(LogMonolithIndex, Verbose, TEXT("Deep indexed %d / %d assets"), BatchEnd, TotalDeep);
+		}
+
+		UE_LOG(LogMonolithIndex, Log, TEXT("Deep indexing complete: %d indexed, %d errors"),
+			DeepIndexed.Load(), DeepErrors.Load());
+	}
 
 	// Run dependency indexer on game thread (Asset Registry requires it)
 	TSharedPtr<IMonolithIndexer>* DepIndexer = Owner->ClassToIndexer.Find(TEXT("__Dependencies__"));
@@ -287,10 +393,109 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		FPlatformProcess::ReturnSynchEventToPool(DepEvent);
 	}
 
-	// Write index timestamp to meta
-	DB->BeginTransaction();
-	FString MetaSQL = TEXT("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_full_index', datetime('now'));");
-	DB->CommitTransaction();
+	// Run level indexer on game thread (asset loading requires it)
+	TSharedPtr<IMonolithIndexer>* LevelIndexer = Owner->ClassToIndexer.Find(TEXT("__Levels__"));
+	if (LevelIndexer && LevelIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running level indexer..."));
+		TSharedPtr<IMonolithIndexer> LevelIndexerCopy = *LevelIndexer;
+		FEvent* LevelEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [DB, LevelIndexerCopy, LevelEvent]()
+		{
+			DB->BeginTransaction();
+			FAssetData DummyData;
+			LevelIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			DB->CommitTransaction();
+			LevelEvent->Trigger();
+		});
+		LevelEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(LevelEvent);
+	}
+
+	// Run DataTable indexer on game thread (requires asset loading)
+	TSharedPtr<IMonolithIndexer>* DTIndexer = Owner->ClassToIndexer.Find(TEXT("__DataTables__"));
+	if (DTIndexer && DTIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running DataTable indexer..."));
+		TSharedPtr<IMonolithIndexer> DTIndexerCopy = *DTIndexer;
+		FEvent* DTEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [DB, DTIndexerCopy, DTEvent]()
+		{
+			DB->BeginTransaction();
+			FAssetData DummyData;
+			DTIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			DB->CommitTransaction();
+			DTEvent->Trigger();
+		});
+		DTEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(DTEvent);
+	}
+
+	// Run config indexer (file I/O only, no game thread needed)
+	TSharedPtr<IMonolithIndexer>* CfgIndexer = Owner->ClassToIndexer.Find(TEXT("__Configs__"));
+	if (CfgIndexer && CfgIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running config indexer..."));
+		DB->BeginTransaction();
+		FAssetData DummyCfgData;
+		(*CfgIndexer)->IndexAsset(DummyCfgData, nullptr, *DB, 0);
+		DB->CommitTransaction();
+	}
+
+	// Run C++ symbol indexer (file I/O only, no game thread needed)
+	TSharedPtr<IMonolithIndexer>* CppIndexer = Owner->ClassToIndexer.Find(TEXT("__CppSymbols__"));
+	if (CppIndexer && CppIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running C++ symbol indexer..."));
+		DB->BeginTransaction();
+		FAssetData DummyCppData;
+		(*CppIndexer)->IndexAsset(DummyCppData, nullptr, *DB, 0);
+		DB->CommitTransaction();
+	}
+
+	// Run animation indexer on game thread (asset loading requires it)
+	TSharedPtr<IMonolithIndexer>* AnimIndexer = Owner->ClassToIndexer.Find(TEXT("__Animations__"));
+	if (AnimIndexer && AnimIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running animation indexer..."));
+		TSharedPtr<IMonolithIndexer> AnimIndexerCopy = *AnimIndexer;
+		FEvent* AnimEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [DB, AnimIndexerCopy, AnimEvent]()
+		{
+			DB->BeginTransaction();
+			FAssetData DummyData;
+			AnimIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			DB->CommitTransaction();
+			AnimEvent->Trigger();
+		});
+		AnimEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(AnimEvent);
+	}
+
+	// Run gameplay tag indexer on game thread (GameplayTagsManager requires it)
+	TSharedPtr<IMonolithIndexer>* TagIndexer = Owner->ClassToIndexer.Find(TEXT("__GameplayTags__"));
+	if (TagIndexer && TagIndexer->IsValid())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running gameplay tag indexer..."));
+		TSharedPtr<IMonolithIndexer> TagIndexerCopy = *TagIndexer;
+		FEvent* TagEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [DB, TagIndexerCopy, TagEvent]()
+		{
+			DB->BeginTransaction();
+			FAssetData DummyData;
+			TagIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			DB->CommitTransaction();
+			TagEvent->Trigger();
+		});
+		TagEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(TagEvent);
+	}
+
+	// Write index timestamp to meta (only if not cancelled)
+	if (!bShouldStop)
+	{
+		DB->WriteMeta(TEXT("last_full_index"), FDateTime::UtcNow().ToString());
+	}
 
 	AsyncTask(ENamedThreads::GameThread, [this]()
 	{

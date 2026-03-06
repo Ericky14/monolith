@@ -200,6 +200,9 @@ public:
 	int64 GetOrCreateTag(const FString& TagName, const FString& ParentTag);
 	int64 InsertTagReference(const FIndexedTagReference& Ref);
 
+	// --- Meta ---
+	bool WriteMeta(const FString& Key, const FString& Value);
+
 	// --- Config CRUD ---
 	int64 InsertConfig(const FIndexedConfig& Config);
 

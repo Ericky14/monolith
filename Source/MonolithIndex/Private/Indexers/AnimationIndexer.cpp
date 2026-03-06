@@ -1,0 +1,270 @@
+#include "Indexers/AnimationIndexer.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/BlendSpace.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
+
+bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId)
+{
+	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+	int32 TotalIndexed = 0;
+
+	// --- AnimSequence ---
+	{
+		TArray<FAssetData> Assets;
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+		Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+		Registry.GetAssets(Filter, Assets);
+
+		for (const FAssetData& AD : Assets)
+		{
+			int64 SeqAssetId = DB.GetAssetId(AD.PackageName.ToString());
+			if (SeqAssetId < 0) continue;
+
+			UAnimSequence* AnimSeq = Cast<UAnimSequence>(AD.GetAsset());
+			if (!AnimSeq) continue;
+
+			IndexAnimSequence(AnimSeq, DB, SeqAssetId);
+			TotalIndexed++;
+		}
+	}
+
+	// --- AnimMontage ---
+	{
+		TArray<FAssetData> Assets;
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+		Filter.ClassPaths.Add(UAnimMontage::StaticClass()->GetClassPathName());
+		Registry.GetAssets(Filter, Assets);
+
+		for (const FAssetData& AD : Assets)
+		{
+			int64 MontageAssetId = DB.GetAssetId(AD.PackageName.ToString());
+			if (MontageAssetId < 0) continue;
+
+			UAnimMontage* Montage = Cast<UAnimMontage>(AD.GetAsset());
+			if (!Montage) continue;
+
+			IndexAnimMontage(Montage, DB, MontageAssetId);
+			TotalIndexed++;
+		}
+	}
+
+	// --- BlendSpace ---
+	{
+		TArray<FAssetData> Assets;
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+		Filter.ClassPaths.Add(UBlendSpace::StaticClass()->GetClassPathName());
+		Registry.GetAssets(Filter, Assets);
+
+		for (const FAssetData& AD : Assets)
+		{
+			int64 BSAssetId = DB.GetAssetId(AD.PackageName.ToString());
+			if (BSAssetId < 0) continue;
+
+			UBlendSpace* BS = Cast<UBlendSpace>(AD.GetAsset());
+			if (!BS) continue;
+
+			IndexBlendSpace(BS, DB, BSAssetId);
+			TotalIndexed++;
+		}
+	}
+
+	UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: indexed %d animation assets"), TotalIndexed);
+	return true;
+}
+
+void FAnimationIndexer::IndexAnimSequence(UAnimSequence* AnimSeq, FMonolithIndexDatabase& DB, int64 AssetId)
+{
+	USkeleton* Skeleton = AnimSeq->GetSkeleton();
+	const FString SkeletonName = Skeleton ? Skeleton->GetPathName() : TEXT("None");
+
+	// Build properties JSON
+	auto Props = MakeShared<FJsonObject>();
+	Props->SetStringField(TEXT("skeleton"), SkeletonName);
+	Props->SetNumberField(TEXT("length"), AnimSeq->GetPlayLength());
+	Props->SetNumberField(TEXT("num_frames"), AnimSeq->GetNumberOfSampledKeys());
+	Props->SetNumberField(TEXT("rate_scale"), AnimSeq->RateScale);
+
+	// Bone tracks
+	TArray<TSharedPtr<FJsonValue>> TracksArr;
+	if (Skeleton)
+	{
+		const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
+		const int32 NumBones = RefSkeleton.GetNum();
+		for (int32 BoneIdx = 0; BoneIdx < NumBones; ++BoneIdx)
+		{
+			TracksArr.Add(MakeShared<FJsonValueString>(RefSkeleton.GetBoneName(BoneIdx).ToString()));
+		}
+	}
+	Props->SetArrayField(TEXT("bone_tracks"), TracksArr);
+
+	// Curves
+	TArray<TSharedPtr<FJsonValue>> CurvesArr;
+	const FRawCurveTracks& RawCurves = AnimSeq->GetCurveData();
+	for (const FFloatCurve& Curve : RawCurves.FloatCurves)
+	{
+		auto CurveObj = MakeShared<FJsonObject>();
+		CurveObj->SetStringField(TEXT("name"), Curve.GetName().ToString());
+		CurveObj->SetNumberField(TEXT("num_keys"), Curve.FloatCurve.GetNumKeys());
+		CurvesArr.Add(MakeShared<FJsonValueObject>(CurveObj));
+	}
+	Props->SetArrayField(TEXT("curves"), CurvesArr);
+
+	// Notifies
+	Props->SetStringField(TEXT("notifies"), NotifiesToJson(AnimSeq->Notifies));
+
+	// Serialize properties
+	FString PropsStr;
+	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
+	FJsonSerializer::Serialize(Props, *Writer, true);
+
+	FIndexedNode Node;
+	Node.AssetId = AssetId;
+	Node.NodeType = TEXT("AnimSequence");
+	Node.NodeName = AnimSeq->GetName();
+	Node.NodeClass = TEXT("UAnimSequence");
+	Node.Properties = PropsStr;
+	DB.InsertNode(Node);
+}
+
+void FAnimationIndexer::IndexAnimMontage(UAnimMontage* Montage, FMonolithIndexDatabase& DB, int64 AssetId)
+{
+	USkeleton* Skeleton = Montage->GetSkeleton();
+	const FString SkeletonName = Skeleton ? Skeleton->GetPathName() : TEXT("None");
+
+	auto Props = MakeShared<FJsonObject>();
+	Props->SetStringField(TEXT("skeleton"), SkeletonName);
+	Props->SetNumberField(TEXT("length"), Montage->GetPlayLength());
+
+	// Sections
+	TArray<TSharedPtr<FJsonValue>> SectionsArr;
+	for (const FCompositeSection& Section : Montage->CompositeSections)
+	{
+		auto SectionObj = MakeShared<FJsonObject>();
+		SectionObj->SetStringField(TEXT("name"), Section.SectionName.ToString());
+		SectionObj->SetNumberField(TEXT("start_time"), Section.GetTime());
+		SectionObj->SetStringField(TEXT("next_section"), Section.NextSectionName.ToString());
+		SectionsArr.Add(MakeShared<FJsonValueObject>(SectionObj));
+	}
+	Props->SetArrayField(TEXT("sections"), SectionsArr);
+
+	// Slots
+	TArray<TSharedPtr<FJsonValue>> SlotsArr;
+	for (const FSlotAnimationTrack& Slot : Montage->SlotAnimTracks)
+	{
+		auto SlotObj = MakeShared<FJsonObject>();
+		SlotObj->SetStringField(TEXT("name"), Slot.SlotName.ToString());
+		SlotObj->SetNumberField(TEXT("num_segments"), Slot.AnimTrack.AnimSegments.Num());
+		SlotsArr.Add(MakeShared<FJsonValueObject>(SlotObj));
+	}
+	Props->SetArrayField(TEXT("slots"), SlotsArr);
+
+	// Notifies
+	Props->SetStringField(TEXT("notifies"), NotifiesToJson(Montage->Notifies));
+
+	FString PropsStr;
+	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
+	FJsonSerializer::Serialize(Props, *Writer, true);
+
+	FIndexedNode Node;
+	Node.AssetId = AssetId;
+	Node.NodeType = TEXT("AnimMontage");
+	Node.NodeName = Montage->GetName();
+	Node.NodeClass = TEXT("UAnimMontage");
+	Node.Properties = PropsStr;
+	DB.InsertNode(Node);
+}
+
+void FAnimationIndexer::IndexBlendSpace(UBlendSpace* BlendSpace, FMonolithIndexDatabase& DB, int64 AssetId)
+{
+	USkeleton* Skeleton = BlendSpace->GetSkeleton();
+	const FString SkeletonName = Skeleton ? Skeleton->GetPathName() : TEXT("None");
+
+	auto Props = MakeShared<FJsonObject>();
+	Props->SetStringField(TEXT("skeleton"), SkeletonName);
+
+	// Axes
+	const FBlendParameter& AxisX = BlendSpace->GetBlendParameter(0);
+	const FBlendParameter& AxisY = BlendSpace->GetBlendParameter(1);
+
+	auto AxisXObj = MakeShared<FJsonObject>();
+	AxisXObj->SetStringField(TEXT("name"), AxisX.DisplayName);
+	AxisXObj->SetNumberField(TEXT("min"), AxisX.Min);
+	AxisXObj->SetNumberField(TEXT("max"), AxisX.Max);
+	AxisXObj->SetNumberField(TEXT("grid_num"), AxisX.GridNum);
+	Props->SetObjectField(TEXT("axis_x"), AxisXObj);
+
+	auto AxisYObj = MakeShared<FJsonObject>();
+	AxisYObj->SetStringField(TEXT("name"), AxisY.DisplayName);
+	AxisYObj->SetNumberField(TEXT("min"), AxisY.Min);
+	AxisYObj->SetNumberField(TEXT("max"), AxisY.Max);
+	AxisYObj->SetNumberField(TEXT("grid_num"), AxisY.GridNum);
+	Props->SetObjectField(TEXT("axis_y"), AxisYObj);
+
+	// Sample points
+	TArray<TSharedPtr<FJsonValue>> SamplesArr;
+	const TArray<FBlendSample>& Samples = BlendSpace->GetBlendSamples();
+	for (const FBlendSample& Sample : Samples)
+	{
+		auto SampleObj = MakeShared<FJsonObject>();
+		SampleObj->SetStringField(TEXT("animation"), Sample.Animation ? Sample.Animation->GetPathName() : TEXT("None"));
+		SampleObj->SetNumberField(TEXT("x"), Sample.SampleValue.X);
+		SampleObj->SetNumberField(TEXT("y"), Sample.SampleValue.Y);
+		SampleObj->SetNumberField(TEXT("rate_scale"), Sample.RateScale);
+		SamplesArr.Add(MakeShared<FJsonValueObject>(SampleObj));
+	}
+	Props->SetArrayField(TEXT("sample_points"), SamplesArr);
+
+	FString PropsStr;
+	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
+	FJsonSerializer::Serialize(Props, *Writer, true);
+
+	FIndexedNode Node;
+	Node.AssetId = AssetId;
+	Node.NodeType = TEXT("BlendSpace");
+	Node.NodeName = BlendSpace->GetName();
+	Node.NodeClass = TEXT("UBlendSpace");
+	Node.Properties = PropsStr;
+	DB.InsertNode(Node);
+}
+
+FString FAnimationIndexer::NotifiesToJson(const TArray<FAnimNotifyEvent>& Notifies)
+{
+	TArray<TSharedPtr<FJsonValue>> NotifyArr;
+	for (const FAnimNotifyEvent& Notify : Notifies)
+	{
+		auto NotifyObj = MakeShared<FJsonObject>();
+		NotifyObj->SetStringField(TEXT("name"), Notify.NotifyName.ToString());
+		NotifyObj->SetNumberField(TEXT("trigger_time"), Notify.GetTriggerTime());
+		NotifyObj->SetNumberField(TEXT("duration"), Notify.GetDuration());
+
+		if (Notify.Notify)
+		{
+			NotifyObj->SetStringField(TEXT("class"), Notify.Notify->GetClass()->GetName());
+		}
+		else if (Notify.NotifyStateClass)
+		{
+			NotifyObj->SetStringField(TEXT("class"), Notify.NotifyStateClass->GetClass()->GetName());
+			NotifyObj->SetBoolField(TEXT("is_state"), true);
+		}
+
+		NotifyArr.Add(MakeShared<FJsonValueObject>(NotifyObj));
+	}
+
+	FString Result;
+	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Result);
+	FJsonSerializer::Serialize(NotifyArr, *Writer);
+	return Result;
+}
