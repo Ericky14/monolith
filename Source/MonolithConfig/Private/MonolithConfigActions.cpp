@@ -477,7 +477,7 @@ FMonolithActionResult FMonolithConfigActions::DiffFromDefault(const TSharedPtr<F
 FMonolithActionResult FMonolithConfigActions::SearchConfig(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Query = Params->GetStringField(TEXT("query"));
-	FString FilterCategory = Params->HasField(TEXT("file")) ? Params->GetStringField(TEXT("file")) : TEXT("");
+	FString FilterCategory = Params->HasField(TEXT("category")) ? Params->GetStringField(TEXT("category")) : TEXT("");
 
 	// Gather config directories to search
 	TArray<FString> ConfigDirs;
@@ -560,6 +560,23 @@ FMonolithActionResult FMonolithConfigActions::GetSection(const TSharedPtr<FJsonO
 {
 	FString FileShortName = Params->GetStringField(TEXT("file"));
 	FString Section = Params->GetStringField(TEXT("section"));
+
+	// Support category-style names (e.g., "Engine" -> "DefaultEngine" or "BaseEngine")
+	if (!FileShortName.StartsWith(TEXT("Default")) && !FileShortName.StartsWith(TEXT("Base"))
+		&& !FileShortName.Contains(TEXT("/")) && !FileShortName.Contains(TEXT("\\")))
+	{
+		FString DefaultPath = ResolveConfigFilePath(TEXT("Default") + FileShortName);
+		FString BasePath = ResolveConfigFilePath(TEXT("Base") + FileShortName);
+
+		if (FPaths::FileExists(DefaultPath))
+		{
+			FileShortName = TEXT("Default") + FileShortName;
+		}
+		else if (FPaths::FileExists(BasePath))
+		{
+			FileShortName = TEXT("Base") + FileShortName;
+		}
+	}
 
 	FString FilePath = ResolveConfigFilePath(FileShortName);
 

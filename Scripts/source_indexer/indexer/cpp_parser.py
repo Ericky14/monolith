@@ -12,6 +12,8 @@ from pathlib import Path
 import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 
+from .ue_preprocessor import preprocess_ue_source
+
 CPP_LANGUAGE = Language(tscpp.language())
 
 UE_MACROS = {"UCLASS", "USTRUCT", "UENUM", "UFUNCTION", "UPROPERTY", "UINTERFACE"}
@@ -53,10 +55,11 @@ class CppParser:
         """Parse a C++ file and return extracted symbols."""
         path = Path(path)
         source_bytes = path.read_bytes()
-        source_text = source_bytes.decode("utf-8", errors="replace")
+        clean_bytes = preprocess_ue_source(source_bytes)  # Strip UE macros for tree-sitter
+        source_text = source_bytes.decode("utf-8", errors="replace")  # Original for display
         source_lines = source_text.splitlines()
 
-        tree = self._parser.parse(source_bytes)
+        tree = self._parser.parse(clean_bytes)  # Parse cleaned version
         root = tree.root_node
 
         result = ParseResult(
@@ -106,8 +109,10 @@ class CppParser:
                     i += 2
                     continue
 
+            # After preprocessing, UCLASS'd classes should be clean class_specifier nodes
             if node.type in ("class_specifier", "struct_specifier", "enum_specifier"):
-                self._extract_class_or_struct_or_enum(node, source_lines, result)
+                ue_above = self._has_ue_macro_above(node, source_lines)
+                self._extract_class_or_struct_or_enum(node, source_lines, result, ue_macro=ue_above)
                 i += 1
                 continue
 
@@ -136,6 +141,20 @@ class CppParser:
                             return name
         return None
 
+    def _has_ue_macro_above(self, node, source_lines: list[str]) -> str | None:
+        """Check original source lines above this node for a stripped UE class macro."""
+        line_idx = node.start_point[0] - 1  # 0-indexed line above
+        while line_idx >= 0:
+            line = source_lines[line_idx].strip()
+            if not line:
+                line_idx -= 1
+                continue
+            for macro in ("UCLASS", "USTRUCT", "UENUM", "UINTERFACE"):
+                if line.startswith(macro + "(") or line.startswith(macro):
+                    return macro
+            break  # Non-empty, non-macro line — stop
+        return None
+
     def _extract_class_or_struct_or_enum(
         self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
     ) -> None:
@@ -152,7 +171,10 @@ class CppParser:
 
         base_classes = self._get_base_classes(node)
         docstring = self._get_docstring_above(node, source_lines, ue_macro_above=ue_macro is not None)
-        signature = node.text.decode().split("{")[0].strip() if node.text else ""
+        sig_start = node.start_point[0]
+        sig_end = node.end_point[0]
+        sig_lines = source_lines[sig_start:sig_end + 1]
+        signature = " ".join(line.strip() for line in sig_lines).split("{")[0].strip()
 
         symbol = ParsedSymbol(
             name=name, kind=kind,

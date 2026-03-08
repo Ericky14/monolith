@@ -206,7 +206,9 @@ void UMonolithUpdateSubsystem::CheckForUpdate()
 
 				if (!ZipUrl.IsEmpty())
 				{
-					Self->ShowUpdateNotification(RemoteVersion, ZipUrl);
+					FString ReleaseNotes;
+					JsonObj->TryGetStringField(TEXT("body"), ReleaseNotes);
+					Self->ShowUpdateNotification(RemoteVersion, ZipUrl, ReleaseNotes);
 				}
 				else
 				{
@@ -255,15 +257,60 @@ int32 UMonolithUpdateSubsystem::CompareVersions(const FString& Current, const FS
 	return RPatch - CPatch;
 }
 
-void UMonolithUpdateSubsystem::ShowUpdateNotification(const FString& NewVersion, const FString& ZipUrl)
+void UMonolithUpdateSubsystem::ShowUpdateNotification(const FString& NewVersion, const FString& ZipUrl, const FString& ReleaseNotes)
 {
-	FText NotifText = FText::Format(
-		NSLOCTEXT("Monolith", "UpdateAvailable", "Monolith {0} is available (current: {1})"),
-		FText::FromString(NewVersion),
-		FText::FromString(VersionInfo.Current)
-	);
+	// Log release notes so users can see what changed
+	UE_LOG(LogMonolith, Log, TEXT("===== Monolith %s Release Notes ====="), *NewVersion);
+	if (!ReleaseNotes.IsEmpty())
+	{
+		// Log each line separately for readability
+		TArray<FString> Lines;
+		ReleaseNotes.ParseIntoArrayLines(Lines);
+		for (const FString& Line : Lines)
+		{
+			UE_LOG(LogMonolith, Log, TEXT("  %s"), *Line);
+		}
+	}
+	else
+	{
+		UE_LOG(LogMonolith, Log, TEXT("  No release notes provided."));
+	}
+	UE_LOG(LogMonolith, Log, TEXT("====================================="));
 
-	FNotificationInfo Info(NotifText);
+	// Build notification text — include first few lines of release notes
+	FString NotifBody = FString::Printf(TEXT("Monolith %s is available (current: %s)"),
+		*NewVersion, *VersionInfo.Current);
+	if (!ReleaseNotes.IsEmpty())
+	{
+		// Extract first 3 non-empty lines for the notification toast
+		TArray<FString> Lines;
+		ReleaseNotes.ParseIntoArrayLines(Lines);
+		FString Preview;
+		int32 Count = 0;
+		for (const FString& Line : Lines)
+		{
+			FString Trimmed = Line.TrimStartAndEnd();
+			if (Trimmed.IsEmpty() || Trimmed.StartsWith(TEXT("#")))
+			{
+				continue;
+			}
+			if (Count > 0)
+			{
+				Preview += TEXT("\n");
+			}
+			Preview += Trimmed;
+			if (++Count >= 3)
+			{
+				break;
+			}
+		}
+		if (!Preview.IsEmpty())
+		{
+			NotifBody += TEXT("\n") + Preview;
+		}
+	}
+
+	FNotificationInfo Info(FText::FromString(NotifBody));
 	Info.bFireAndForget = false;
 	Info.ExpireDuration = 30.0f;
 	Info.bUseThrobber = false;

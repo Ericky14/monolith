@@ -37,13 +37,16 @@ bool FMonolithSourceDatabase::Open(const FString& DbPath)
 	}
 
 	Database = new FSQLiteDatabase();
-	if (!Database->Open(*DbPath, ESQLiteDatabaseOpenMode::ReadOnly))
+	if (!Database->Open(*DbPath, ESQLiteDatabaseOpenMode::ReadWrite))
 	{
 		UE_LOG(LogMonolithSource, Error, TEXT("Failed to open engine source DB: %s"), *DbPath);
 		delete Database;
 		Database = nullptr;
 		return false;
 	}
+
+	// Force DELETE journal mode — WAL breaks ReadOnly on Windows and can linger from the Python indexer
+	Database->Execute(TEXT("PRAGMA journal_mode=DELETE;"));
 
 	UE_LOG(LogMonolithSource, Log, TEXT("Engine source DB opened: %s"), *DbPath);
 	return true;

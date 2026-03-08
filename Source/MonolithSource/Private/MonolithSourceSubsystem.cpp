@@ -136,12 +136,12 @@ FString UMonolithSourceSubsystem::GetEngineSourcePath() const
 	{
 		return Settings->EngineSourcePath.Path;
 	}
-	return FPaths::EngineDir() / TEXT("Source");
+	return FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Source"));
 }
 
 FString UMonolithSourceSubsystem::GetEngineShaderPath() const
 {
-	return FPaths::EngineDir() / TEXT("Shaders");
+	return FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Shaders"));
 }
 
 FString UMonolithSourceSubsystem::FindPython() const

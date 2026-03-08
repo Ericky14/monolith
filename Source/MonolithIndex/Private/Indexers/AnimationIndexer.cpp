@@ -2,6 +2,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/BlendSpace.h"
+#include "Animation/PoseAsset.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -77,6 +78,28 @@ bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedA
 			if (!BS) continue;
 
 			IndexBlendSpace(BS, DB, BSAssetId);
+			TotalIndexed++;
+		}
+	}
+
+	// --- PoseAsset ---
+	{
+		TArray<FAssetData> Assets;
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+		Filter.ClassPaths.Add(UPoseAsset::StaticClass()->GetClassPathName());
+		Registry.GetAssets(Filter, Assets);
+
+		for (const FAssetData& AD : Assets)
+		{
+			int64 PoseAssetId = DB.GetAssetId(AD.PackageName.ToString());
+			if (PoseAssetId < 0) continue;
+
+			UPoseAsset* PA = Cast<UPoseAsset>(AD.GetAsset());
+			if (!PA) continue;
+
+			IndexPoseAsset(PA, DB, PoseAssetId);
 			TotalIndexed++;
 		}
 	}
@@ -238,6 +261,49 @@ void FAnimationIndexer::IndexBlendSpace(UBlendSpace* BlendSpace, FMonolithIndexD
 	Node.NodeClass = TEXT("UBlendSpace");
 	Node.Properties = PropsStr;
 	DB.InsertNode(Node);
+}
+
+void FAnimationIndexer::IndexPoseAsset(UPoseAsset* PoseAsset, FMonolithIndexDatabase& DB, int64 AssetId)
+{
+	if (!PoseAsset) return;
+
+	auto Props = MakeShared<FJsonObject>();
+
+	if (PoseAsset->GetSkeleton())
+	{
+		Props->SetStringField(TEXT("skeleton"), PoseAsset->GetSkeleton()->GetPathName());
+	}
+
+	Props->SetNumberField(TEXT("num_poses"), PoseAsset->GetNumPoses());
+	Props->SetNumberField(TEXT("num_tracks"), PoseAsset->GetNumTracks());
+	Props->SetNumberField(TEXT("num_curves"), PoseAsset->GetNumCurves());
+	Props->SetBoolField(TEXT("is_additive"), PoseAsset->IsValidAdditive());
+
+	if (!PoseAsset->RetargetSource.IsNone())
+	{
+		Props->SetStringField(TEXT("retarget_source"), PoseAsset->RetargetSource.ToString());
+	}
+
+	// Pose names (using GetPoseFNames — GetPoseNames is deprecated since 5.3)
+	const TArray<FName>& PoseNames = PoseAsset->GetPoseFNames();
+	TArray<TSharedPtr<FJsonValue>> PoseNameArray;
+	for (const FName& Name : PoseNames)
+	{
+		PoseNameArray.Add(MakeShared<FJsonValueString>(Name.ToString()));
+	}
+	Props->SetArrayField(TEXT("pose_names"), PoseNameArray);
+
+	FString PropsStr;
+	auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&PropsStr);
+	FJsonSerializer::Serialize(Props, *Writer, true);
+
+	FIndexedNode PoseNode;
+	PoseNode.AssetId = AssetId;
+	PoseNode.NodeName = PoseAsset->GetName();
+	PoseNode.NodeClass = TEXT("PoseAsset");
+	PoseNode.NodeType = TEXT("PoseAsset");
+	PoseNode.Properties = PropsStr;
+	DB.InsertNode(PoseNode);
 }
 
 FString FAnimationIndexer::NotifiesToJson(const TArray<FAnimNotifyEvent>& Notifies)

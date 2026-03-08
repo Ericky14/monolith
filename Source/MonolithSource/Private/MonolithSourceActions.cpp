@@ -143,65 +143,150 @@ FString FMonolithSourceActions::ExtractMembers(const FString& FilePath, int32 St
 
 	FString Result;
 	int32 BraceDepth = 0;
-	bool bInBody = false;
+	bool bInBlockComment = false;
+	int32 SignatureLineIdx = -1; // Track pending function signature for Allman-style bodies
 
 	for (int32 i = StartLine - 1; i < EndLine; ++i)
 	{
 		const FString& Line = Lines[i];
 		FString Stripped = Line.TrimStartAndEnd();
 
-		if (bInBody)
+		// --- Count braces, respecting comments and string/char literals ---
+		int32 PrevDepth = BraceDepth;
+		for (int32 c = 0; c < Stripped.Len(); ++c)
 		{
-			for (TCHAR Ch : Stripped)
+			TCHAR Ch = Stripped[c];
+			TCHAR Next = (c + 1 < Stripped.Len()) ? Stripped[c + 1] : 0;
+
+			if (bInBlockComment)
 			{
-				if (Ch == TEXT('{')) BraceDepth++;
-				else if (Ch == TEXT('}')) BraceDepth--;
+				if (Ch == TEXT('*') && Next == TEXT('/'))
+				{
+					bInBlockComment = false;
+					c++; // skip '/'
+				}
+				continue;
 			}
-			if (BraceDepth <= 0)
+
+			// Line comment — skip rest of line
+			if (Ch == TEXT('/') && Next == TEXT('/')) break;
+
+			// Block comment start
+			if (Ch == TEXT('/') && Next == TEXT('*'))
 			{
-				bInBody = false;
-				BraceDepth = 0;
+				bInBlockComment = true;
+				c++; // skip '*'
+				continue;
+			}
+
+			// String literal — skip to closing quote
+			if (Ch == TEXT('"'))
+			{
+				for (++c; c < Stripped.Len(); ++c)
+				{
+					if (Stripped[c] == TEXT('\\')) { c++; }
+					else if (Stripped[c] == TEXT('"')) break;
+				}
+				continue;
+			}
+
+			// Char literal — skip to closing quote
+			if (Ch == TEXT('\''))
+			{
+				for (++c; c < Stripped.Len(); ++c)
+				{
+					if (Stripped[c] == TEXT('\\')) { c++; }
+					else if (Stripped[c] == TEXT('\'')) break;
+				}
+				continue;
+			}
+
+			if (Ch == TEXT('{')) BraceDepth++;
+			else if (Ch == TEXT('}')) BraceDepth--;
+		}
+
+		// --- Depth >= 2 at start OR transitioning 1→2+: inside function body ---
+		if (PrevDepth >= 2)
+		{
+			// Still inside a function body — skip
+			continue;
+		}
+
+		if (PrevDepth <= 1 && BraceDepth >= 2)
+		{
+			// Transitioning into a function body on this line
+			if (SignatureLineIdx >= 0)
+			{
+				// Allman style: signature was on a previous line, emit with annotation
+				Result += FString::Printf(TEXT("%5d | %s  // [body omitted]\n"), SignatureLineIdx + 1, *Lines[SignatureLineIdx]);
+				SignatureLineIdx = -1;
+			}
+			else if (Stripped != TEXT("{"))
+			{
+				// K&R style: brace on the same line as the signature
+				FString SigPart = Stripped;
+				int32 BraceIdx;
+				if (SigPart.FindChar(TEXT('{'), BraceIdx))
+				{
+					SigPart = SigPart.Left(BraceIdx).TrimEnd();
+				}
+				if (!SigPart.IsEmpty())
+				{
+					Result += FString::Printf(TEXT("%5d | %s  // [body omitted]\n"), i + 1, *SigPart);
+				}
 			}
 			continue;
 		}
 
-		// Keep access specifiers, UE macros, declarations, comments, braces
+		// --- Depth 0-1: class-level declarations ---
+
+		// Keep class-level braces (class opening/closing)
+		if (Stripped == TEXT("{") || Stripped == TEXT("}"))
+		{
+			if (SignatureLineIdx >= 0)
+			{
+				Result += FString::Printf(TEXT("%5d | %s\n"), SignatureLineIdx + 1, *Lines[SignatureLineIdx]);
+				SignatureLineIdx = -1;
+			}
+			Result += FString::Printf(TEXT("%5d | %s\n"), i + 1, *Line);
+			continue;
+		}
+
 		bool bKeep = Stripped.StartsWith(TEXT("public:")) || Stripped.StartsWith(TEXT("protected:")) || Stripped.StartsWith(TEXT("private:"))
 			|| Stripped.StartsWith(TEXT("GENERATED")) || Stripped.StartsWith(TEXT("UFUNCTION")) || Stripped.StartsWith(TEXT("UPROPERTY"))
 			|| Stripped.StartsWith(TEXT("UENUM")) || Stripped.StartsWith(TEXT("USTRUCT"))
 			|| Stripped.StartsWith(TEXT("//")) || Stripped.StartsWith(TEXT("/**")) || Stripped.StartsWith(TEXT("*")) || Stripped.StartsWith(TEXT("*/"))
-			|| Stripped.IsEmpty() || Stripped == TEXT("{") || Stripped == TEXT("}")
+			|| Stripped.IsEmpty()
 			|| Stripped.Contains(TEXT(";"));
 
 		if (bKeep)
 		{
+			if (SignatureLineIdx >= 0)
+			{
+				Result += FString::Printf(TEXT("%5d | %s\n"), SignatureLineIdx + 1, *Lines[SignatureLineIdx]);
+				SignatureLineIdx = -1;
+			}
 			Result += FString::Printf(TEXT("%5d | %s\n"), i + 1, *Line);
 		}
-		else if (Stripped.Contains(TEXT("{")))
+		else
 		{
-			// Function with inline body — show signature, skip body
-			FString SigPart = Stripped;
-			int32 BraceIdx;
-			if (SigPart.FindChar(TEXT('{'), BraceIdx))
+			// Unrecognized line at class level — could be a function signature (Allman style)
+			// Remember it; if next line opens a body (depth→2), emit with [body omitted]
+			if (SignatureLineIdx >= 0)
 			{
-				SigPart = SigPart.Left(BraceIdx).TrimEnd();
+				// Previous pending signature wasn't followed by a body — emit it normally
+				Result += FString::Printf(TEXT("%5d | %s\n"), SignatureLineIdx + 1, *Lines[SignatureLineIdx]);
 			}
-			if (!SigPart.IsEmpty())
-			{
-				Result += FString::Printf(TEXT("%5d | %s;  // [inline body omitted]\n"), i + 1, *SigPart);
-			}
-			BraceDepth = 0;
-			for (TCHAR Ch : Stripped)
-			{
-				if (Ch == TEXT('{')) BraceDepth++;
-				else if (Ch == TEXT('}')) BraceDepth--;
-			}
-			if (BraceDepth > 0)
-			{
-				bInBody = true;
-			}
+			SignatureLineIdx = i;
 		}
 	}
+
+	// Flush any remaining pending signature
+	if (SignatureLineIdx >= 0)
+	{
+		Result += FString::Printf(TEXT("%5d | %s\n"), SignatureLineIdx + 1, *Lines[SignatureLineIdx]);
+	}
+
 	return Result;
 }
 
@@ -403,7 +488,7 @@ FMonolithActionResult FMonolithSourceActions::HandleFindCallers(const TSharedPtr
 		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
 	}
 
-	FString Function = Params->GetStringField(TEXT("function"));
+	FString Function = Params->GetStringField(TEXT("symbol"));
 	int32 Limit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 50;
 
 	TArray<FMonolithSourceSymbol> Symbols = DB->GetSymbolsByName(Function, TEXT("function"));
@@ -464,7 +549,7 @@ FMonolithActionResult FMonolithSourceActions::HandleFindCallees(const TSharedPtr
 		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
 	}
 
-	FString Function = Params->GetStringField(TEXT("function"));
+	FString Function = Params->GetStringField(TEXT("symbol"));
 	int32 Limit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 50;
 
 	TArray<FMonolithSourceSymbol> Symbols = DB->GetSymbolsByName(Function, TEXT("function"));
@@ -647,7 +732,7 @@ FMonolithActionResult FMonolithSourceActions::HandleGetClassHierarchy(const TSha
 		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
 	}
 
-	FString ClassName = Params->GetStringField(TEXT("class_name"));
+	FString ClassName = Params->HasField(TEXT("symbol")) ? Params->GetStringField(TEXT("symbol")) : Params->GetStringField(TEXT("class_name"));
 	FString Direction = Params->HasField(TEXT("direction")) ? Params->GetStringField(TEXT("direction")) : TEXT("both");
 	int32 Depth = Params->HasField(TEXT("depth")) ? static_cast<int32>(Params->GetNumberField(TEXT("depth"))) : 1;
 
@@ -664,6 +749,26 @@ FMonolithActionResult FMonolithSourceActions::HandleGetClassHierarchy(const TSha
 	if (Symbols.Num() == 0)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("No class or struct found matching '%s'."), *ClassName));
+	}
+
+	// Filter out forward declarations — prefer real definitions
+	bool bHasDefinition = false;
+	for (const auto& S : Symbols)
+	{
+		if (S.LineEnd - S.LineStart > 1) { bHasDefinition = true; break; }
+	}
+	if (bHasDefinition)
+	{
+		TArray<FMonolithSourceSymbol> Filtered;
+		for (const auto& S : Symbols)
+		{
+			FString SFilePath = DB->GetFilePath(S.FileId);
+			if (!IsForwardDeclaration(SFilePath, S.LineStart, S.LineEnd))
+			{
+				Filtered.Add(S);
+			}
+		}
+		if (Filtered.Num() > 0) Symbols = Filtered;
 	}
 
 	const FMonolithSourceSymbol& Sym = Symbols[0];
@@ -842,7 +947,7 @@ FMonolithActionResult FMonolithSourceActions::HandleReadFile(const TSharedPtr<FJ
 		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
 	}
 
-	FString Path = Params->GetStringField(TEXT("path"));
+	FString Path = Params->GetStringField(TEXT("file_path"));
 	int32 StartLine = Params->HasField(TEXT("start_line")) ? static_cast<int32>(Params->GetNumberField(TEXT("start_line"))) : 1;
 	int32 EndLine = Params->HasField(TEXT("end_line")) ? static_cast<int32>(Params->GetNumberField(TEXT("end_line"))) : 0;
 
@@ -856,16 +961,20 @@ FMonolithActionResult FMonolithSourceActions::HandleReadFile(const TSharedPtr<FJ
 	}
 	else
 	{
+		// Normalize separators to backslashes to match DB-stored paths
+		FString NormalizedPath = Path;
+		NormalizedPath.ReplaceInline(TEXT("/"), TEXT("\\"));
+
 		// Try DB lookup by exact path
-		TOptional<FMonolithSourceFile> F = DB->FindFileByPath(Path);
+		TOptional<FMonolithSourceFile> F = DB->FindFileByPath(NormalizedPath);
 		if (F.IsSet())
 		{
 			ResolvedPath = F->Path;
 		}
 		else
 		{
-			// Try suffix match
-			F = DB->FindFileBySuffix(Path);
+			// Try suffix match (e.g. "Runtime\Engine\Classes\GameFramework\Actor.h")
+			F = DB->FindFileBySuffix(NormalizedPath);
 			if (F.IsSet())
 			{
 				ResolvedPath = F->Path;

@@ -6,12 +6,18 @@
 
 bool FCppIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId)
 {
-	// Collect .h and .cpp files from the project Source directory
+	// Collect .h and .cpp files from both Source/ and Plugins/ directories
 	TArray<FString> SourceFiles;
 	FString ProjectSourceDir = FPaths::ProjectDir() / TEXT("Source");
+	FString ProjectPluginsDir = FPaths::ProjectDir() / TEXT("Plugins");
 
-	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectSourceDir, TEXT("*.h"), true, false);
-	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectSourceDir, TEXT("*.cpp"), true, false);
+	// bClearFileNames must be false on subsequent calls to append rather than overwrite
+	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectSourceDir, TEXT("*.h"), true, false, true);
+	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectSourceDir, TEXT("*.cpp"), true, false, false);
+	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectPluginsDir, TEXT("*.h"), true, false, false);
+	IFileManager::Get().FindFilesRecursive(SourceFiles, *ProjectPluginsDir, TEXT("*.cpp"), true, false, false);
+
+	UE_LOG(LogMonolithIndex, Log, TEXT("CppIndexer: found %d source files (Source/ + Plugins/)"), SourceFiles.Num());
 
 	int32 TotalSymbols = 0;
 

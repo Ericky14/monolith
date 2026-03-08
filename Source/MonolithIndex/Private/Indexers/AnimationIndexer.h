@@ -3,7 +3,7 @@
 #include "MonolithIndexer.h"
 
 /**
- * Indexes animation assets: AnimSequence, AnimMontage, and BlendSpace.
+ * Indexes animation assets: AnimSequence, AnimMontage, BlendSpace, and PoseAsset.
  * Runs as a post-processing step on the game thread (requires asset loading).
  * Uses sentinel class "__Animations__" for dispatch.
  */
@@ -27,6 +27,9 @@ private:
 
 	/** Index a single UBlendSpace */
 	void IndexBlendSpace(class UBlendSpace* BlendSpace, FMonolithIndexDatabase& DB, int64 AssetId);
+
+	/** Index a single UPoseAsset */
+	void IndexPoseAsset(class UPoseAsset* PoseAsset, FMonolithIndexDatabase& DB, int64 AssetId);
 
 	/** Serialize anim notifies to a JSON array string */
 	static FString NotifiesToJson(const TArray<struct FAnimNotifyEvent>& Notifies);

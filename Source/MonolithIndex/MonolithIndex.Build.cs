@@ -28,7 +28,8 @@ public class MonolithIndex : ModuleRules
 			"EditorSubsystem",
 			"AnimationCore",
 			"Niagara",
-			"GameplayTags"
+			"GameplayTags",
+			"EnhancedInput"
 		});
 	}
 }

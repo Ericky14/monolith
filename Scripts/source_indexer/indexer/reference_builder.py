@@ -9,6 +9,7 @@ from pathlib import Path
 from tree_sitter import Node, Parser
 
 from .cpp_parser import CPP_LANGUAGE
+from .ue_preprocessor import preprocess_ue_source
 from ..db.queries import insert_reference
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,8 @@ class ReferenceBuilder:
         except OSError:
             return 0
 
-        tree = self._parser.parse(source_bytes)
+        clean_bytes = preprocess_ue_source(source_bytes)
+        tree = self._parser.parse(clean_bytes)
 
         count = 0
         func_nodes: set[int] = set()

@@ -47,6 +47,64 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Indexing", meta=(RelativePath))
 	FDirectoryPath EngineSourcePath;
 
+	// --- Indexer Toggles ---
+
+	/** Enable Blueprint deep indexing (graphs, nodes, variables) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexBlueprints = true;
+
+	/** Enable Material deep indexing (expressions, parameters) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexMaterials = true;
+
+	/** Enable generic asset metadata indexing (mesh stats, texture info, audio) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexGenericAssets = true;
+
+	/** Enable Niagara system indexing (emitters, renderers, sim targets) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexNiagara = true;
+
+	/** Enable UserDefinedEnum indexing (enum entries, values) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexUserDefinedEnums = true;
+
+	/** Enable UserDefinedStruct indexing (fields, types, defaults) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexUserDefinedStructs = true;
+
+	/** Enable InputAction indexing (value types, triggers, modifiers) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Deep Indexers")
+	bool bIndexInputActions = true;
+
+	/** Enable dependency graph indexing */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexDependencies = true;
+
+	/** Enable level/world actor indexing */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexLevels = true;
+
+	/** Enable DataTable row indexing */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexDataTables = true;
+
+	/** Enable config/INI indexing */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexConfigs = true;
+
+	/** Enable C++ symbol indexing (UCLASS, USTRUCT, etc.) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexCppSymbols = true;
+
+	/** Enable animation asset indexing (sequences, montages, blend spaces) */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexAnimations = true;
+
+	/** Enable gameplay tag indexing */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Post-Pass Indexers")
+	bool bIndexGameplayTags = true;
+
 	// --- Module Toggles ---
 
 	UPROPERTY(config, EditAnywhere, Category="Modules")

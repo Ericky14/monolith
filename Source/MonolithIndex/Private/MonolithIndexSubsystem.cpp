@@ -1,6 +1,7 @@
 #include "MonolithIndexSubsystem.h"
 #include "MonolithIndexDatabase.h"
-#include "MonolithIndexNotification.h"
+#include "MonolithSettings.h"
+#include "Misc/AsyncTaskNotification.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Misc/Paths.h"
@@ -18,6 +19,10 @@
 #include "Indexers/GameplayTagIndexer.h"
 #include "Indexers/CppIndexer.h"
 #include "Indexers/AnimationIndexer.h"
+#include "Indexers/NiagaraIndexer.h"
+#include "Indexers/UserDefinedEnumIndexer.h"
+#include "Indexers/UserDefinedStructIndexer.h"
+#include "Indexers/InputActionIndexer.h"
 
 void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -50,17 +55,12 @@ void UMonolithIndexSubsystem::Deinitialize()
 		if (IndexingThread)
 		{
 			IndexingThread->WaitForCompletion();
-			delete IndexingThread;
-			IndexingThread = nullptr;
+			IndexingThread.Reset();
 		}
 		IndexingTaskPtr.Reset();
 	}
 
-	if (Notification)
-	{
-		delete Notification;
-		Notification = nullptr;
-	}
+	TaskNotification.Reset();
 
 	if (Database.IsValid())
 	{
@@ -86,16 +86,38 @@ void UMonolithIndexSubsystem::RegisterIndexer(TSharedPtr<IMonolithIndexer> Index
 
 void UMonolithIndexSubsystem::RegisterDefaultIndexers()
 {
-	RegisterIndexer(MakeShared<FBlueprintIndexer>());
-	RegisterIndexer(MakeShared<FMaterialIndexer>());
-	RegisterIndexer(MakeShared<FGenericAssetIndexer>());
-	RegisterIndexer(MakeShared<FDependencyIndexer>());
-	RegisterIndexer(MakeShared<FLevelIndexer>());
-	RegisterIndexer(MakeShared<FDataTableIndexer>());
-	RegisterIndexer(MakeShared<FGameplayTagIndexer>());
-	RegisterIndexer(MakeShared<FConfigIndexer>());
-	RegisterIndexer(MakeShared<FCppIndexer>());
-	RegisterIndexer(MakeShared<FAnimationIndexer>());
+	const UMonolithSettings* Settings = GetDefault<UMonolithSettings>();
+
+	if (Settings->bIndexBlueprints)
+		RegisterIndexer(MakeShared<FBlueprintIndexer>());
+	if (Settings->bIndexMaterials)
+		RegisterIndexer(MakeShared<FMaterialIndexer>());
+	if (Settings->bIndexGenericAssets)
+		RegisterIndexer(MakeShared<FGenericAssetIndexer>());
+	if (Settings->bIndexDependencies)
+		RegisterIndexer(MakeShared<FDependencyIndexer>());
+	if (Settings->bIndexLevels)
+		RegisterIndexer(MakeShared<FLevelIndexer>());
+	if (Settings->bIndexDataTables)
+		RegisterIndexer(MakeShared<FDataTableIndexer>());
+	if (Settings->bIndexGameplayTags)
+		RegisterIndexer(MakeShared<FGameplayTagIndexer>());
+	if (Settings->bIndexConfigs)
+		RegisterIndexer(MakeShared<FConfigIndexer>());
+	if (Settings->bIndexCppSymbols)
+		RegisterIndexer(MakeShared<FCppIndexer>());
+	if (Settings->bIndexAnimations)
+		RegisterIndexer(MakeShared<FAnimationIndexer>());
+	if (Settings->bIndexNiagara)
+		RegisterIndexer(MakeShared<FNiagaraIndexer>());
+	if (Settings->bIndexUserDefinedEnums)
+		RegisterIndexer(MakeShared<FUserDefinedEnumIndexer>());
+	if (Settings->bIndexUserDefinedStructs)
+		RegisterIndexer(MakeShared<FUserDefinedStructIndexer>());
+	if (Settings->bIndexInputActions)
+		RegisterIndexer(MakeShared<FInputActionIndexer>());
+
+	UE_LOG(LogMonolithIndex, Log, TEXT("Registered %d indexers"), Indexers.Num());
 }
 
 void UMonolithIndexSubsystem::StartFullIndex()
@@ -112,26 +134,21 @@ void UMonolithIndexSubsystem::StartFullIndex()
 	Database->ResetDatabase();
 
 	// Show notification
-	Notification = new FMonolithIndexNotification();
-	Notification->Start();
-
-	// Bind progress delegate
-	OnProgress.AddLambda([this](int32 Current, int32 Total)
-	{
-		if (Notification)
-		{
-			Notification->UpdateProgress(Current, Total);
-		}
-	});
+	FAsyncTaskNotificationConfig NotifConfig;
+	NotifConfig.TitleText = FText::FromString(TEXT("Monolith"));
+	NotifConfig.ProgressText = FText::FromString(TEXT("Indexing project..."));
+	NotifConfig.bCanCancel = true;
+	NotifConfig.LogCategory = &LogMonolithIndex;
+	TaskNotification = MakeUnique<FAsyncTaskNotification>(NotifConfig);
 
 	// Launch background thread
 	IndexingTaskPtr = MakeUnique<FIndexingTask>(this);
-	IndexingThread = FRunnableThread::Create(
+	IndexingThread.Reset(FRunnableThread::Create(
 		IndexingTaskPtr.Get(),
 		TEXT("MonolithIndexing"),
 		0,
 		TPri_BelowNormal
-	);
+	));
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("Background indexing started"));
 }
@@ -211,6 +228,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	FPlatformProcess::ReturnSynchEventToPool(RegistryEvent);
 
 	TotalAssets = AllAssets.Num();
+	Owner->IndexingStatusMessage = FString::Printf(TEXT("Scanning %d assets..."), TotalAssets.Load());
 	UE_LOG(LogMonolithIndex, Log, TEXT("Indexing %d assets..."), TotalAssets.Load());
 
 	FMonolithIndexDatabase* DB = Owner->Database.Get();
@@ -238,9 +256,18 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	};
 	TArray<FDeepIndexEntry> DeepIndexQueue;
 
+	TMap<FString, int32> ClassDistribution;
+	TMap<FString, int32> QueuedClassDistribution;
+
 	for (int32 i = 0; i < AllAssets.Num(); ++i)
 	{
 		if (bShouldStop) break;
+
+		if (Owner->TaskNotification && Owner->TaskNotification->GetPromptAction() == EAsyncTaskNotificationPromptAction::Cancel)
+		{
+			bShouldStop = true;
+			break;
+		}
 
 		const FAssetData& AssetData = AllAssets[i];
 		CurrentIndex = i + 1;
@@ -250,6 +277,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		IndexedAsset.PackagePath = AssetData.PackageName.ToString();
 		IndexedAsset.AssetName = AssetData.AssetName.ToString();
 		IndexedAsset.AssetClass = AssetData.AssetClassPath.GetAssetName().ToString();
+		ClassDistribution.FindOrAdd(IndexedAsset.AssetClass)++;
 
 		int64 AssetId = DB->InsertAsset(IndexedAsset);
 		if (AssetId < 0)
@@ -263,6 +291,7 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		if (FoundIndexer && FoundIndexer->IsValid())
 		{
 			DeepIndexQueue.Add({ AssetData, AssetId, *FoundIndexer });
+			QueuedClassDistribution.FindOrAdd(IndexedAsset.AssetClass)++;
 		}
 
 		Indexed++;
@@ -276,11 +305,34 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			UE_LOG(LogMonolithIndex, Log, TEXT("Indexed %d / %d assets (%d errors)"),
 				Indexed, TotalAssets.Load(), Errors);
 
+			if (Owner->TaskNotification)
+			{
+				Owner->TaskNotification->SetProgressText(FText::FromString(
+					FString::Printf(TEXT("Indexing %d / %d assets..."), CurrentIndex.Load(), TotalAssets.Load())));
+			}
+
 			AsyncTask(ENamedThreads::GameThread, [this]()
 			{
 				Owner->OnProgress.Broadcast(CurrentIndex.Load(), TotalAssets.Load());
 			});
 		}
+	}
+
+	// Log class distribution summary
+	UE_LOG(LogMonolithIndex, Log, TEXT("Asset class distribution (top 20):"));
+	ClassDistribution.ValueSort([](int32 A, int32 B) { return A > B; });
+	int32 Shown = 0;
+	for (const auto& Pair : ClassDistribution)
+	{
+		if (Shown++ >= 20) break;
+		UE_LOG(LogMonolithIndex, Log, TEXT("  %s: %d"), *Pair.Key, Pair.Value);
+	}
+
+	UE_LOG(LogMonolithIndex, Log, TEXT("Deep index queue: %d assets across %d classes"),
+		DeepIndexQueue.Num(), QueuedClassDistribution.Num());
+	for (const auto& Pair : QueuedClassDistribution)
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("  Queued %s: %d"), *Pair.Key, Pair.Value);
 	}
 
 	DB->CommitTransaction();
@@ -292,6 +344,8 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	// Assets must be loaded on the game thread to avoid texture compiler crashes.
 	// We process in small batches, yielding when the frame budget is exceeded.
 	// ============================================================
+	Owner->IndexingStatusMessage = FString::Printf(TEXT("Deep indexing %d assets..."), DeepIndexQueue.Num());
+
 	if (!bShouldStop && DeepIndexQueue.Num() > 0)
 	{
 		UE_LOG(LogMonolithIndex, Log, TEXT("Starting deep indexing pass for %d assets..."), DeepIndexQueue.Num());
@@ -334,11 +388,17 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 						else
 						{
 							DeepErrors++;
+							UE_LOG(LogMonolithIndex, Warning, TEXT("Deep indexer '%s' failed for: %s"),
+								*Entry.Indexer->GetName(),
+								*Entry.AssetData.PackageName.ToString());
 						}
 					}
 					else
 					{
 						DeepErrors++;
+						UE_LOG(LogMonolithIndex, Warning, TEXT("Failed to load asset for deep indexing: %s (class: %s)"),
+							*Entry.AssetData.PackageName.ToString(),
+							*Entry.AssetData.AssetClassPath.GetAssetName().ToString());
 					}
 
 					// If we've exceeded our frame budget, commit what we have and yield
@@ -362,12 +422,19 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			CurrentIndex = Indexed + BatchEnd;
 			TotalAssets = Indexed + TotalDeep;
 
+			if (Owner->TaskNotification)
+			{
+				Owner->TaskNotification->SetProgressText(FText::FromString(
+					FString::Printf(TEXT("Deep indexing %d / %d assets..."), BatchEnd, TotalDeep)));
+			}
+
 			AsyncTask(ENamedThreads::GameThread, [this]()
 			{
 				Owner->OnProgress.Broadcast(CurrentIndex.Load(), TotalAssets.Load());
 			});
 
-			UE_LOG(LogMonolithIndex, Verbose, TEXT("Deep indexed %d / %d assets"), BatchEnd, TotalDeep);
+			UE_LOG(LogMonolithIndex, Log, TEXT("Deep indexed %d / %d assets (%d ok, %d errors)"),
+				BatchEnd, TotalDeep, DeepIndexed.Load(), DeepErrors.Load());
 		}
 
 		UE_LOG(LogMonolithIndex, Log, TEXT("Deep indexing complete: %d indexed, %d errors"),
@@ -375,9 +442,11 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 	}
 
 	// Run dependency indexer on game thread (Asset Registry requires it)
+	Owner->IndexingStatusMessage = TEXT("Analyzing dependencies...");
 	TSharedPtr<IMonolithIndexer>* DepIndexer = Owner->ClassToIndexer.Find(TEXT("__Dependencies__"));
 	if (DepIndexer && DepIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running dependency indexer..."));
 		TSharedPtr<IMonolithIndexer> DepIndexerCopy = *DepIndexer;
 		FEvent* DepEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -391,12 +460,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		});
 		DepEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(DepEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("Dependency indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run level indexer on game thread (asset loading requires it)
+	Owner->IndexingStatusMessage = TEXT("Indexing level actors...");
 	TSharedPtr<IMonolithIndexer>* LevelIndexer = Owner->ClassToIndexer.Find(TEXT("__Levels__"));
 	if (LevelIndexer && LevelIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running level indexer..."));
 		TSharedPtr<IMonolithIndexer> LevelIndexerCopy = *LevelIndexer;
 		FEvent* LevelEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -410,12 +482,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		});
 		LevelEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LevelEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("Level indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run DataTable indexer on game thread (requires asset loading)
+	Owner->IndexingStatusMessage = TEXT("Indexing DataTable rows...");
 	TSharedPtr<IMonolithIndexer>* DTIndexer = Owner->ClassToIndexer.Find(TEXT("__DataTables__"));
 	if (DTIndexer && DTIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running DataTable indexer..."));
 		TSharedPtr<IMonolithIndexer> DTIndexerCopy = *DTIndexer;
 		FEvent* DTEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -429,34 +504,43 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		});
 		DTEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(DTEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("DataTable indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run config indexer (file I/O only, no game thread needed)
+	Owner->IndexingStatusMessage = TEXT("Indexing config files...");
 	TSharedPtr<IMonolithIndexer>* CfgIndexer = Owner->ClassToIndexer.Find(TEXT("__Configs__"));
 	if (CfgIndexer && CfgIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running config indexer..."));
 		DB->BeginTransaction();
 		FAssetData DummyCfgData;
 		(*CfgIndexer)->IndexAsset(DummyCfgData, nullptr, *DB, 0);
 		DB->CommitTransaction();
+		UE_LOG(LogMonolithIndex, Log, TEXT("Config indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run C++ symbol indexer (file I/O only, no game thread needed)
+	Owner->IndexingStatusMessage = TEXT("Indexing C++ symbols...");
 	TSharedPtr<IMonolithIndexer>* CppIndexer = Owner->ClassToIndexer.Find(TEXT("__CppSymbols__"));
 	if (CppIndexer && CppIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running C++ symbol indexer..."));
 		DB->BeginTransaction();
 		FAssetData DummyCppData;
 		(*CppIndexer)->IndexAsset(DummyCppData, nullptr, *DB, 0);
 		DB->CommitTransaction();
+		UE_LOG(LogMonolithIndex, Log, TEXT("C++ symbol indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run animation indexer on game thread (asset loading requires it)
+	Owner->IndexingStatusMessage = TEXT("Indexing animations...");
 	TSharedPtr<IMonolithIndexer>* AnimIndexer = Owner->ClassToIndexer.Find(TEXT("__Animations__"));
 	if (AnimIndexer && AnimIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running animation indexer..."));
 		TSharedPtr<IMonolithIndexer> AnimIndexerCopy = *AnimIndexer;
 		FEvent* AnimEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -470,12 +554,15 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		});
 		AnimEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(AnimEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("Animation indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Run gameplay tag indexer on game thread (GameplayTagsManager requires it)
+	Owner->IndexingStatusMessage = TEXT("Indexing gameplay tags...");
 	TSharedPtr<IMonolithIndexer>* TagIndexer = Owner->ClassToIndexer.Find(TEXT("__GameplayTags__"));
 	if (TagIndexer && TagIndexer->IsValid())
 	{
+		double SentinelStart = FPlatformTime::Seconds();
 		UE_LOG(LogMonolithIndex, Log, TEXT("Running gameplay tag indexer..."));
 		TSharedPtr<IMonolithIndexer> TagIndexerCopy = *TagIndexer;
 		FEvent* TagEvent = FPlatformProcess::GetSynchEventFromPool(true);
@@ -489,6 +576,29 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		});
 		TagEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(TagEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("Gameplay tag indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
+	}
+
+	// Run Niagara indexer on game thread (requires asset loading)
+	Owner->IndexingStatusMessage = TEXT("Indexing Niagara systems...");
+	TSharedPtr<IMonolithIndexer>* NiagaraIndexerPtr = Owner->ClassToIndexer.Find(TEXT("__Niagara__"));
+	if (NiagaraIndexerPtr && NiagaraIndexerPtr->IsValid())
+	{
+		double SentinelStart = FPlatformTime::Seconds();
+		UE_LOG(LogMonolithIndex, Log, TEXT("Running Niagara indexer..."));
+		TSharedPtr<IMonolithIndexer> NiagaraIndexerCopy = *NiagaraIndexerPtr;
+		FEvent* NiagaraEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [DB, NiagaraIndexerCopy, NiagaraEvent]()
+		{
+			DB->BeginTransaction();
+			FAssetData DummyData;
+			NiagaraIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
+			DB->CommitTransaction();
+			NiagaraEvent->Trigger();
+		});
+		NiagaraEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(NiagaraEvent);
+		UE_LOG(LogMonolithIndex, Log, TEXT("Niagara indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
 	// Write index timestamp to meta (only if not cancelled)
@@ -508,28 +618,23 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 void UMonolithIndexSubsystem::OnIndexingFinished(bool bSuccess)
 {
 	bIsIndexing = false;
+	IndexingStatusMessage.Empty();
 
 	if (IndexingThread)
 	{
 		IndexingThread->WaitForCompletion();
-		delete IndexingThread;
-		IndexingThread = nullptr;
+		IndexingThread.Reset();
 	}
 
 	IndexingTaskPtr.Reset();
 
-	// Dismiss notification
-	if (Notification)
+	if (TaskNotification)
 	{
-		Notification->Finish(bSuccess);
-		// Clean up after fade
-		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-			[this](float) -> bool
-			{
-				delete Notification;
-				Notification = nullptr;
-				return false;
-			}), 3.0f);
+		TaskNotification->SetComplete(
+			FText::FromString(TEXT("Monolith")),
+			FText::FromString(bSuccess ? TEXT("Project indexing complete") : TEXT("Project indexing failed")),
+			bSuccess);
+		TaskNotification.Reset();
 	}
 
 	OnComplete.Broadcast(bSuccess);

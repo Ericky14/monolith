@@ -472,15 +472,38 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 				TEXT("Missing 'action' in arguments"));
 		}
 
-		// Extract nested params if present
+		// Collect top-level fields (excluding reserved keys) — MCP clients may
+		// place optional params like members_only alongside "action" rather than
+		// nesting them inside "params".
+		TSharedPtr<FJsonObject> TopLevelExtras = MakeShared<FJsonObject>();
+		for (const auto& Pair : Arguments->Values)
+		{
+			if (Pair.Key != TEXT("action") && Pair.Key != TEXT("params"))
+			{
+				TopLevelExtras->SetField(Pair.Key, Pair.Value);
+			}
+		}
+
+		// Extract nested params if present, then merge in any top-level extras
 		const TSharedPtr<FJsonObject>* NestedParams = nullptr;
 		if (Arguments->TryGetObjectField(TEXT("params"), NestedParams) && NestedParams)
 		{
-			Arguments = *NestedParams;
+			Arguments = MakeShared<FJsonObject>();
+			// Start with top-level extras (lower priority)
+			for (const auto& Pair : TopLevelExtras->Values)
+			{
+				Arguments->SetField(Pair.Key, Pair.Value);
+			}
+			// Overlay nested params (higher priority)
+			for (const auto& Pair : (*NestedParams)->Values)
+			{
+				Arguments->SetField(Pair.Key, Pair.Value);
+			}
 		}
 		else
 		{
-			Arguments = MakeShared<FJsonObject>();
+			// No nested "params" — use top-level fields as params directly
+			Arguments = TopLevelExtras;
 		}
 	}
 	else

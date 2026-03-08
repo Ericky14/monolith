@@ -30,6 +30,10 @@ None! All minor bugs resolved.
 - [ ] **SSE streaming** — DEFERRED. `MonolithHttpServer.cpp` SSE endpoint returns a single event and closes. Comment: "Full SSE streaming will be implemented when we need server-initiated notifications."
   - **File:** `Source/MonolithCore/Private/MonolithHttpServer.cpp` (~line 232)
 
+- [x] **Python indexer: capture full class/struct definitions** — FIXED (2026-03-08). Added UE macro preprocessor that strips UCLASS/USTRUCT/UENUM/UINTERFACE, *_API, GENERATED_BODY() before tree-sitter parsing. 62,059 definitions now captured (was near-zero).
+
+- [x] **Source index: ancestor traversal** — FIXED (2026-03-08). Inheritance table now has 37,010 entries across 34,444 classes. AActor→UObject, APawn→AActor, ACharacter→APawn all working.
+
 ---
 
 ## Feature Improvements
@@ -50,7 +54,7 @@ None! All minor bugs resolved.
 
 - [x] Core infrastructure (HTTP server, registry, settings, JSON utils, asset utils)
 - [x] All 9 domain modules compiling clean on UE 5.7
-- [x] SQLite FTS5 project indexer with 4 indexers (Blueprint, Material, Generic, Dependency)
+- [x] SQLite FTS5 project indexer with 14 indexers (Blueprint, Material, Generic, Dependency, Animation, Niagara, DataTable, Level, GameplayTag, Config, Cpp, UserDefinedEnum, UserDefinedStruct, InputAction)
 - [x] Python tree-sitter engine source indexer
 - [x] Auto-updater via GitHub Releases
 - [x] 9 Claude Code skills (including unreal-build)
@@ -101,3 +105,20 @@ None! All minor bugs resolved.
 - [x] Contribution guide — CONTRIBUTING.md created (2026-03-07)
 - [x] Changelog — CHANGELOG.md created (2026-03-07)
 - [x] Clean up MCP/ package — removed abandoned CLI scaffold (2026-03-07)
+- [x] `find_callers` / `find_callees` param name fix — `"function"` → `"symbol"` (2026-03-07)
+- [x] `read_file` param name fix — `"path"` → `"file_path"` (2026-03-07)
+- [x] `read_file` path normalization — forward slash → backslash for DB suffix matching (2026-03-07)
+- [x] `get_class_hierarchy` forward-declaration filtering — prefer real definitions over `class X;` (2026-03-07)
+- [x] `ExtractMembers` rewrite — brace depth tracking for Allman-style UE code (2026-03-07)
+- [x] `get_recent_logs` — accepts both `"max"` and `"count"` param names (2026-03-07)
+- [x] `search_config` category filter — changed param read from `"file"` to `"category"` (2026-03-07)
+- [x] `get_section` category name resolution — accepts `"Engine"` not just `"DefaultEngine"` (2026-03-07)
+- [x] SQLite WAL → DELETE — belt-and-suspenders fix: C++ forces DELETE on open + Python indexer never sets WAL (2026-03-07)
+- [x] Source DB ReadOnly → ReadWrite — WAL + ReadOnly silently returns 0 rows on Windows (2026-03-07)
+- [x] Reindex absolute path — `FPaths::ConvertRelativePathToFull()` on engine source + shader paths (2026-03-07)
+- [x] MonolithHttpServer top-level param merge — params alongside `action` were silently dropped, now merged (2026-03-07)
+- [x] UE macro preprocessor — strips UCLASS/USTRUCT/UENUM/UINTERFACE, *_API, GENERATED_BODY() before tree-sitter parsing (2026-03-08)
+- [x] Source indexer --clean flag — deletes existing DB before reindexing (2026-03-08)
+- [x] Inheritance resolution — 37,010 links across 34,444 classes, full ancestor chains working (2026-03-08)
+- [x] Diagnostic counters — definitions/forward_decls/with_base_classes/inheritance_resolved/failed printed after indexing (2026-03-08)
+- [x] Preprocessor in ReferenceBuilder — consistent AST for cross-reference extraction (2026-03-08)

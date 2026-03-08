@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "EditorSubsystem.h"
+#include "Misc/AsyncTaskNotification.h"
 #include "MonolithIndexDatabase.h"
 #include "MonolithIndexer.h"
 #include "MonolithIndexSubsystem.generated.h"
@@ -32,6 +33,9 @@ public:
 
 	/** Get indexing progress (0.0 - 1.0) */
 	float GetProgress() const;
+
+	/** Get current indexing status message */
+	FString GetStatusMessage() const { return IndexingStatusMessage; }
 
 	/** Get the database (for queries). May be null if not initialized. */
 	FMonolithIndexDatabase* GetDatabase() { return Database.Get(); }
@@ -78,10 +82,10 @@ private:
 	TArray<TSharedPtr<IMonolithIndexer>> Indexers;
 	TMap<FString, TSharedPtr<IMonolithIndexer>> ClassToIndexer;
 
-	FRunnableThread* IndexingThread = nullptr;
+	TUniquePtr<FRunnableThread> IndexingThread;
 	TUniquePtr<FIndexingTask> IndexingTaskPtr;
 	TAtomic<bool> bIsIndexing{false};
 
-	// Notification
-	class FMonolithIndexNotification* Notification = nullptr;
+	FString IndexingStatusMessage;
+	TUniquePtr<FAsyncTaskNotification> TaskNotification;
 };

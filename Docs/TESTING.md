@@ -84,12 +84,12 @@ def test_action(namespace, action, params=None):
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `discover` | UNTESTED | Test with and without namespace filter |
-| `discover(namespace)` | UNTESTED | Test each namespace: blueprint, material, animation, niagara, editor, config, project, source |
-| `status` | UNTESTED | Should return version, uptime, port, action count, engine_version, project_name |
+| `discover` | PASS | Returned all 9 namespaces, 119 actions |
+| `discover(namespace)` | PASS | Tested all 8 namespaces, correct action counts |
+| `status` | PASS | Returns version 0.1.0, port 9316, 119 actions, engine 5.7, project Leviathan |
 | `update(check)` | UNTESTED | Requires internet connection to GitHub |
 | `update(install)` | UNTESTED | Windows-only, requires internet |
-| `reindex` | UNTESTED | Should trigger MonolithIndex full rebuild via reflection |
+| `reindex` | PASS | Triggers successfully |
 
 ### MonolithBlueprint (namespace: "blueprint")
 
@@ -196,55 +196,56 @@ def test_action(namespace, action, params=None):
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `trigger_build` | UNTESTED | Windows-only. Test with/without `wait` param |
-| `live_compile` | UNTESTED | Added 2026-03-07. Trigger Live Coding hot-reload compile |
-| `get_build_errors` | UNTESTED | Fixed 2026-03-07: uses ELogVerbosity enum instead of substring matching |
-| `get_build_status` | UNTESTED | |
-| `get_build_summary` | UNTESTED | |
-| `search_build_output` | UNTESTED | |
-| `get_recent_logs` | UNTESTED | Test default + max (1000) |
-| `search_logs` | UNTESTED | Test pattern + category + verbosity filters |
-| `tail_log` | UNTESTED | |
-| `get_log_categories` | UNTESTED | |
-| `get_log_stats` | UNTESTED | |
-| `get_compile_output` | UNTESTED | Added 2026-03-07. Returns structured compile report with time-windowed log lines from compile categories (LogLiveCoding, LogCompile, LogLinker), error/warning counts, patch status |
-| `get_crash_context` | UNTESTED | Requires crash files to exist |
+| `trigger_build` | SKIP | Not tested to avoid disruption |
+| `live_compile` | PASS | Triggered successfully, compiled 3 modules |
+| `get_build_errors` | PASS | error_count + warning list |
+| `get_build_status` | PASS | live_coding status fields |
+| `get_build_summary` | PASS | Summary with counts |
+| `search_build_output` | PASS | Pattern search works |
+| `get_recent_logs` | PASS | Default returns 100, max/count params both work |
+| `search_logs` | PASS | Pattern, category, verbosity filters all work |
+| `tail_log` | PASS | Returns 50 formatted lines |
+| `get_log_categories` | PASS | 134 categories |
+| `get_log_stats` | PASS | total/fatal/error/warning/log/verbose counts |
+| `get_compile_output` | PASS | Structured compile report with time-windowed log lines |
+| `get_crash_context` | PASS | Returns recent_errors even without crash |
 
 ### MonolithConfig (namespace: "config")
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `resolve_setting` | UNTESTED | Test with Engine/Game/Input categories |
-| `explain_setting` | UNTESTED | Test convenience mode (just `setting` param, no file/section/key) |
-| `diff_from_default` | UNTESTED | Fixed 2026-03-07: uses GConfig API, supports 5 INI layers (Base, Default, Project, User, Saved) |
-| `search_config` | UNTESTED | Test with and without category filter |
-| `get_section` | UNTESTED | Test shortname resolution |
-| `get_config_files` | UNTESTED | Test with and without category filter |
+| `resolve_setting` | PASS | Works with Engine/Game/Input categories |
+| `explain_setting` | PASS | Convenience + explicit modes, layer breakdown |
+| `diff_from_default` | PASS | Section filter works, shows change_type |
+| `search_config` | PASS | Category filter now works (was broken, fixed) |
+| `get_section` | PASS | Category names now resolve (was broken, fixed) |
+| `get_config_files` | PASS | 38 files, 3 hierarchy levels, category filter works |
 
 ### MonolithIndex (namespace: "project")
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `search` | UNTESTED | Test FTS5 syntax: exact, prefix*, "phrase", OR, NOT, NEAR/N |
-| `find_references` | UNTESTED | Test bidirectional (deps + referencers) |
-| `find_by_type` | UNTESTED | Test pagination (limit + offset) |
-| `get_stats` | UNTESTED | Should return row counts for 11 tables |
-| `get_asset_details` | UNTESTED | Test deep inspection: nodes, variables, references |
+| `search` | PASS | FTS5 queries working. Ranking correct (name > content). Match highlighting with >>>keyword<<<. Default limit 50 |
+| `find_references` | PASS | Bidirectional deps/referencers verified on Blueprint, Material, RL_LWSkin. All Hard refs, semantically correct |
+| `find_by_type` | PASS | Tested Blueprint, Material, NiagaraSystem, DataTable, InputAction. Pagination (limit/offset) verified. Param is `asset_type`/`asset_class` |
+| `get_stats` | PASS | All 11 tables populated: 9,571 assets, 80,991 nodes, 68,366 connections, 2,184 cpp_symbols. Zero empty tables |
+| `get_asset_details` | PASS | Deep data returned: AnimBP (78 nodes, 11 vars), Material (34 nodes), Blueprint (92 nodes, 8 vars). References included |
 
 ### MonolithSource (namespace: "source")
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `read_source` | UNTESTED | Test exact match, FTS fallback, members_only mode, max_lines |
-| `find_references` | UNTESTED | Test ref_kind filter |
-| `find_callers` | UNTESTED | |
-| `find_callees` | UNTESTED | |
-| `search_source` | UNTESTED | Test scope expansion: "cpp" -> {header,source,inline}, "shaders" -> {shader,shader_header} |
-| `get_class_hierarchy` | UNTESTED | Test direction: both/ancestors/descendants. Depth limit. Max 80 truncation |
-| `get_module_info` | UNTESTED | Test top 20 key classes |
-| `get_symbol_context` | UNTESTED | Test context_lines param |
-| `read_file` | UNTESTED | Test path resolution: absolute -> DB exact -> suffix match |
-| `trigger_reindex` | UNTESTED | Requires Python 3.10+ with tree-sitter installed |
+| `read_source` | PASS | Returns full source, 137K chars for AActor |
+| `read_source members_only` | PASS | Returns AActor members (lines 256-387), function bodies replaced with `// [body omitted]`, access specifiers preserved, original source intact (ENGINE_API etc.) |
+| `find_references` | PASS | 50+ type references |
+| `find_callers` | PASS | 50+ callers with file/line info |
+| `find_callees` | PASS | Call graph with function names |
+| `search_source` | PASS | Symbol + source line matches |
+| `get_class_hierarchy` | PASS | Descendants work (60+ for AActor). Ancestors now work: AActor→UObject, APawn→AActor, ACharacter→APawn. 37,010 inheritance links (2026-03-08) |
+| `get_module_info` | PASS | Path, type, file count, symbol counts, key classes |
+| `get_symbol_context` | PASS | Implementation with 20 lines context |
+| `read_file` | PASS | Relative paths now work via suffix matching |
+| `trigger_reindex` | PASS | Triggers successfully |
 
 ---
 
@@ -252,12 +253,12 @@ def test_action(namespace, action, params=None):
 
 | Test | Status | Notes |
 |------|--------|-------|
-| Plugin loads without errors | UNTESTED | Check LogMonolith for startup messages |
-| MCP server starts on configured port | UNTESTED | Verify `tools/list` returns all tools |
+| Plugin loads without errors | PASS | No LogMonolith errors on startup |
+| MCP server starts on configured port | PASS | tools/list returns 12 tools |
 | Project auto-indexes on first launch | UNTESTED | Check notification bar + DB file creation |
-| All 9 modules register their actions | UNTESTED | `monolith_discover` should list all namespaces |
+| All 9 modules register their actions | PASS | discover returns all 9 namespaces |
 | CORS headers present | UNTESTED | Check `Access-Control-Allow-Origin: *` |
-| Stateless server (no session tracking) | UNTESTED | Verify server accepts requests without session headers, verify no Mcp-Session-Id in responses |
+| Stateless server (no session tracking) | PASS | No session tracking, accepts requests without session headers |
 | Batch JSON-RPC requests | UNTESTED | Send array of requests |
 | Invalid JSON handling | UNTESTED | Should return -32700 Parse error |
 | Unknown method handling | UNTESTED | Should return -32601 Method not found |
@@ -267,8 +268,8 @@ def test_action(namespace, action, params=None):
 | Hot-swap plugin on editor exit | UNTESTED | Stage an update, exit editor, verify plugin files are replaced |
 | Incremental indexing | UNTESTED | Add/remove/rename an asset, verify index updates via Asset Registry callbacks |
 | Deep asset indexing (game-thread) | UNTESTED | Verify deep indexing batches run on game thread without editor hitches |
-| 7 new indexers register | UNTESTED | Verify Animation, Niagara, DataTable, Level, GameplayTag, Config, Cpp indexers produce data |
-| editor.live_compile action | UNTESTED | Trigger live compile via MCP, verify hot-reload occurs |
+| 10 new indexers register | UNTESTED | Verify Animation, Niagara, DataTable, Level, GameplayTag, Config, Cpp, UserDefinedEnum, UserDefinedStruct, InputAction indexers produce data |
+| editor.live_compile action | PASS | Triggered via MCP, compiled 3 modules |
 | diff_from_default 5 INI layers | UNTESTED | Test diff across Base, Default, Project, User, Saved layers |
 | reorder_emitters change notifications | UNTESTED | Reorder emitters, verify PostEditChange fires and asset is marked dirty |
 
@@ -297,6 +298,9 @@ def test_action(namespace, action, params=None):
 | 2026-03-07 | tumourlove + Claude | 8 bug fixes | PASS | remove_bone_track (RemoveBoneTrack API), last_full_index (WriteMeta), move_module (pin rewire), get_build_errors (ELogVerbosity), SQL parameterization (13 methods), LogTemp->LogMonolith, CachedLogCapture safety, MonolithSource flatten. Build: 0 errors, 3.95s |
 | 2026-03-07 | tumourlove + Claude | Session + first-call fixes | PASS | Removed session tracking from HTTP server (fully stateless). Fixed first-tool-call failures: transport type mismatch in .mcp.json ("http" → "streamableHttp") + MonolithSource stub not registering actions |
 | 2026-03-07 | tumourlove + Claude | Waves 1-4 features | PASS | Module enable toggles enforced, editor.live_compile added, diff_from_default GConfig+5 layers, Niagara reorder_emitters PostEditChange+MarkPackageDirty, cross-platform update extraction, hot-swap plugin on exit, 7 new indexers (Animation/Niagara/DataTable/Level/GameplayTag/Config/Cpp), incremental indexing with Asset Registry callbacks, deep asset indexing with game-thread batching |
+| 2026-03-07 | tumourlove + Claude | Project index actions | PASS | All 5 MCP actions verified: search (FTS5 ranking), find_references (bidirectional), find_by_type (5 types + pagination), get_stats (11 tables, ~211K data points), get_asset_details (deep nodes/vars/refs across BP/Material/AnimBP) |
+| 2026-03-08 | tumourlove + Claude | Source indexer overhaul | PASS | UE macro preprocessor (strips UCLASS/API/GENERATED_BODY), --clean flag, diagnostic counters. Results: 1.1M symbols, 81K files, 62K class definitions, 37K inheritance links, full ancestor chains (AActor→UObject, APawn→AActor, ACharacter→APawn). DB: 1.8GB. |
+| 2026-03-07 | tumourlove + Claude | Wave 1 full test | PASS | Integration (10/10), Core (4/4), Editor (11/11 +2 skip), Config (6/6), Source (9/10 +1 deferred). Bugs found and fixed: find_callers/find_callees param mismatch, read_file param mismatch + path normalization, get_recent_logs max param, search_config category filter, get_section category resolution, get_class_hierarchy forward-decl filtering, ExtractMembers brace depth rewrite, MonolithHttpServer top-level param merge, SQLite WAL→DELETE + ReadWrite, reindex absolute path. members_only deferred pending indexer improvement. |
 
 ---
 
@@ -319,7 +323,7 @@ Before any release, verify:
 - [ ] Module enable toggle disables action registration when set to false
 - [ ] `editor.live_compile` triggers Live Coding compile
 - [ ] Incremental index updates on asset add/remove/rename
-- [ ] Deep indexing produces data for Animation, Niagara, DataTable, Level assets
+- [ ] Deep indexing produces data for Animation, Niagara, DataTable, Level, UserDefinedEnum, UserDefinedStruct, InputAction assets
 - [ ] Settings UI re-index buttons appear in Editor Preferences > Plugins > Monolith
 - [ ] Live Coding OnPatchComplete delegate captures compile results (last_result, timestamps, patch_applied)
 - [ ] `editor.get_compile_output` returns time-windowed compile log lines with error/warning counts

@@ -605,6 +605,10 @@ FMonolithActionResult FMonolithEditorActions::HandleGetRecentLogs(const TSharedP
 	{
 		Count = static_cast<int32>(Params->GetNumberField(TEXT("count")));
 	}
+	else if (Params->HasField(TEXT("max")))
+	{
+		Count = static_cast<int32>(Params->GetNumberField(TEXT("max")));
+	}
 	Count = FMath::Clamp(Count, 1, 1000);
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();

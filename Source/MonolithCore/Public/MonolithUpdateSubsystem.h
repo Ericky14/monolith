@@ -61,8 +61,8 @@ private:
 	FDelegateHandle PreExitHandle;
 	FString PendingStagingDir;
 
-	/** Show an editor notification with an Update button. */
-	void ShowUpdateNotification(const FString& NewVersion, const FString& ZipUrl);
+	/** Show an editor notification with an Update button and release notes. */
+	void ShowUpdateNotification(const FString& NewVersion, const FString& ZipUrl, const FString& ReleaseNotes);
 
 	/** Called when the update zip download completes. */
 	void OnDownloadComplete(const FString& Version, bool bSuccess, const TArray<uint8>& Data);

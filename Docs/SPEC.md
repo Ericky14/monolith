@@ -40,7 +40,7 @@ Monolith.uplugin
   MonolithNiagara       — Niagara particle systems (39 actions)
   MonolithEditor        — Build triggers, live compile, log capture, compile output, crash context (13 actions)
   MonolithConfig        — Config/INI resolution and search (6 actions)
-  MonolithIndex         — SQLite FTS5 deep project indexer (5 actions)
+  MonolithIndex         — SQLite FTS5 deep project indexer, 14 internal indexers (5 MCP actions)
   MonolithSource        — Engine source + API lookup (10 actions)
 ```
 
@@ -68,6 +68,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 
 - Niagara
 - SQLiteCore
+- EnhancedInput
 
 ---
 

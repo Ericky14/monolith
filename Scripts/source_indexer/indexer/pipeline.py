@@ -44,9 +44,20 @@ class IndexingPipeline:
         self._symbol_spans: dict[str, tuple[int, int]] = {}
         self._class_name_to_id: dict[str, int] = {}
         self._class_spans: dict[str, tuple[int, int]] = {}
+        self._diag: dict[str, int] = {
+            "forward_decls": 0,
+            "definitions": 0,
+            "with_base_classes": 0,
+            "inheritance_resolved": 0,
+            "inheritance_failed": 0,
+        }
         conn.commit()
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=NORMAL")
+
+    @property
+    def diagnostics(self) -> dict[str, int]:
+        return dict(self._diag)
 
     def index_directory(
         self,
@@ -214,6 +225,12 @@ class IndexingPipeline:
                 self._update_symbol_map(qualified_name, sym_id, sym.line_start, sym.line_end)
 
             if sym.kind in ("class", "struct"):
+                if sym.line_end > sym.line_start:
+                    self._diag["definitions"] += 1
+                else:
+                    self._diag["forward_decls"] += 1
+                if sym.base_classes:
+                    self._diag["with_base_classes"] += 1
                 self._update_class_map(sym.name, sym_id, sym.line_start, sym.line_end)
                 if sym.base_classes:
                     self._symbol_name_to_id.setdefault(f"_bases_{sym.name}", sym.base_classes)
@@ -315,6 +332,7 @@ class IndexingPipeline:
             base_classes = self._symbol_name_to_id[key]
             child_id = self._class_name_to_id.get(child_name)
             if child_id is None:
+                self._diag["inheritance_failed"] += len(base_classes) if isinstance(base_classes, list) else 1
                 continue
             for parent_name in base_classes:
                 parent_id = self._class_name_to_id.get(parent_name)
@@ -323,5 +341,9 @@ class IndexingPipeline:
                         insert_inheritance(
                             self._conn, child_id=child_id, parent_id=parent_id,
                         )
+                        self._diag["inheritance_resolved"] += 1
                     except sqlite3.IntegrityError:
                         pass
+                else:
+                    self._diag["inheritance_failed"] += 1
+                    logger.debug("Inheritance: %s -> %s (parent not in class map)", child_name, parent_name)

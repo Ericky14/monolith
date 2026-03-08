@@ -18,10 +18,13 @@ FMonolithActionResult FProjectGetStatsAction::Execute(const TSharedPtr<FJsonObje
 
 	auto Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
-	Result->SetBoolField(TEXT("indexing"), Subsystem->IsIndexing());
-	if (Subsystem->IsIndexing())
+
+	bool bIndexing = Subsystem->IsIndexing();
+	Result->SetBoolField(TEXT("indexing"), bIndexing);
+	if (bIndexing)
 	{
 		Result->SetNumberField(TEXT("progress"), Subsystem->GetProgress());
+		Result->SetStringField(TEXT("status"), Subsystem->GetStatusMessage());
 	}
 	Result->SetObjectField(TEXT("stats"), Stats);
 	return FMonolithActionResult::Success(Result);
