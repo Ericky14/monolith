@@ -18,7 +18,7 @@ Monolith is a unified Unreal Engine editor plugin that consolidates 9 separate M
 
 | Original Server/Plugin | Actions | Replaced By |
 |------------------------|---------|-------------|
-| unreal-blueprint-mcp + BlueprintReader | 5 | MonolithBlueprint |
+| unreal-blueprint-mcp + BlueprintReader | 6 | MonolithBlueprint |
 | unreal-material-mcp + MaterialMCPReader | 46 | MonolithMaterial |
 | unreal-animation-mcp + AnimationMCPReader | 62 | MonolithAnimation |
 | unreal-niagara-mcp + NiagaraMCPBridge | 70 | MonolithNiagara |
@@ -35,10 +35,10 @@ Monolith is a unified Unreal Engine editor plugin that consolidates 9 separate M
 ```
 Monolith.uplugin
   MonolithCore          — HTTP server, tool registry, discovery, settings, auto-updater
-  MonolithBlueprint     — Blueprint graph reading (5 actions)
+  MonolithBlueprint     — Blueprint graph reading (6 actions)
   MonolithMaterial      — Material inspection + graph editing (14 actions)
   MonolithAnimation     — Animation sequences, montages, ABPs (23 actions)
-  MonolithNiagara       — Niagara particle systems (39 actions)
+  MonolithNiagara       — Niagara particle systems (41 actions)
   MonolithEditor        — Build triggers, live compile, log capture, compile output, crash context (13 actions)
   MonolithConfig        — Config/INI resolution and search (6 actions)
   MonolithIndex         — SQLite FTS5 deep project indexer, 14 internal indexers (5 MCP actions)
@@ -111,17 +111,18 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithBlueprintModule` | Registers 5 blueprint actions |
+| `FMonolithBlueprintModule` | Registers 6 blueprint actions |
 | `FMonolithBlueprintActions` | Static handlers. Uses `FMonolithAssetUtils::LoadAssetByPath<UBlueprint>` |
 | `MonolithBlueprintInternal` | Helpers: AddGraphArray, FindGraphByName, PinTypeToString, SerializePin/Node, TraceExecFlow, FindEntryNode |
 
-#### Actions (5 — namespace: "blueprint")
+#### Actions (6 — namespace: "blueprint")
 
 | Action | Params | Description |
 |--------|--------|-------------|
 | `list_graphs` | `asset_path` | List all graphs with name/type/node_count. Graph types: event_graph, function, macro, delegate_signature |
-| `get_graph_data` | `asset_path`, `graph_name` | Full graph with all nodes, pins (17+ type categories), connections, positions |
-| `get_variables` | `asset_path` | All NewVariables: name, type (with container prefix), default, category, flags (editable, read_only, expose_on_spawn, replicated, transient) |
+| `get_graph_summary` | `asset_path`, `graph_name` | Lightweight graph overview: node id/class/title + exec connections only (~10KB vs 172KB for full data) |
+| `get_graph_data` | `asset_path`, `graph_name`, `node_class_filter` | Full graph with all nodes, pins (17+ type categories), connections, positions. Optional class filter |
+| `get_variables` | `asset_path` | All NewVariables: name, type (with container prefix), default (from CDO), category, flags (editable, read_only, expose_on_spawn, replicated, transient) |
 | `get_execution_flow` | `asset_path`, `entry_point` | Linearized exec trace from entry point. Handles branching (multiple exec outputs). MaxDepth=100 |
 | `search_nodes` | `asset_path`, `query` | Case-insensitive search by title, class name, or function name |
 
@@ -196,7 +197,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 | `get_blend_nodes` | Blend nodes in an ABP graph |
 | `get_linked_layers` | Linked animation layers |
 | `get_graphs` | All graphs in an ABP |
-| `get_nodes` | Animation nodes with optional class filter |
+| `get_nodes` | Animation nodes with optional class and graph_name filters |
 
 **Notify Editing (2)**
 | Action | Description |
@@ -209,7 +210,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 |--------|-------------|
 | `set_bone_track_keys` | Set position/rotation/scale keys (JSON arrays) |
 | `add_bone_track` | Add a bone track to an animation sequence |
-| `remove_bone_track` | Remove a bone track (**BUG: actually removes all tracks missing from skeleton, ignores bone_name param**) |
+| `remove_bone_track` | Remove a bone track (uses `RemoveBoneCurve(FName)` per bone + child traversal) |
 
 **Skeleton (2)**
 | Action | Description |
@@ -233,7 +234,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithNiagaraModule` | Registers 39 Niagara actions |
+| `FMonolithNiagaraModule` | Registers 41 Niagara actions |
 | `FMonolithNiagaraActions` | Static handlers + extensive private helpers |
 | `MonolithNiagaraHelpers` | 6 reimplemented NiagaraEditor functions (non-exported APIs) |
 
@@ -248,19 +249,23 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 5. `GetParametersForContext` — System user store params
 6. `GetStackFunctionInputs` — Input pin enumeration (best-effort type reconstruction)
 
-#### Actions (39 — namespace: "niagara")
+#### Actions (41 — namespace: "niagara")
 
-**System (8)**
+> **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
+
+**System (10)**
 | Action | Description |
 |--------|-------------|
 | `add_emitter` | Add an emitter (UE 5.7: takes FGuid VersionGuid) |
 | `remove_emitter` | Remove an emitter |
-| `duplicate_emitter` | Duplicate an emitter within a system |
+| `duplicate_emitter` | Duplicate an emitter within a system. Accepts `emitter` as alias for `source_emitter` |
 | `set_emitter_enabled` | Enable/disable an emitter |
 | `reorder_emitters` | Reorder emitters (direct handle assignment + PostEditChange + MarkPackageDirty for proper change notifications) |
 | `set_emitter_property` | Set property: SimTarget, bLocalSpace, bDeterminism, RandomSeed, AllocationMode, PreAllocationCount, bRequiresPersistentIDs, MaxGPUParticlesSpawnPerFrame |
 | `request_compile` | Request system compilation |
 | `create_system` | Create new system (blank or from template via DuplicateAsset) |
+| `list_emitters` | List all emitters with name, index, enabled, sim_target, renderer_count |
+| `list_renderers` | List all renderers across emitters with class, index, enabled, material |
 
 **Module (12)**
 | Action | Description |
@@ -392,7 +397,7 @@ All marked with "UE 5.7 FIX" comments:
 | Class | Responsibility |
 |-------|---------------|
 | `FMonolithIndexModule` | Registers 5 project actions |
-| `FMonolithIndexDatabase` | RAII SQLite wrapper. 13 tables + 2 FTS5 + 6 triggers + 1 meta. WAL mode, 64MB cache |
+| `FMonolithIndexDatabase` | RAII SQLite wrapper. 13 tables + 2 FTS5 + 6 triggers + 1 meta. DELETE journal mode, 64MB cache |
 | `UMonolithIndexSubsystem` | UEditorSubsystem. Incremental + full indexing via FRunnable. Asset Registry callbacks for add/remove/rename. Deep asset indexing with game-thread batching. Batches every 100 assets. Progress notifications |
 | `IMonolithIndexer` | Pure virtual interface: GetSupportedClasses(), IndexAsset(), GetName() |
 | `FBlueprintIndexer` | Blueprint, WidgetBlueprint, AnimBlueprint — graphs, nodes, variables |
@@ -451,13 +456,13 @@ All marked with "UE 5.7 FIX" comments:
 |--------|--------|-------------|
 | `read_source` | `symbol`, `include_header`, `max_lines`, `members_only` | Get source code for a class/function/struct. FTS fallback if exact match fails |
 | `find_references` | `symbol`, `ref_kind`, `limit` | Find all usage sites |
-| `find_callers` | `function`, `limit` | All functions that call the given function |
-| `find_callees` | `function`, `limit` | All functions called by the given function |
+| `find_callers` | `symbol`, `limit` | All functions that call the given function |
+| `find_callees` | `symbol`, `limit` | All functions called by the given function |
 | `search_source` | `query`, `scope`, `limit`, `mode`, `module`, `path_filter`, `symbol_kind` | Dual search: symbol FTS + source line FTS |
 | `get_class_hierarchy` | `class_name`, `direction`, `depth` | Inheritance tree (both/ancestors/descendants, max 80 shown) |
 | `get_module_info` | `module_name` | Module stats: file count, symbol counts, key classes |
 | `get_symbol_context` | `symbol`, `context_lines` | Definition with surrounding context |
-| `read_file` | `path`, `start_line`, `end_line` | Read source lines by path (absolute -> DB exact -> DB suffix match) |
+| `read_file` | `file_path`, `start_line`, `end_line` | Read source lines by path (absolute -> DB exact -> DB suffix match) |
 | `trigger_reindex` | none | Trigger Python indexer subprocess |
 
 **DB Location:** `Plugins/Monolith/Saved/EngineSource.db`
@@ -506,12 +511,12 @@ All marked with "UE 5.7 FIX" comments:
 | Skill | Trigger Words | Entry Point | Actions |
 |-------|--------------|-------------|---------|
 | unreal-animation | animation, montage, ABP, blend space, notify | `animation.query()` | 23 |
-| unreal-blueprints | Blueprint, BP, event graph, node, variable | `blueprint.query()` | 5 |
+| unreal-blueprints | Blueprint, BP, event graph, node, variable | `blueprint.query()` | 6 |
 | unreal-build | build, compile, Live Coding, hot reload, rebuild | `editor.query()` | 13 |
 | unreal-cpp | C++, header, include, UCLASS, Build.cs, linker error | `source.query()` + `config.query()` | 10+6 |
 | unreal-debugging | build error, crash, log, debug, stack trace | `editor.query()` | 13 |
-| unreal-materials | material, shader, PBR, texture, material graph | `material.query()` | 14 (skill claims 46) |
-| unreal-niagara | Niagara, particle, VFX, emitter | `niagara.query()` | 39 (skill claims 70) |
+| unreal-materials | material, shader, PBR, texture, material graph | `material.query()` | 14 |
+| unreal-niagara | Niagara, particle, VFX, emitter | `niagara.query()` | 41 |
 | unreal-performance | performance, optimization, FPS, frame time | Cross-domain | config + material + niagara |
 | unreal-project-search | find asset, search project, dependencies | `project.query()` | 5 |
 
@@ -549,7 +554,7 @@ All skills follow a common structure: YAML frontmatter, Discovery section, Asset
 
 | File | Purpose |
 |------|---------|
-| `Templates/.mcp.json.example` | Minimal MCP config for Claude Code: `{ "mcpServers": { "monolith": { "type": "streamableHttp", "url": "http://localhost:9316/mcp" } } }` |
+| `Templates/.mcp.json.example` | Minimal MCP config. Transport type varies by client: `"http"` for Claude Code, `"streamableHttp"` for Cursor/Cline. URL: `http://localhost:9316/mcp` |
 | `Templates/CLAUDE.md.example` | Project instructions template with tool reference, workflow, asset path conventions, and rules |
 
 ---
@@ -557,7 +562,7 @@ All skills follow a common structure: YAML frontmatter, Discovery section, Asset
 ## 8. File Structure
 
 ```
-C:\Projects\Monolith\
+D:\Unreal Projects\Leviathan\Plugins\Monolith\
   Monolith.uplugin
   README.md
   LICENSE                          (MIT)
@@ -600,8 +605,7 @@ C:\Projects\Monolith\
     MonolithEditor/                (4 source files)
     MonolithConfig/                (4 source files)
     MonolithIndex/                 (12+ source files)
-    MonolithSource/                (vestigial stub)
-      MonolithSource/              (real implementation, 8 source files)
+    MonolithSource/                (8 source files)
   Saved/
     .gitkeep
 ```
@@ -665,14 +669,14 @@ See `TODO.md` for the full list. Key architectural constraints:
 | Module | Namespace | Actions |
 |--------|-----------|---------|
 | MonolithCore | monolith | 4 |
-| MonolithBlueprint | blueprint | 5 |
+| MonolithBlueprint | blueprint | 6 |
 | MonolithMaterial | material | 14 |
 | MonolithAnimation | animation | 23 |
-| MonolithNiagara | niagara | 39 |
+| MonolithNiagara | niagara | 41 |
 | MonolithEditor | editor | 13 |
 | MonolithConfig | config | 6 |
 | MonolithIndex | project | 5 |
 | MonolithSource | source | 10 |
-| **Total** | | **119** |
+| **Total** | | **122** |
 
-**Note:** Skills claim higher counts (material: 46, animation: 62, niagara: 70) based on original Python server action counts. The C++ implementations consolidated and reduced action counts while maintaining equivalent functionality. README's "~231 tools" refers to the original fragmented setup.
+**Note:** All skill files now correctly reflect the C++ action counts (122 total). The original Python server had higher counts (~231 tools) due to fragmented action design.

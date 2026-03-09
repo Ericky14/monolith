@@ -1,5 +1,6 @@
 #include "Actions/ProjectGetStatsAction.h"
 #include "MonolithIndexSubsystem.h"
+#include "MonolithParamSchema.h"
 #include "Editor.h"
 
 FMonolithActionResult FProjectGetStatsAction::Execute(const TSharedPtr<FJsonObject>& Params)
@@ -32,9 +33,5 @@ FMonolithActionResult FProjectGetStatsAction::Execute(const TSharedPtr<FJsonObje
 
 TSharedPtr<FJsonObject> FProjectGetStatsAction::GetSchema()
 {
-	auto Schema = MakeShared<FJsonObject>();
-	Schema->SetStringField(TEXT("type"), TEXT("object"));
-	auto Properties = MakeShared<FJsonObject>();
-	Schema->SetObjectField(TEXT("properties"), Properties);
-	return Schema;
+	return MakeShared<FJsonObject>();
 }

@@ -1,5 +1,6 @@
 #include "Actions/ProjectFindByTypeAction.h"
 #include "MonolithIndexSubsystem.h"
+#include "MonolithParamSchema.h"
 #include "Editor.h"
 
 FMonolithActionResult FProjectFindByTypeAction::Execute(const TSharedPtr<FJsonObject>& Params)
@@ -48,31 +49,9 @@ FMonolithActionResult FProjectFindByTypeAction::Execute(const TSharedPtr<FJsonOb
 
 TSharedPtr<FJsonObject> FProjectFindByTypeAction::GetSchema()
 {
-	auto Schema = MakeShared<FJsonObject>();
-	Schema->SetStringField(TEXT("type"), TEXT("object"));
-
-	auto Properties = MakeShared<FJsonObject>();
-
-	auto TypeProp = MakeShared<FJsonObject>();
-	TypeProp->SetStringField(TEXT("type"), TEXT("string"));
-	TypeProp->SetStringField(TEXT("description"), TEXT("Asset class name (e.g. Blueprint, Material, StaticMesh, Texture2D, SoundWave)"));
-	Properties->SetObjectField(TEXT("asset_type"), TypeProp);
-
-	auto LimitProp = MakeShared<FJsonObject>();
-	LimitProp->SetStringField(TEXT("type"), TEXT("integer"));
-	LimitProp->SetStringField(TEXT("description"), TEXT("Maximum results (default 100)"));
-	Properties->SetObjectField(TEXT("limit"), LimitProp);
-
-	auto OffsetProp = MakeShared<FJsonObject>();
-	OffsetProp->SetStringField(TEXT("type"), TEXT("integer"));
-	OffsetProp->SetStringField(TEXT("description"), TEXT("Pagination offset (default 0)"));
-	Properties->SetObjectField(TEXT("offset"), OffsetProp);
-
-	Schema->SetObjectField(TEXT("properties"), Properties);
-
-	TArray<TSharedPtr<FJsonValue>> Required;
-	Required.Add(MakeShared<FJsonValueString>(TEXT("asset_type")));
-	Schema->SetArrayField(TEXT("required"), Required);
-
-	return Schema;
+	return FParamSchemaBuilder()
+		.Required(TEXT("asset_type"), TEXT("string"), TEXT("Asset class name (e.g. Blueprint, Material, StaticMesh, Texture2D)"))
+		.Optional(TEXT("limit"), TEXT("integer"), TEXT("Maximum results"), TEXT("100"))
+		.Optional(TEXT("offset"), TEXT("integer"), TEXT("Pagination offset"), TEXT("0"))
+		.Build();
 }

@@ -5,7 +5,7 @@ description: Use when debugging Unreal Engine issues via Monolith MCP — build 
 
 # Unreal Debugging Workflows
 
-You have access to **Monolith** with 11 editor diagnostic actions via `editor.query()`.
+You have access to **Monolith** with 13 editor diagnostic actions via `editor.query()`.
 
 ## Discovery
 
@@ -30,7 +30,8 @@ All asset paths follow UE content browser format (no .uasset extension):
 | Action | Purpose |
 |--------|---------|
 | `trigger_build` | Trigger a Live Coding compile (use instead of UBT when editor is open) |
-| `get_build_errors` | Get compile errors from the most recent build |
+| `live_compile` | Alias for `trigger_build`. Params: `wait` (bool, optional) — block until compile finishes |
+| `get_build_errors` | Get compile errors/warnings. Params: `since` (float), `category` (string), `compile_only` (bool) |
 | `get_build_status` | Check if a build is in progress / succeeded / failed |
 | `get_build_summary` | Summary stats across recent builds |
 | `search_build_output` | Search build output by pattern |
@@ -39,6 +40,7 @@ All asset paths follow UE content browser format (no .uasset extension):
 | `tail_log` | Get the latest log entries (like `tail -f`) |
 | `get_log_categories` | List all active log categories |
 | `get_log_stats` | Error/warning/log counts by category |
+| `get_compile_output` | Structured compile report: result, time, log lines, error/warning counts, patch status |
 | `get_crash_context` | Get crash dump details, stack trace, and system info |
 
 ## Debugging Workflow
@@ -51,6 +53,11 @@ editor.query({ action: "get_build_status", params: {} })
 editor.query({ action: "get_build_errors", params: {} })
 ```
 
+### Get structured compile results
+```
+editor.query({ action: "get_compile_output", params: {} })
+```
+
 ### Investigate a crash
 ```
 editor.query({ action: "get_crash_context", params: {} })
@@ -59,7 +66,7 @@ editor.query({ action: "search_logs", params: { pattern: "Fatal", limit: 20 } })
 
 ### Find specific log output
 ```
-editor.query({ action: "search_logs", params: { pattern: "MyActor", category: "LogTemp", max_verbosity: "Warning" } })
+editor.query({ action: "search_logs", params: { pattern: "MyActor", category: "LogTemp", verbosity: "Warning" } })
 ```
 
 ### Check overall log health

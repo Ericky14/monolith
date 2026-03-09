@@ -1,6 +1,6 @@
 # Monolith — Testing Reference
 
-Last updated: 2026-03-08
+Last updated: 2026-03-09
 
 ---
 
@@ -8,8 +8,7 @@ Last updated: 2026-03-08
 
 - **Engine:** Unreal Engine 5.7
 - **Project:** Leviathan (`D:\Unreal Projects\Leviathan\`)
-- **Plugin location (dev):** `C:\Projects\Monolith\`
-- **Plugin location (test):** `D:\Unreal Projects\Leviathan\Plugins\Monolith\`
+- **Plugin location (dev):** `D:\Unreal Projects\Leviathan\Plugins\Monolith\`
 - **MCP endpoint:** `http://localhost:9316/mcp`
 
 ---
@@ -84,9 +83,9 @@ def test_action(namespace, action, params=None):
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `discover` | PASS | Returned all 9 namespaces, 119 actions |
+| `discover` | PASS | Returned all 9 namespaces, 122 actions. Now includes per-action param schemas |
 | `discover(namespace)` | PASS | Tested all 8 namespaces, correct action counts |
-| `status` | PASS | Returns version 0.1.0, port 9316, 119 actions, engine 5.7, project Leviathan |
+| `status` | PASS | Returns version 0.5.0, port 9316, 122 actions, engine 5.7, project Leviathan |
 | `update(check)` | PASS | Detected v0.5.0 from GitHub, showed update dialog with release notes |
 | `update(install)` | PASS | Downloaded zip, staged, swapped on exit. Retry loop handled Defender file locks. Windows tested. |
 | `reindex` | PASS | Triggers successfully |
@@ -95,30 +94,31 @@ def test_action(namespace, action, params=None):
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `list_graphs` | UNTESTED | Test with a Blueprint that has event graphs + function graphs + macros |
-| `get_graph_data` | UNTESTED | Test pin serialization for various types (exec, object, struct, enum) |
-| `get_variables` | UNTESTED | Test container types (array, set, map), replication flags |
-| `get_execution_flow` | UNTESTED | Test branching (Branch node, Switch), deep chains, diamonds |
-| `search_nodes` | UNTESTED | Test case-insensitivity, partial matches |
+| `list_graphs` | PASS | 700 bytes, 14 graphs. Clean overview with asset class, parent class |
+| `get_graph_summary` | PASS | 29KB for EventGraph (5.7x smaller than get_graph_data). Returns all 14 graphs when graph_name empty, single graph when specified. Nodes with id/class/title/exec_targets |
+| `get_graph_data` | PASS | 164KB full, 8KB with node_class_filter. Filter works well |
+| `get_variables` | PASS | 8KB, 40 vars. CDO defaults confirmed populated (37/40 non-trivial) |
+| `get_execution_flow` | PASS | 0.7-2KB. Two-pass FindEntryNode: Pass 1 prefers events/functions, Pass 2 fuzzy fallback skips comments. "BeginPlay" and "Tick" correctly match events |
+| `search_nodes` | PASS | 3.5KB. Case-insensitive across all graphs |
 
 ### MonolithMaterial (namespace: "material")
 
 | Action | Status | Notes |
 |--------|--------|-------|
-| `get_all_expressions` | UNTESTED | Test on complex material with many expression types |
-| `get_expression_details` | UNTESTED | Test TextureSample, Parameter, Custom, Comment, FunctionCall |
-| `get_full_connection_graph` | UNTESTED | Test all wire types |
+| `get_all_expressions` | PASS | 8.7K chars, 43 expressions with class, position, params |
+| `get_expression_details` | PASS | Full property dump with inputs, outputs, UE properties |
+| `get_full_connection_graph` | PASS | 10K chars, 60 connections. material_outputs empty on layer blends |
 | `disconnect_expression` | UNTESTED | Test input disconnect vs output disconnect |
 | `build_material_graph` | UNTESTED | Test full PBR setup from JSON spec |
 | `begin_transaction` | UNTESTED | Test undo after transaction |
 | `end_transaction` | UNTESTED | Test without begin (should error gracefully) |
-| `export_material_graph` | UNTESTED | Test round-trip: export -> import -> compare |
+| `export_material_graph` | PASS | 44K default, 13K with include_properties=false (71% reduction) |
 | `import_material_graph` | UNTESTED | Test both "overwrite" and "merge" modes |
-| `validate_material` | UNTESTED | Test with: island nodes, broken textures, duplicate params |
-| `render_preview` | UNTESTED | Check PNG output in Saved/Monolith/previews/ |
-| `get_thumbnail` | UNTESTED | Verify base64 PNG is valid |
+| `validate_material` | PASS | Fixed: added MP_MaterialAttributes + 6 properties, MaterialAttributeLayers BFS seed. 0 false positives (was 43). Layer-blend materials still have known limitation (implicit layer system connections) |
+| `render_preview` | PASS | Saves PNG to Saved/Monolith/previews/, 68KB at 256x256 |
+| `get_thumbnail` | PASS | save_to_file=true returns path (164 chars vs 91K base64). Both modes work |
 | `create_custom_hlsl_node` | UNTESTED | Test with inputs, outputs, and HLSL code |
-| `get_layer_info` | UNTESTED | Test with Material Layer and Material Layer Blend |
+| `get_layer_info` | PASS | Correctly rejects non-layer materials with clear error |
 
 ### MonolithAnimation (namespace: "animation")
 
@@ -131,13 +131,13 @@ def test_action(namespace, action, params=None):
 | `add_blendspace_sample` | UNTESTED | |
 | `edit_blendspace_sample` | UNTESTED | Tests delete+re-add workaround |
 | `delete_blendspace_sample` | UNTESTED | Test boundary: delete only sample |
-| `get_state_machines` | UNTESTED | Test ABP with multiple state machines |
-| `get_state_info` | UNTESTED | |
-| `get_transitions` | UNTESTED | Test with empty machine_name (all SMs) |
-| `get_blend_nodes` | UNTESTED | |
-| `get_linked_layers` | UNTESTED | |
-| `get_graphs` | UNTESTED | |
-| `get_nodes` | UNTESTED | Test with and without class filter |
+| `get_state_machines` | PASS | 5KB. Clean names (no \n). from_type/to_type present on transitions |
+| `get_state_info` | PASS | 288B. Validates required params — clear error on empty machine_name |
+| `get_transitions` | PASS | 21KB. All from/to resolved (no "?"). from_type/to_type distinguishes state vs conduit. Full rule graphs |
+| `get_blend_nodes` | PASS | 6KB. 27 nodes with pin connections |
+| `get_linked_layers` | PASS | 295B. Found self-layer correctly |
+| `get_graphs` | PASS | 7KB. 66 graphs, clean names, node/anim_node/SM counts |
+| `get_nodes` | PASS | 21KB unfiltered, 8KB with graph_name, 450B with class filter. Both filters work |
 | `set_notify_time` | UNTESTED | |
 | `set_notify_duration` | UNTESTED | |
 | `set_bone_track_keys` | UNTESTED | Test JSON array format [[x,y,z],...] |
@@ -145,8 +145,8 @@ def test_action(namespace, action, params=None):
 | `remove_bone_track` | UNTESTED | Fixed 2026-03-07: now uses RemoveBoneCurve per bone + child traversal |
 | `add_virtual_bone` | UNTESTED | |
 | `remove_virtual_bones` | UNTESTED | Test specific names vs remove all |
-| `get_skeleton_info` | UNTESTED | |
-| `get_skeletal_mesh_info` | UNTESTED | |
+| `get_skeleton_info` | PASS | 27KB. 262 bones + 12 virtual bones with parent chains |
+| `get_skeletal_mesh_info` | PASS | 8KB. Materials, 181 morph targets, sockets, LODs |
 
 ### MonolithNiagara (namespace: "niagara")
 
@@ -160,9 +160,9 @@ def test_action(namespace, action, params=None):
 | `set_emitter_property` | UNTESTED | Test each: SimTarget, bLocalSpace, bDeterminism, etc. |
 | `request_compile` | UNTESTED | |
 | `create_system` | UNTESTED | Test blank + from template |
-| `get_ordered_modules` | UNTESTED | Test each usage: system_spawn, system_update, particle_spawn, particle_update |
-| `get_module_inputs` | UNTESTED | |
-| `get_module_graph` | UNTESTED | |
+| `get_ordered_modules` | PASS | Usage filter works: spawn/update/shorthands. No usage = all stages with usage field. Invalid = error with valid list |
+| `get_module_inputs` | PASS | Real types now (NiagaraBool, ENiagara_VelocityMode, etc.). No more Vector4f |
+| `get_module_graph` | PASS | Full node graph with pins and links |
 | `add_module` | UNTESTED | |
 | `remove_module` | UNTESTED | |
 | `move_module` | UNTESTED | Fixed 2026-03-07: rewires stack-flow pins only, preserves overrides |
@@ -172,11 +172,11 @@ def test_action(namespace, action, params=None):
 | `set_module_input_di` | UNTESTED | Test with config JSON |
 | `create_module_from_hlsl` | SKIP | Stub — always returns error |
 | `create_function_from_hlsl` | SKIP | Stub — always returns error |
-| `get_all_parameters` | UNTESTED | |
-| `get_user_parameters` | UNTESTED | |
-| `get_parameter_value` | UNTESTED | |
-| `get_parameter_type` | UNTESTED | |
-| `trace_parameter_binding` | UNTESTED | |
+| `get_all_parameters` | PASS | Filtering works: scope="User" (4 params), emitter="Sparks", combined filters |
+| `get_user_parameters` | PASS | Clean, compact. 4 params |
+| `get_parameter_value` | PASS | Both User.X and X formats work |
+| `get_parameter_type` | PASS | Returns size, primitiveness, is_di, is_enum |
+| `trace_parameter_binding` | PASS | Both prefix formats work |
 | `add_user_parameter` | UNTESTED | |
 | `remove_user_parameter` | UNTESTED | |
 | `set_parameter_default` | UNTESTED | |
@@ -185,12 +185,14 @@ def test_action(namespace, action, params=None):
 | `remove_renderer` | UNTESTED | |
 | `set_renderer_material` | UNTESTED | |
 | `set_renderer_property` | UNTESTED | Test reflection types |
-| `get_renderer_bindings` | UNTESTED | |
+| `get_renderer_bindings` | PASS | Clean output: name/bound_to/type. No more raw struct dumps |
 | `set_renderer_binding` | UNTESTED | Test primary + fallback ImportText format |
 | `batch_execute` | UNTESTED | Test multiple ops in single transaction |
 | `create_system_from_spec` | UNTESTED | Test full JSON spec with all sub-elements |
-| `get_di_functions` | UNTESTED | |
-| `get_compiled_gpu_hlsl` | UNTESTED | Requires GPU emitter with compiled script |
+| `list_emitters` | PASS | 4 emitters with name, index, enabled, sim_target, renderer_count |
+| `list_renderers` | PASS | Renderer class, index, enabled, material. Requires emitter param |
+| `get_di_functions` | PASS | Simple name "CurlNoise" works |
+| `get_compiled_gpu_hlsl` | PASS | Auto-compile works |
 
 ### MonolithEditor (namespace: "editor")
 
@@ -255,7 +257,7 @@ def test_action(namespace, action, params=None):
 |------|--------|-------|
 | Plugin loads without errors | PASS | No LogMonolith errors on startup |
 | MCP server starts on configured port | PASS | tools/list returns 12 tools |
-| Project auto-indexes on first launch | UNTESTED | Check notification bar + DB file creation |
+| Project auto-indexes on first launch | PASS | Fixed 2026-03-09: deferred to OnFilesLoaded, now indexes all 9560+ assets |
 | All 9 modules register their actions | PASS | discover returns all 9 namespaces |
 | CORS headers present | UNTESTED | Check `Access-Control-Allow-Origin: *` |
 | Stateless server (no session tracking) | PASS | No session tracking, accepts requests without session headers |
@@ -302,6 +304,10 @@ def test_action(namespace, action, params=None):
 | 2026-03-08 | tumourlove + Claude | Source indexer overhaul | PASS | UE macro preprocessor (strips UCLASS/API/GENERATED_BODY), --clean flag, diagnostic counters. Results: 1.1M symbols, 81K files, 62K class definitions, 37K inheritance links, full ancestor chains (AActor→UObject, APawn→AActor, ACharacter→APawn). DB: 1.8GB. |
 | 2026-03-08 | tumourlove + Claude | Auto-updater end-to-end | PASS | Full cycle: v0.4.0→v0.5.0 via GitHub Releases. Fixed 7 bugs in swap script (tasklist polling, errorlevel fix, move retry loop 10x3s, cmd /c quoting, DelayedExpansion, xcopy /h, rollback rmdir). Defender file locks handled by retry loop. Backup + staging cleaned up. .git/.github preserved. |
 | 2026-03-07 | tumourlove + Claude | Wave 1 full test | PASS | Integration (10/10), Core (4/4), Editor (11/11 +2 skip), Config (6/6), Source (9/10 +1 deferred). Bugs found and fixed: find_callers/find_callees param mismatch, read_file param mismatch + path normalization, get_recent_logs max param, search_config category filter, get_section category resolution, get_class_hierarchy forward-decl filtering, ExtractMembers brace depth rewrite, MonolithHttpServer top-level param merge, SQLite WAL→DELETE + ReadWrite, reindex absolute path. members_only deferred pending indexer improvement. |
+| 2026-03-09 | tumourlove + Claude | Wave 2: Blueprint + Material + Niagara + discover schemas | PASS | **Blueprint:** NEW `get_graph_summary` (lightweight ~10KB), `get_graph_data` `node_class_filter` param, `get_variables` CDO default values fix, BlueprintIndexer CDO fix. 5->6 actions. **Material:** `export_material_graph` `include_properties`/`include_positions` params, `get_thumbnail` `save_to_file` param. **Niagara:** `get_compiled_gpu_hlsl` auto-compile, `User.` prefix stripping in 4 param actions. **All:** Per-action param schemas in `discover()` output. Total: 121->122. |
+| 2026-03-09 | tumourlove + Claude | Indexer + Niagara + Animation fixes | PASS | **Phase 1 (Indexer):** Auto-index deferred to OnFilesLoaded (was 193/9560), sanity check <500 skips last_full_index, bIsIndexing reset in Deinitialize, DB WAL→DELETE. **Phase 2 (Niagara):** trace_parameter_binding OR fallback, get_di_functions reversed pattern, batch_execute 3 op name aliases, all actions accept asset_path (system_path compat), duplicate_emitter/set_curve_value param aliases, 2 NEW actions (list_emitters, list_renderers). Total: 39→41. **Phase 3 (Animation):** State machine \n stripping, get_state_info param validation, exact SM matching, get_nodes graph_name filter. |
+| 2026-03-09 | tumourlove + Claude | Round 4: Final read action verification | PASS | 35/36 read actions PASS, 1 FAIL (validate_material on layer-blend materials). All 6 targeted fixes verified: (1) get_module_inputs real types (NiagaraBool, enums), (2) get_ordered_modules usage filter + shorthands + error on invalid, (3) get_renderer_bindings clean JSON, (4) get_all_parameters scope/emitter filters, (5) get_transitions from/to resolved with from_type/to_type, (6) validate_material custom output seeding (partial — still fails on layer blends). Also verified: CDO defaults, param schemas, node_class_filter, include_properties, save_to_file, graph_name filter, User. prefix both forms. |
+| 2026-03-09 | tumourlove + Claude | Round 5: Final polish verification | PASS | **36/36 read actions PASS.** 3 final fixes verified: (1) `validate_material` — added MP_MaterialAttributes + 6 properties to AllMaterialProperties, MaterialAttributeLayers BFS seed → 0 false positive islands (was 43). (2) `get_execution_flow` — two-pass FindEntryNode prioritizes events over comments → "BeginPlay" and "Tick" correctly match events. (3) `get_graph_summary` — returns all 14 graphs when graph_name empty. All changes baked via UBT build. |
 
 ---
 
@@ -329,3 +335,17 @@ Before any release, verify:
 - [ ] Live Coding OnPatchComplete delegate captures compile results (last_result, timestamps, patch_applied)
 - [ ] `editor.get_compile_output` returns time-windowed compile log lines with error/warning counts
 - [ ] No LogMonolith errors in editor log on clean startup
+- [ ] `niagara.list_emitters` returns emitter names, index, enabled, sim_target, renderer_count
+- [ ] `niagara.list_renderers` returns renderer class, index, enabled, material
+- [ ] All Niagara actions accept `asset_path` as primary param (backward-compat `system_path` still works)
+- [ ] Project auto-index on first launch indexes >500 assets (OnFilesLoaded timing fix)
+- [ ] Animation `get_state_machines` returns clean names without `\n` suffixes
+- [ ] Animation `get_nodes` accepts optional `graph_name` filter
+- [ ] Blueprint `get_graph_summary` returns lightweight graph overview (id/class/title + exec connections)
+- [ ] Blueprint `get_graph_data` accepts `node_class_filter` param
+- [ ] Blueprint `get_variables` returns CDO default values (not empty)
+- [ ] Material `export_material_graph` respects `include_properties=false` and `include_positions=false`
+- [ ] Material `get_thumbnail` with `save_to_file=true` writes PNG to Saved/Monolith/thumbnails/
+- [ ] Niagara `get_compiled_gpu_hlsl` auto-compiles system if HLSL not cached
+- [ ] Niagara param actions handle `User.` prefix transparently (get_parameter_value, trace_parameter_binding, remove_user_parameter, set_parameter_default)
+- [ ] `monolith.discover()` returns per-action param schemas for all 122 actions

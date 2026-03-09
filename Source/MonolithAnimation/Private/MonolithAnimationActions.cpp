@@ -1,5 +1,6 @@
 #include "MonolithAnimationActions.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithParamSchema.h"
 
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
@@ -16,6 +17,7 @@
 #include "AnimationStateMachineGraph.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
+#include "AnimStateConduitNode.h"
 #include "AnimStateEntryNode.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -32,85 +34,189 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 	// Montage Sections
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_montage_section"),
 		TEXT("Add a section to an animation montage"),
-		FMonolithActionHandler::CreateStatic(&HandleAddMontageSection));
+		FMonolithActionHandler::CreateStatic(&HandleAddMontageSection),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Montage asset path"))
+			.Required(TEXT("section_name"), TEXT("string"), TEXT("Name for the new section"))
+			.Required(TEXT("start_time"), TEXT("number"), TEXT("Start time in seconds"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("delete_montage_section"),
 		TEXT("Delete a section from an animation montage by index"),
-		FMonolithActionHandler::CreateStatic(&HandleDeleteMontageSection));
+		FMonolithActionHandler::CreateStatic(&HandleDeleteMontageSection),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Montage asset path"))
+			.Required(TEXT("section_index"), TEXT("integer"), TEXT("Index of the section to delete"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_section_next"),
 		TEXT("Set the next section for a montage section"),
-		FMonolithActionHandler::CreateStatic(&HandleSetSectionNext));
+		FMonolithActionHandler::CreateStatic(&HandleSetSectionNext),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Montage asset path"))
+			.Required(TEXT("section_name"), TEXT("string"), TEXT("Name of the section"))
+			.Required(TEXT("next_section_name"), TEXT("string"), TEXT("Name of the next section to play"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_section_time"),
 		TEXT("Set the start time of a montage section"),
-		FMonolithActionHandler::CreateStatic(&HandleSetSectionTime));
+		FMonolithActionHandler::CreateStatic(&HandleSetSectionTime),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Montage asset path"))
+			.Required(TEXT("section_name"), TEXT("string"), TEXT("Name of the section"))
+			.Required(TEXT("new_time"), TEXT("number"), TEXT("New start time in seconds"))
+			.Build());
 
 	// BlendSpace Samples
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_blendspace_sample"),
 		TEXT("Add a sample to a blend space"),
-		FMonolithActionHandler::CreateStatic(&HandleAddBlendSpaceSample));
+		FMonolithActionHandler::CreateStatic(&HandleAddBlendSpaceSample),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("BlendSpace asset path"))
+			.Required(TEXT("anim_path"), TEXT("string"), TEXT("Animation sequence asset path"))
+			.Required(TEXT("x"), TEXT("number"), TEXT("X axis value"))
+			.Required(TEXT("y"), TEXT("number"), TEXT("Y axis value"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("edit_blendspace_sample"),
 		TEXT("Edit a blend space sample position and optionally its animation"),
-		FMonolithActionHandler::CreateStatic(&HandleEditBlendSpaceSample));
+		FMonolithActionHandler::CreateStatic(&HandleEditBlendSpaceSample),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("BlendSpace asset path"))
+			.Required(TEXT("sample_index"), TEXT("integer"), TEXT("Index of the sample to edit"))
+			.Required(TEXT("x"), TEXT("number"), TEXT("New X axis value"))
+			.Required(TEXT("y"), TEXT("number"), TEXT("New Y axis value"))
+			.Optional(TEXT("anim_path"), TEXT("string"), TEXT("New animation sequence asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("delete_blendspace_sample"),
 		TEXT("Delete a sample from a blend space by index"),
-		FMonolithActionHandler::CreateStatic(&HandleDeleteBlendSpaceSample));
+		FMonolithActionHandler::CreateStatic(&HandleDeleteBlendSpaceSample),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("BlendSpace asset path"))
+			.Required(TEXT("sample_index"), TEXT("integer"), TEXT("Index of the sample to delete"))
+			.Build());
 
 	// ABP Graph Reading
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_state_machines"),
 		TEXT("Get all state machines in an animation blueprint"),
-		FMonolithActionHandler::CreateStatic(&HandleGetStateMachines));
+		FMonolithActionHandler::CreateStatic(&HandleGetStateMachines),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_state_info"),
 		TEXT("Get detailed info about a state in a state machine"),
-		FMonolithActionHandler::CreateStatic(&HandleGetStateInfo));
+		FMonolithActionHandler::CreateStatic(&HandleGetStateInfo),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Required(TEXT("machine_name"), TEXT("string"), TEXT("State machine name"))
+			.Required(TEXT("state_name"), TEXT("string"), TEXT("State name"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_transitions"),
 		TEXT("Get all transitions in a state machine"),
-		FMonolithActionHandler::CreateStatic(&HandleGetTransitions));
+		FMonolithActionHandler::CreateStatic(&HandleGetTransitions),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Optional(TEXT("machine_name"), TEXT("string"), TEXT("Filter to a specific state machine"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_blend_nodes"),
 		TEXT("Get blend nodes in an animation blueprint graph"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBlendNodes));
+		FMonolithActionHandler::CreateStatic(&HandleGetBlendNodes),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Filter to a specific graph"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_linked_layers"),
 		TEXT("Get linked animation layers in an animation blueprint"),
-		FMonolithActionHandler::CreateStatic(&HandleGetLinkedLayers));
+		FMonolithActionHandler::CreateStatic(&HandleGetLinkedLayers),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_graphs"),
 		TEXT("Get all graphs in an animation blueprint"),
-		FMonolithActionHandler::CreateStatic(&HandleGetGraphs));
+		FMonolithActionHandler::CreateStatic(&HandleGetGraphs),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_nodes"),
 		TEXT("Get animation nodes with optional class filter"),
-		FMonolithActionHandler::CreateStatic(&HandleGetNodes));
+		FMonolithActionHandler::CreateStatic(&HandleGetNodes),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation Blueprint asset path"))
+			.Optional(TEXT("node_class_filter"), TEXT("string"), TEXT("Only include nodes whose class contains this substring"))
+			.Optional(TEXT("graph_name"), TEXT("string"), TEXT("Filter to a specific graph"))
+			.Build());
 
 	// Notify Editing
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_notify_time"),
 		TEXT("Set the trigger time of an animation notify"),
-		FMonolithActionHandler::CreateStatic(&HandleSetNotifyTime));
+		FMonolithActionHandler::CreateStatic(&HandleSetNotifyTime),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation asset path"))
+			.Required(TEXT("notify_index"), TEXT("integer"), TEXT("Index of the notify"))
+			.Required(TEXT("new_time"), TEXT("number"), TEXT("New trigger time in seconds"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_notify_duration"),
 		TEXT("Set the duration of a state animation notify"),
-		FMonolithActionHandler::CreateStatic(&HandleSetNotifyDuration));
+		FMonolithActionHandler::CreateStatic(&HandleSetNotifyDuration),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation asset path"))
+			.Required(TEXT("notify_index"), TEXT("integer"), TEXT("Index of the notify"))
+			.Required(TEXT("new_duration"), TEXT("number"), TEXT("New duration in seconds"))
+			.Build());
 
 	// Bone Tracks
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_bone_track_keys"),
 		TEXT("Set position, rotation, and scale keys on a bone track"),
-		FMonolithActionHandler::CreateStatic(&HandleSetBoneTrackKeys));
+		FMonolithActionHandler::CreateStatic(&HandleSetBoneTrackKeys),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation sequence asset path"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Bone name"))
+			.Required(TEXT("positions_json"), TEXT("string"), TEXT("JSON array of position keys"))
+			.Required(TEXT("rotations_json"), TEXT("string"), TEXT("JSON array of rotation keys"))
+			.Required(TEXT("scales_json"), TEXT("string"), TEXT("JSON array of scale keys"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_bone_track"),
 		TEXT("Add a bone track to an animation sequence"),
-		FMonolithActionHandler::CreateStatic(&HandleAddBoneTrack));
+		FMonolithActionHandler::CreateStatic(&HandleAddBoneTrack),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation sequence asset path"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Bone name to add"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("remove_bone_track"),
 		TEXT("Remove a bone track from an animation sequence"),
-		FMonolithActionHandler::CreateStatic(&HandleRemoveBoneTrack));
+		FMonolithActionHandler::CreateStatic(&HandleRemoveBoneTrack),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Animation sequence asset path"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Bone name to remove"))
+			.Optional(TEXT("include_children"), TEXT("bool"), TEXT("Also remove child bone tracks"), TEXT("false"))
+			.Build());
 
 	// Virtual Bones
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_virtual_bone"),
 		TEXT("Add a virtual bone to a skeleton"),
-		FMonolithActionHandler::CreateStatic(&HandleAddVirtualBone));
+		FMonolithActionHandler::CreateStatic(&HandleAddVirtualBone),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("source_bone"), TEXT("string"), TEXT("Source bone name"))
+			.Required(TEXT("target_bone"), TEXT("string"), TEXT("Target bone name"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("remove_virtual_bones"),
 		TEXT("Remove virtual bones from a skeleton"),
-		FMonolithActionHandler::CreateStatic(&HandleRemoveVirtualBones));
+		FMonolithActionHandler::CreateStatic(&HandleRemoveVirtualBones),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Required(TEXT("bone_names"), TEXT("array"), TEXT("Array of virtual bone names to remove"))
+			.Build());
 
 	// Skeleton Info
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_skeleton_info"),
 		TEXT("Get skeleton bone hierarchy and virtual bones"),
-		FMonolithActionHandler::CreateStatic(&HandleGetSkeletonInfo));
+		FMonolithActionHandler::CreateStatic(&HandleGetSkeletonInfo),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeleton asset path"))
+			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_skeletal_mesh_info"),
 		TEXT("Get skeletal mesh info including morph targets, sockets, LODs, and materials"),
-		FMonolithActionHandler::CreateStatic(&HandleGetSkeletalMeshInfo));
+		FMonolithActionHandler::CreateStatic(&HandleGetSkeletalMeshInfo),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Skeletal mesh asset path"))
+			.Build());
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +867,13 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetStateMachines(const TS
 			if (!SMGraph) continue;
 
 			TSharedPtr<FJsonObject> MachineObj = MakeShared<FJsonObject>();
-			MachineObj->SetStringField(TEXT("name"), SMNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+			FString SMName = SMNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+			int32 NewlineIdx = INDEX_NONE;
+			if (SMName.FindChar(TEXT('\n'), NewlineIdx))
+			{
+				SMName.LeftInline(NewlineIdx);
+			}
+			MachineObj->SetStringField(TEXT("name"), SMName);
 			MachineObj->SetStringField(TEXT("graph"), Graph->GetName());
 
 			if (SMGraph->EntryNode)
@@ -797,10 +909,12 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetStateMachines(const TS
 				else if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(SMChildNode))
 				{
 					TSharedPtr<FJsonObject> TransObj = MakeShared<FJsonObject>();
-					UAnimStateNode* PrevStateNode = Cast<UAnimStateNode>(TransNode->GetPreviousState());
-					UAnimStateNode* NextStateNode = Cast<UAnimStateNode>(TransNode->GetNextState());
-					TransObj->SetStringField(TEXT("from"), PrevStateNode ? PrevStateNode->GetStateName() : TEXT("?"));
-					TransObj->SetStringField(TEXT("to"), NextStateNode ? NextStateNode->GetStateName() : TEXT("?"));
+					UAnimStateNodeBase* PrevState = TransNode->GetPreviousState();
+					UAnimStateNodeBase* NextState = TransNode->GetNextState();
+					TransObj->SetStringField(TEXT("from"), PrevState ? PrevState->GetStateName() : TEXT("?"));
+					TransObj->SetStringField(TEXT("to"), NextState ? NextState->GetStateName() : TEXT("?"));
+					TransObj->SetStringField(TEXT("from_type"), PrevState ? (Cast<UAnimStateConduitNode>(PrevState) ? TEXT("conduit") : TEXT("state")) : TEXT("unknown"));
+					TransObj->SetStringField(TEXT("to_type"), NextState ? (Cast<UAnimStateConduitNode>(NextState) ? TEXT("conduit") : TEXT("state")) : TEXT("unknown"));
 					TransObj->SetNumberField(TEXT("cross_fade_duration"), TransNode->CrossfadeDuration);
 					TransObj->SetStringField(TEXT("blend_mode"),
 						TransNode->BlendMode == EAlphaBlendOption::Linear ? TEXT("Linear") :
@@ -829,6 +943,15 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetStateInfo(const TShare
 	FString MachineName = Params->GetStringField(TEXT("machine_name"));
 	FString StateName = Params->GetStringField(TEXT("state_name"));
 
+	if (MachineName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: machine_name"));
+	}
+	if (StateName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: state_name"));
+	}
+
 	UAnimBlueprint* ABP = FMonolithAssetUtils::LoadAssetByPath<UAnimBlueprint>(AssetPath);
 	if (!ABP) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
 
@@ -841,7 +964,12 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetStateInfo(const TShare
 			if (!SMNode) continue;
 
 			FString SMTitle = SMNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
-			if (!SMTitle.Contains(MachineName)) continue;
+			int32 NewlineIdx = INDEX_NONE;
+			if (SMTitle.FindChar(TEXT('\n'), NewlineIdx))
+			{
+				SMTitle.LeftInline(NewlineIdx);
+			}
+			if (SMTitle != MachineName) continue;
 
 			UAnimationStateMachineGraph* SMGraph = Cast<UAnimationStateMachineGraph>(SMNode->EditorStateMachineGraph);
 			if (!SMGraph) continue;
@@ -902,10 +1030,12 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetTransitions(const TSha
 			if (!TransNode) continue;
 
 			TSharedPtr<FJsonObject> TransObj = MakeShared<FJsonObject>();
-			UAnimStateNode* PrevStateNode = Cast<UAnimStateNode>(TransNode->GetPreviousState());
-			UAnimStateNode* NextStateNode = Cast<UAnimStateNode>(TransNode->GetNextState());
-			TransObj->SetStringField(TEXT("from"), PrevStateNode ? PrevStateNode->GetStateName() : TEXT("?"));
-			TransObj->SetStringField(TEXT("to"), NextStateNode ? NextStateNode->GetStateName() : TEXT("?"));
+			UAnimStateNodeBase* PrevState = TransNode->GetPreviousState();
+			UAnimStateNodeBase* NextState = TransNode->GetNextState();
+			TransObj->SetStringField(TEXT("from"), PrevState ? PrevState->GetStateName() : TEXT("?"));
+			TransObj->SetStringField(TEXT("to"), NextState ? NextState->GetStateName() : TEXT("?"));
+			TransObj->SetStringField(TEXT("from_type"), PrevState ? (Cast<UAnimStateConduitNode>(PrevState) ? TEXT("conduit") : TEXT("state")) : TEXT("unknown"));
+			TransObj->SetStringField(TEXT("to_type"), NextState ? (Cast<UAnimStateConduitNode>(NextState) ? TEXT("conduit") : TEXT("state")) : TEXT("unknown"));
 			TransObj->SetNumberField(TEXT("cross_fade_duration"), TransNode->CrossfadeDuration);
 			TransObj->SetStringField(TEXT("blend_mode"),
 				TransNode->BlendMode == EAlphaBlendOption::Linear ? TEXT("Linear") :
@@ -943,7 +1073,12 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetTransitions(const TSha
 			if (!SMNode) continue;
 
 			FString SMTitle = SMNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
-			if (!bMatchAll && !SMTitle.Contains(MachineName)) continue;
+			int32 NewlineIdx = INDEX_NONE;
+			if (SMTitle.FindChar(TEXT('\n'), NewlineIdx))
+			{
+				SMTitle.LeftInline(NewlineIdx);
+			}
+			if (!bMatchAll && SMTitle != MachineName) continue;
 
 			UAnimationStateMachineGraph* SMGraph = Cast<UAnimationStateMachineGraph>(SMNode->EditorStateMachineGraph);
 			if (!SMGraph) continue;
@@ -1065,6 +1200,8 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetNodes(const TSharedPtr
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 	FString NodeClassFilter;
 	Params->TryGetStringField(TEXT("node_class_filter"), NodeClassFilter);
+	FString GraphFilter;
+	Params->TryGetStringField(TEXT("graph_name"), GraphFilter);
 
 	UAnimBlueprint* ABP = FMonolithAssetUtils::LoadAssetByPath<UAnimBlueprint>(AssetPath);
 	if (!ABP) return FMonolithActionResult::Error(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
@@ -1075,11 +1212,16 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetNodes(const TSharedPtr
 	{
 		Root->SetStringField(TEXT("filter_class"), NodeClassFilter);
 	}
+	if (!GraphFilter.IsEmpty())
+	{
+		Root->SetStringField(TEXT("graph_name"), GraphFilter);
+	}
 	TArray<TSharedPtr<FJsonValue>> NodesArr;
 
 	for (UEdGraph* Graph : ABP->FunctionGraphs)
 	{
 		if (!Graph) continue;
+		if (!GraphFilter.IsEmpty() && Graph->GetName() != GraphFilter) continue;
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
 			UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(Node);

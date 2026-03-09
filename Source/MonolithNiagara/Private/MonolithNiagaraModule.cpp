@@ -8,7 +8,7 @@
 void FMonolithNiagaraModule::StartupModule()
 {
 	FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry::Get());
-	UE_LOG(LogMonolith, Verbose, TEXT("Monolith — Niagara module loaded (39 actions)"));
+	UE_LOG(LogMonolith, Verbose, TEXT("Monolith — Niagara module loaded (41 actions)"));
 }
 
 void FMonolithNiagaraModule::ShutdownModule()

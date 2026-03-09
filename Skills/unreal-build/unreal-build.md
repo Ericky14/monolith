@@ -32,10 +32,10 @@ Try calling Monolith MCP: `editor.query({action: 'get_build_status'})` or `monol
 
 ### Live Coding Path (editor open + .cpp-only changes)
 
-1. Call `editor.live_compile` via MCP
+1. Call `editor.query({ action: "trigger_build" })` via MCP
 2. Wait ~10 seconds for compilation
-3. Call `get_compile_output` to check result
-4. If errors: call `get_build_errors` with `compile_only=true`
+3. Call `editor.query({ action: "get_compile_output" })` to check result
+4. If errors: call `editor.query({ action: "get_build_errors", params: { compile_only: true } })`
 
 ### UBT Path (editor closed OR header/new-file/Build.cs changes)
 
@@ -58,7 +58,7 @@ Check exit code: `0` = success, non-zero = failure. On failure, grep output for 
 
 | Editor | Changes | Action |
 |--------|---------|--------|
-| Open | .cpp only | `editor.live_compile` via MCP |
+| Open | .cpp only | `editor.query("trigger_build")` via MCP |
 | Open | .h / new files / Build.cs | Ask user to close editor → UBT |
 | Open | .uplugin | Ask user to close editor → UBT |
 | Closed | Any | Run UBT directly |
@@ -69,5 +69,5 @@ Check exit code: `0` = success, non-zero = failure. On failure, grep output for 
 - **New .cpp files** are NOT picked up by Live Coding — UBT required
 - **Deleted files** are NOT handled by Live Coding — UBT required
 - After triggering Live Coding, **wait ~10s** before checking compile result
-- `"Unable to build while Live Coding is active"` → use `editor.live_compile` instead of UBT, or close editor first
+- `"Unable to build while Live Coding is active"` → use `editor.query("trigger_build")` instead of UBT, or close editor first
 - When in doubt, close editor and use UBT — it always works

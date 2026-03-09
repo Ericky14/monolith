@@ -1,6 +1,7 @@
 #include "MonolithNiagaraActions.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithParamSchema.h"
 
 #include "NiagaraSystem.h"
 #include "NiagaraEmitter.h"
@@ -150,7 +151,7 @@ namespace MonolithNiagaraHelpers
 			OutParams.Add(V);
 		}
 	}
-	// GetStackFunctionInputs — simplified: enumerate input pins of the function call
+	// GetStackFunctionInputs — enumerate input pins and extract real types via schema
 	void GetStackFunctionInputs(const UNiagaraNodeFunctionCall& Node, TArray<FNiagaraVariable>& OutInputs)
 	{
 		OutInputs.Reset();
@@ -158,10 +159,8 @@ namespace MonolithNiagaraHelpers
 		{
 			if (Pin->Direction == EGPD_Input && !Pin->bHidden)
 			{
-				// Attempt to reconstruct the variable from pin info
-				FNiagaraVariable Var;
-				Var.SetName(Pin->PinName);
-				// The pin type encodes the Niagara type — we'll use a best-effort approach
+				FNiagaraTypeDefinition TypeDef = UEdGraphSchema_Niagara::PinToTypeDefinition(Pin);
+				FNiagaraVariable Var(TypeDef, Pin->PinName);
 				OutInputs.Add(Var);
 			}
 		}
@@ -180,6 +179,14 @@ static FMonolithActionResult SuccessStr(const FString& Msg)
 static FMonolithActionResult SuccessObj(const TSharedRef<FJsonObject>& Obj)
 {
 	return FMonolithActionResult::Success(Obj);
+}
+
+// Helper: normalize asset path parameter — accepts "asset_path" (preferred) with "system_path" fallback
+static FString GetAssetPath(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path = Params->GetStringField(TEXT("asset_path"));
+	if (Path.IsEmpty()) Path = GetAssetPath(Params);
+	return Path;
 }
 
 // ============================================================================
@@ -279,16 +286,30 @@ int32 FMonolithNiagaraActions::FindEmitterHandleIndex(UNiagaraSystem* System, co
 	return INDEX_NONE;
 }
 
-ENiagaraScriptUsage FMonolithNiagaraActions::ResolveScriptUsage(const FString& UsageString)
+bool FMonolithNiagaraActions::ResolveScriptUsage(const FString& UsageString, ENiagaraScriptUsage& OutUsage)
 {
 	FString L = UsageString.ToLower();
-	if (L == TEXT("system_spawn") || L == TEXT("systemspawn")) return ENiagaraScriptUsage::SystemSpawnScript;
-	if (L == TEXT("system_update") || L == TEXT("systemupdate")) return ENiagaraScriptUsage::SystemUpdateScript;
-	if (L == TEXT("emitter_spawn") || L == TEXT("emitterspawn")) return ENiagaraScriptUsage::EmitterSpawnScript;
-	if (L == TEXT("emitter_update") || L == TEXT("emitterupdate")) return ENiagaraScriptUsage::EmitterUpdateScript;
-	if (L == TEXT("particle_spawn") || L == TEXT("particlespawn")) return ENiagaraScriptUsage::ParticleSpawnScript;
-	if (L == TEXT("particle_update") || L == TEXT("particleupdate")) return ENiagaraScriptUsage::ParticleUpdateScript;
-	return ENiagaraScriptUsage::ParticleUpdateScript;
+	if (L == TEXT("system_spawn") || L == TEXT("systemspawn")) { OutUsage = ENiagaraScriptUsage::SystemSpawnScript; return true; }
+	if (L == TEXT("system_update") || L == TEXT("systemupdate")) { OutUsage = ENiagaraScriptUsage::SystemUpdateScript; return true; }
+	if (L == TEXT("emitter_spawn") || L == TEXT("emitterspawn")) { OutUsage = ENiagaraScriptUsage::EmitterSpawnScript; return true; }
+	if (L == TEXT("emitter_update") || L == TEXT("emitterupdate")) { OutUsage = ENiagaraScriptUsage::EmitterUpdateScript; return true; }
+	if (L == TEXT("particle_spawn") || L == TEXT("particlespawn") || L == TEXT("spawn")) { OutUsage = ENiagaraScriptUsage::ParticleSpawnScript; return true; }
+	if (L == TEXT("particle_update") || L == TEXT("particleupdate") || L == TEXT("update")) { OutUsage = ENiagaraScriptUsage::ParticleUpdateScript; return true; }
+	return false;
+}
+
+FString FMonolithNiagaraActions::UsageToString(ENiagaraScriptUsage Usage)
+{
+	switch (Usage)
+	{
+	case ENiagaraScriptUsage::SystemSpawnScript: return TEXT("system_spawn");
+	case ENiagaraScriptUsage::SystemUpdateScript: return TEXT("system_update");
+	case ENiagaraScriptUsage::EmitterSpawnScript: return TEXT("emitter_spawn");
+	case ENiagaraScriptUsage::EmitterUpdateScript: return TEXT("emitter_update");
+	case ENiagaraScriptUsage::ParticleSpawnScript: return TEXT("particle_spawn");
+	case ENiagaraScriptUsage::ParticleUpdateScript: return TEXT("particle_update");
+	default: return TEXT("unknown");
+	}
 }
 
 UNiagaraGraph* FMonolithNiagaraActions::GetGraphForUsage(UNiagaraSystem* System, const FString& EmitterHandleId, ENiagaraScriptUsage Usage)
@@ -534,57 +555,296 @@ static void CollectParametersFromStore(const FNiagaraParameterStore& Store, cons
 void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	// System (8)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("add_emitter"), TEXT("Add an emitter to a Niagara system"), FMonolithActionHandler::CreateStatic(&HandleAddEmitter));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_emitter"), TEXT("Remove an emitter from a Niagara system"), FMonolithActionHandler::CreateStatic(&HandleRemoveEmitter));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("duplicate_emitter"), TEXT("Duplicate an emitter within a Niagara system"), FMonolithActionHandler::CreateStatic(&HandleDuplicateEmitter));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_emitter_enabled"), TEXT("Enable or disable an emitter"), FMonolithActionHandler::CreateStatic(&HandleSetEmitterEnabled));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("reorder_emitters"), TEXT("Reorder emitters in a system"), FMonolithActionHandler::CreateStatic(&HandleReorderEmitters));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_emitter_property"), TEXT("Set an emitter property"), FMonolithActionHandler::CreateStatic(&HandleSetEmitterProperty));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("request_compile"), TEXT("Request compilation of a Niagara system"), FMonolithActionHandler::CreateStatic(&HandleRequestCompile));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_system"), TEXT("Create a new Niagara system"), FMonolithActionHandler::CreateStatic(&HandleCreateSystem));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("add_emitter"), TEXT("Add an emitter to a Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleAddEmitter),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter_asset"), TEXT("string"), TEXT("Emitter asset path to add"))
+			.Optional(TEXT("name"), TEXT("string"), TEXT("Custom name for the emitter"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_emitter"), TEXT("Remove an emitter from a Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveEmitter),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name to remove"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("duplicate_emitter"), TEXT("Duplicate an emitter within a Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleDuplicateEmitter),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("source_emitter"), TEXT("string"), TEXT("Name of emitter to duplicate"))
+			.Optional(TEXT("new_name"), TEXT("string"), TEXT("Name for the duplicated emitter"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_emitter_enabled"), TEXT("Enable or disable an emitter"),
+		FMonolithActionHandler::CreateStatic(&HandleSetEmitterEnabled),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("enabled"), TEXT("bool"), TEXT("Whether to enable the emitter"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("reorder_emitters"), TEXT("Reorder emitters in a system"),
+		FMonolithActionHandler::CreateStatic(&HandleReorderEmitters),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("order"), TEXT("array"), TEXT("Array of emitter names in desired order"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_emitter_property"), TEXT("Set an emitter property"),
+		FMonolithActionHandler::CreateStatic(&HandleSetEmitterProperty),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("property"), TEXT("string"), TEXT("Property name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Property value"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("request_compile"), TEXT("Request compilation of a Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleRequestCompile),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_system"), TEXT("Create a new Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleCreateSystem),
+		FParamSchemaBuilder()
+			.Required(TEXT("save_path"), TEXT("string"), TEXT("Path to save the new system"))
+			.Optional(TEXT("template"), TEXT("string"), TEXT("Template system to base on"))
+			.Build());
 
 	// Module (12)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_ordered_modules"), TEXT("Get ordered modules in a script stage"), FMonolithActionHandler::CreateStatic(&HandleGetOrderedModules));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_module_inputs"), TEXT("Get inputs for a module node"), FMonolithActionHandler::CreateStatic(&HandleGetModuleInputs));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_module_graph"), TEXT("Get the node graph of a module script"), FMonolithActionHandler::CreateStatic(&HandleGetModuleGraph));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("add_module"), TEXT("Add a module to a script stage"), FMonolithActionHandler::CreateStatic(&HandleAddModule));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_module"), TEXT("Remove a module from a script stage"), FMonolithActionHandler::CreateStatic(&HandleRemoveModule));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("move_module"), TEXT("Move a module to a new index"), FMonolithActionHandler::CreateStatic(&HandleMoveModule));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_enabled"), TEXT("Enable or disable a module"), FMonolithActionHandler::CreateStatic(&HandleSetModuleEnabled));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_value"), TEXT("Set a module input value"), FMonolithActionHandler::CreateStatic(&HandleSetModuleInputValue));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_binding"), TEXT("Bind a module input to a parameter"), FMonolithActionHandler::CreateStatic(&HandleSetModuleInputBinding));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_di"), TEXT("Set a data interface on a module input"), FMonolithActionHandler::CreateStatic(&HandleSetModuleInputDI));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_module_from_hlsl"), TEXT("Create a Niagara module from HLSL"), FMonolithActionHandler::CreateStatic(&HandleCreateModuleFromHLSL));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_function_from_hlsl"), TEXT("Create a Niagara function from HLSL"), FMonolithActionHandler::CreateStatic(&HandleCreateFunctionFromHLSL));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_ordered_modules"), TEXT("Get ordered modules in a script stage"),
+		FMonolithActionHandler::CreateStatic(&HandleGetOrderedModules),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Optional(TEXT("usage"), TEXT("string"), TEXT("Script usage filter (e.g. Spawn, Update, Event)"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_module_inputs"), TEXT("Get inputs for a module node"),
+		FMonolithActionHandler::CreateStatic(&HandleGetModuleInputs),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_module_graph"), TEXT("Get the node graph of a module script"),
+		FMonolithActionHandler::CreateStatic(&HandleGetModuleGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("script_path"), TEXT("string"), TEXT("Module script asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("add_module"), TEXT("Add a module to a script stage"),
+		FMonolithActionHandler::CreateStatic(&HandleAddModule),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("usage"), TEXT("string"), TEXT("Script usage (Spawn, Update, Event)"))
+			.Required(TEXT("module_script"), TEXT("string"), TEXT("Module script asset path"))
+			.Optional(TEXT("index"), TEXT("integer"), TEXT("Position to insert the module"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_module"), TEXT("Remove a module from a script stage"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveModule),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name to remove"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("move_module"), TEXT("Move a module to a new index"),
+		FMonolithActionHandler::CreateStatic(&HandleMoveModule),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("new_index"), TEXT("integer"), TEXT("New position index"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_enabled"), TEXT("Enable or disable a module"),
+		FMonolithActionHandler::CreateStatic(&HandleSetModuleEnabled),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("enabled"), TEXT("bool"), TEXT("Whether to enable the module"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_value"), TEXT("Set a module input value"),
+		FMonolithActionHandler::CreateStatic(&HandleSetModuleInputValue),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("input"), TEXT("string"), TEXT("Input parameter name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Value to set"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_binding"), TEXT("Bind a module input to a parameter"),
+		FMonolithActionHandler::CreateStatic(&HandleSetModuleInputBinding),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("input"), TEXT("string"), TEXT("Input parameter name"))
+			.Required(TEXT("binding"), TEXT("string"), TEXT("Parameter binding path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_module_input_di"), TEXT("Set a data interface on a module input"),
+		FMonolithActionHandler::CreateStatic(&HandleSetModuleInputDI),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("input"), TEXT("string"), TEXT("Input parameter name"))
+			.Required(TEXT("di_class"), TEXT("string"), TEXT("Data interface class name"))
+			.Optional(TEXT("config"), TEXT("object"), TEXT("Data interface configuration"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_module_from_hlsl"), TEXT("Create a Niagara module from HLSL"),
+		FMonolithActionHandler::CreateStatic(&HandleCreateModuleFromHLSL),
+		MakeShared<FJsonObject>());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_function_from_hlsl"), TEXT("Create a Niagara function from HLSL"),
+		FMonolithActionHandler::CreateStatic(&HandleCreateFunctionFromHLSL),
+		MakeShared<FJsonObject>());
 
 	// Parameter (9)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_all_parameters"), TEXT("Get all parameters in a system"), FMonolithActionHandler::CreateStatic(&HandleGetAllParameters));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_user_parameters"), TEXT("Get user-exposed parameters"), FMonolithActionHandler::CreateStatic(&HandleGetUserParameters));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_parameter_value"), TEXT("Get a parameter value"), FMonolithActionHandler::CreateStatic(&HandleGetParameterValue));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_parameter_type"), TEXT("Get info about a Niagara type"), FMonolithActionHandler::CreateStatic(&HandleGetParameterType));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("trace_parameter_binding"), TEXT("Trace where a parameter is used"), FMonolithActionHandler::CreateStatic(&HandleTraceParameterBinding));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("add_user_parameter"), TEXT("Add a user parameter"), FMonolithActionHandler::CreateStatic(&HandleAddUserParameter));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_user_parameter"), TEXT("Remove a user parameter"), FMonolithActionHandler::CreateStatic(&HandleRemoveUserParameter));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_parameter_default"), TEXT("Set a parameter default value"), FMonolithActionHandler::CreateStatic(&HandleSetParameterDefault));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_curve_value"), TEXT("Set curve keys on a module input"), FMonolithActionHandler::CreateStatic(&HandleSetCurveValue));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_all_parameters"), TEXT("Get all parameters in a system"),
+		FMonolithActionHandler::CreateStatic(&HandleGetAllParameters),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Optional(TEXT("emitter"), TEXT("string"), TEXT("Filter to a specific emitter by name"))
+			.Optional(TEXT("scope"), TEXT("string"), TEXT("Filter by scope (e.g. 'User', 'ParticleSpawn', emitter name)"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_user_parameters"), TEXT("Get user-exposed parameters"),
+		FMonolithActionHandler::CreateStatic(&HandleGetUserParameters),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_parameter_value"), TEXT("Get a parameter value"),
+		FMonolithActionHandler::CreateStatic(&HandleGetParameterValue),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("parameter"), TEXT("string"), TEXT("Parameter name"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_parameter_type"), TEXT("Get info about a Niagara type"),
+		FMonolithActionHandler::CreateStatic(&HandleGetParameterType),
+		FParamSchemaBuilder()
+			.Required(TEXT("type"), TEXT("string"), TEXT("Niagara type name"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("trace_parameter_binding"), TEXT("Trace where a parameter is used"),
+		FMonolithActionHandler::CreateStatic(&HandleTraceParameterBinding),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("parameter"), TEXT("string"), TEXT("Parameter name to trace"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("add_user_parameter"), TEXT("Add a user parameter"),
+		FMonolithActionHandler::CreateStatic(&HandleAddUserParameter),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("Parameter name"))
+			.Required(TEXT("type"), TEXT("string"), TEXT("Niagara type name"))
+			.Optional(TEXT("default"), TEXT("string"), TEXT("Default value"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_user_parameter"), TEXT("Remove a user parameter"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveUserParameter),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("name"), TEXT("string"), TEXT("Parameter name to remove"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_parameter_default"), TEXT("Set a parameter default value"),
+		FMonolithActionHandler::CreateStatic(&HandleSetParameterDefault),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("parameter"), TEXT("string"), TEXT("Parameter name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Default value to set"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_curve_value"), TEXT("Set curve keys on a module input"),
+		FMonolithActionHandler::CreateStatic(&HandleSetCurveValue),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("input"), TEXT("string"), TEXT("Input parameter name"))
+			.Required(TEXT("keys"), TEXT("array"), TEXT("Array of curve key objects"))
+			.Build());
 
 	// Renderer (6)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("add_renderer"), TEXT("Add a renderer to an emitter"), FMonolithActionHandler::CreateStatic(&HandleAddRenderer));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_renderer"), TEXT("Remove a renderer from an emitter"), FMonolithActionHandler::CreateStatic(&HandleRemoveRenderer));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_material"), TEXT("Set renderer material"), FMonolithActionHandler::CreateStatic(&HandleSetRendererMaterial));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_property"), TEXT("Set a renderer property"), FMonolithActionHandler::CreateStatic(&HandleSetRendererProperty));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_renderer_bindings"), TEXT("Get renderer attribute bindings"), FMonolithActionHandler::CreateStatic(&HandleGetRendererBindings));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_binding"), TEXT("Set a renderer attribute binding"), FMonolithActionHandler::CreateStatic(&HandleSetRendererBinding));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("add_renderer"), TEXT("Add a renderer to an emitter"),
+		FMonolithActionHandler::CreateStatic(&HandleAddRenderer),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("class"), TEXT("string"), TEXT("Renderer class (e.g. Sprite, Mesh, Ribbon)"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("remove_renderer"), TEXT("Remove a renderer from an emitter"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveRenderer),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Index of the renderer to remove"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_material"), TEXT("Set renderer material"),
+		FMonolithActionHandler::CreateStatic(&HandleSetRendererMaterial),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Renderer index"))
+			.Required(TEXT("material"), TEXT("string"), TEXT("Material asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_property"), TEXT("Set a renderer property"),
+		FMonolithActionHandler::CreateStatic(&HandleSetRendererProperty),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Renderer index"))
+			.Required(TEXT("property"), TEXT("string"), TEXT("Property name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Property value"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_renderer_bindings"), TEXT("Get renderer attribute bindings"),
+		FMonolithActionHandler::CreateStatic(&HandleGetRendererBindings),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Renderer index"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_renderer_binding"), TEXT("Set a renderer attribute binding"),
+		FMonolithActionHandler::CreateStatic(&HandleSetRendererBinding),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Renderer index"))
+			.Required(TEXT("binding_name"), TEXT("string"), TEXT("Binding property name"))
+			.Required(TEXT("attribute"), TEXT("string"), TEXT("Particle attribute to bind"))
+			.Build());
+
+	// Read (2)
+	Registry.RegisterAction(TEXT("niagara"), TEXT("list_emitters"), TEXT("List all emitters in a Niagara system"),
+		FMonolithActionHandler::CreateStatic(&HandleListEmitters),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("list_renderers"), TEXT("List all renderers on a specific emitter"),
+		FMonolithActionHandler::CreateStatic(&HandleListRenderers),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Build());
 
 	// Batch (2)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("batch_execute"), TEXT("Execute multiple operations in one transaction"), FMonolithActionHandler::CreateStatic(&HandleBatchExecute));
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_system_from_spec"), TEXT("Create a full system from JSON spec"), FMonolithActionHandler::CreateStatic(&HandleCreateSystemFromSpec));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("batch_execute"), TEXT("Execute multiple operations in one transaction"),
+		FMonolithActionHandler::CreateStatic(&HandleBatchExecute),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("operations"), TEXT("array"), TEXT("Array of operation objects to execute"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_system_from_spec"), TEXT("Create a full system from JSON spec"),
+		FMonolithActionHandler::CreateStatic(&HandleCreateSystemFromSpec),
+		FParamSchemaBuilder()
+			.Required(TEXT("spec"), TEXT("object"), TEXT("Full system specification JSON"))
+			.Build());
 
 	// DI (1)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_di_functions"), TEXT("Get data interface function signatures"), FMonolithActionHandler::CreateStatic(&HandleGetDIFunctions));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_di_functions"), TEXT("Get data interface function signatures"),
+		FMonolithActionHandler::CreateStatic(&HandleGetDIFunctions),
+		FParamSchemaBuilder()
+			.Required(TEXT("di_class"), TEXT("string"), TEXT("Data interface class name"))
+			.Build());
 
 	// HLSL (1)
-	Registry.RegisterAction(TEXT("niagara"), TEXT("get_compiled_gpu_hlsl"), TEXT("Get compiled GPU HLSL for an emitter"), FMonolithActionHandler::CreateStatic(&HandleGetCompiledGPUHLSL));
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_compiled_gpu_hlsl"), TEXT("Get compiled GPU HLSL for an emitter"),
+		FMonolithActionHandler::CreateStatic(&HandleGetCompiledGPUHLSL),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Build());
 }
 
 // ============================================================================
@@ -593,7 +853,7 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterAssetPath = Params->GetStringField(TEXT("emitter_asset"));
 	FString EmitterName = Params->HasField(TEXT("name")) ? Params->GetStringField(TEXT("name")) : FString();
 
@@ -620,7 +880,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRemoveEmitter(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -641,8 +901,9 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveEmitter(const TShared
 
 FMonolithActionResult FMonolithNiagaraActions::HandleDuplicateEmitter(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString SourceHandleId = Params->GetStringField(TEXT("source_emitter"));
+	if (SourceHandleId.IsEmpty()) SourceHandleId = Params->GetStringField(TEXT("emitter"));
 	FString NewName = Params->HasField(TEXT("new_name")) ? Params->GetStringField(TEXT("new_name")) : FString();
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -668,7 +929,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleDuplicateEmitter(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterEnabled(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	bool bEnabled = Params->GetBoolField(TEXT("enabled"));
 
@@ -689,7 +950,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterEnabled(const TSh
 
 FMonolithActionResult FMonolithNiagaraActions::HandleReorderEmitters(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	const TArray<TSharedPtr<FJsonValue>>& OrderArr = Params->GetArrayField(TEXT("order"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -721,7 +982,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleReorderEmitters(const TShar
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterProperty(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString PropertyName = Params->GetStringField(TEXT("property"));
 	FString ValueJson = Params->HasField(TEXT("value")) ? JsonValueToString(Params->TryGetField(TEXT("value"))) : FString();
@@ -777,7 +1038,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterProperty(const TS
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRequestCompile(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 	System->RequestCompile(false);
@@ -830,40 +1091,66 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetOrderedModules(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ScriptUsage = Params->GetStringField(TEXT("usage"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
-	ENiagaraScriptUsage Usage = ResolveScriptUsage(ScriptUsage);
-	UNiagaraNodeOutput* OutputNode = FindOutputNode(System, EmitterHandleId, Usage);
-	if (!OutputNode) return FMonolithActionResult::Error(TEXT("No output node found"));
-
-	TArray<UNiagaraNodeFunctionCall*> ModuleNodes;
-	MonolithNiagaraHelpers::GetOrderedModuleNodes(*OutputNode, ModuleNodes);
+	// Determine which usages to query
+	TArray<ENiagaraScriptUsage> UsagesToQuery;
+	if (ScriptUsage.IsEmpty())
+	{
+		// No usage specified — return ALL stages
+		UsagesToQuery = {
+			ENiagaraScriptUsage::EmitterSpawnScript, ENiagaraScriptUsage::EmitterUpdateScript,
+			ENiagaraScriptUsage::ParticleSpawnScript, ENiagaraScriptUsage::ParticleUpdateScript,
+		};
+	}
+	else
+	{
+		ENiagaraScriptUsage Usage;
+		if (!ResolveScriptUsage(ScriptUsage, Usage))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Unrecognized usage '%s'. Valid values: system_spawn, system_update, emitter_spawn, emitter_update, particle_spawn (or spawn), particle_update (or update)"),
+				*ScriptUsage));
+		}
+		UsagesToQuery.Add(Usage);
+	}
 
 	TArray<TSharedPtr<FJsonValue>> Arr;
-	for (int32 i = 0; i < ModuleNodes.Num(); ++i)
+	for (ENiagaraScriptUsage Usage : UsagesToQuery)
 	{
-		UNiagaraNodeFunctionCall* N = ModuleNodes[i];
-		if (!N) continue;
-		TSharedRef<FJsonObject> M = MakeShared<FJsonObject>();
-		M->SetStringField(TEXT("node_guid"), N->NodeGuid.ToString());
-		M->SetStringField(TEXT("function_name"), N->GetFunctionName());
-		M->SetNumberField(TEXT("index"), i);
-		TOptional<bool> bEn = MonolithNiagaraHelpers::GetModuleIsEnabled(*N);
-		M->SetBoolField(TEXT("enabled"), bEn.IsSet() ? bEn.GetValue() : true);
-		if (N->FunctionScript) M->SetStringField(TEXT("script_path"), N->FunctionScript->GetPathName());
-		Arr.Add(MakeShared<FJsonValueObject>(M));
+		UNiagaraNodeOutput* OutputNode = FindOutputNode(System, EmitterHandleId, Usage);
+		if (!OutputNode) continue;
+
+		TArray<UNiagaraNodeFunctionCall*> ModuleNodes;
+		MonolithNiagaraHelpers::GetOrderedModuleNodes(*OutputNode, ModuleNodes);
+
+		FString UsageName = UsageToString(Usage);
+		for (int32 i = 0; i < ModuleNodes.Num(); ++i)
+		{
+			UNiagaraNodeFunctionCall* N = ModuleNodes[i];
+			if (!N) continue;
+			TSharedRef<FJsonObject> M = MakeShared<FJsonObject>();
+			M->SetStringField(TEXT("node_guid"), N->NodeGuid.ToString());
+			M->SetStringField(TEXT("function_name"), N->GetFunctionName());
+			M->SetNumberField(TEXT("index"), i);
+			M->SetStringField(TEXT("usage"), UsageName);
+			TOptional<bool> bEn = MonolithNiagaraHelpers::GetModuleIsEnabled(*N);
+			M->SetBoolField(TEXT("enabled"), bEn.IsSet() ? bEn.GetValue() : true);
+			if (N->FunctionScript) M->SetStringField(TEXT("script_path"), N->FunctionScript->GetPathName());
+			Arr.Add(MakeShared<FJsonValueObject>(M));
+		}
 	}
 	return SuccessStr(JsonArrayToString(Arr));
 }
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 
@@ -956,7 +1243,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TShare
 
 FMonolithActionResult FMonolithNiagaraActions::HandleAddModule(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ScriptUsage = Params->GetStringField(TEXT("usage"));
 	FString ModuleScriptPath = Params->GetStringField(TEXT("module_script"));
@@ -968,7 +1255,13 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddModule(const TSharedPtr<
 	UNiagaraScript* ModScript = LoadObject<UNiagaraScript>(nullptr, *ModuleScriptPath);
 	if (!ModScript) return FMonolithActionResult::Error(TEXT("Failed to load module script"));
 
-	ENiagaraScriptUsage Usage = ResolveScriptUsage(ScriptUsage);
+	ENiagaraScriptUsage Usage;
+	if (!ResolveScriptUsage(ScriptUsage, Usage))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Unrecognized usage '%s'. Valid values: system_spawn, system_update, emitter_spawn, emitter_update, particle_spawn (or spawn), particle_update (or update)"),
+			*ScriptUsage));
+	}
 	UNiagaraNodeOutput* OutputNode = FindOutputNode(System, EmitterHandleId, Usage);
 	if (!OutputNode) return FMonolithActionResult::Error(TEXT("No output node"));
 
@@ -987,7 +1280,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddModule(const TSharedPtr<
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRemoveModule(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 
@@ -1012,7 +1305,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveModule(const TSharedP
 
 FMonolithActionResult FMonolithNiagaraActions::HandleMoveModule(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 	int32 NewIndex = static_cast<int32>(Params->GetNumberField(TEXT("new_index")));
@@ -1112,7 +1405,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleMoveModule(const TSharedPtr
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleEnabled(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 	bool bEnabled = Params->GetBoolField(TEXT("enabled"));
@@ -1134,7 +1427,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleEnabled(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 	FString InputName = Params->GetStringField(TEXT("input"));
@@ -1209,7 +1502,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputBinding(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 	FString InputName = Params->GetStringField(TEXT("input"));
@@ -1254,7 +1547,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputBinding(const
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
 	FString InputName = Params->GetStringField(TEXT("input"));
@@ -1342,32 +1635,47 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateFunctionFromHLSL(cons
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetAllParameters(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
-	TArray<TSharedPtr<FJsonValue>> All;
-	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
-	CollectParametersFromStore(US, TEXT("User"), All);
+	FString EmitterFilter = Params->HasField(TEXT("emitter")) ? Params->GetStringField(TEXT("emitter")) : TEXT("");
+	FString ScopeFilter = Params->HasField(TEXT("scope")) ? Params->GetStringField(TEXT("scope")) : TEXT("");
 
+	TArray<TSharedPtr<FJsonValue>> All;
+
+	// Phase 1: User parameters (system-level)
+	if (EmitterFilter.IsEmpty() && (ScopeFilter.IsEmpty() || ScopeFilter.Equals(TEXT("User"), ESearchCase::IgnoreCase)))
+	{
+		FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
+		CollectParametersFromStore(US, TEXT("User"), All);
+	}
+
+	// Phase 2: Emitter parameters
 	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
 	for (const FNiagaraEmitterHandle& H : Handles)
 	{
+		FString EmitterName = H.GetName().ToString();
+		if (!EmitterFilter.IsEmpty() && EmitterName != EmitterFilter) continue;
+
 		FVersionedNiagaraEmitterData* ED = H.GetEmitterData();
 		if (!ED) continue;
-		FString EScope = FString::Printf(TEXT("Emitter.%s"), *H.GetName().ToString());
+		FString EScope = FString::Printf(TEXT("Emitter.%s"), *EmitterName);
 		static const ENiagaraScriptUsage Usages[] = {
 			ENiagaraScriptUsage::EmitterSpawnScript, ENiagaraScriptUsage::EmitterUpdateScript,
 			ENiagaraScriptUsage::ParticleSpawnScript, ENiagaraScriptUsage::ParticleUpdateScript,
 		};
 		for (ENiagaraScriptUsage U : Usages)
 		{
+			FString UStr = StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue(static_cast<int64>(U));
+			FString FullScope = FString::Printf(TEXT("%s.%s"), *EScope, *UStr);
+			if (!ScopeFilter.IsEmpty() && !FullScope.Contains(ScopeFilter)) continue;
+
 			UNiagaraScript* S = ED->GetScript(U, FGuid());
 			if (!S) continue;
 			// UE 5.7 FIX: direct UPROPERTY access, no getter
 			const FNiagaraParameterStore& PS = S->RapidIterationParameters;
-			FString UStr = StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue(static_cast<int64>(U));
-			CollectParametersFromStore(PS, FString::Printf(TEXT("%s.%s"), *EScope, *UStr), All);
+			CollectParametersFromStore(PS, FullScope, All);
 		}
 	}
 	return SuccessStr(JsonArrayToString(All));
@@ -1375,7 +1683,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetAllParameters(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetUserParameters(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
@@ -1397,7 +1705,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetUserParameters(const TSh
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetParameterValue(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString ParamName = Params->GetStringField(TEXT("parameter"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -1408,11 +1716,11 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetParameterValue(const TSh
 	US.GetUserParameters(UP);
 
 	FString Search = ParamName;
-	if (!Search.StartsWith(TEXT("User."))) Search = TEXT("User.") + Search;
+	if (Search.StartsWith(TEXT("User."))) Search = Search.Mid(5); // Strip "User." prefix — store names are unprefixed
 
 	for (const FNiagaraVariable& P : UP)
 	{
-		if (P.GetName().ToString() == Search || P.GetName().ToString() == ParamName)
+		if (P.GetName().ToString() == Search)
 		{
 			TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
 			R->SetStringField(TEXT("name"), P.GetName().ToString());
@@ -1443,17 +1751,18 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetParameterType(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::HandleTraceParameterBinding(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString ParamName = Params->GetStringField(TEXT("parameter"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	FString Search = ParamName;
-	if (!Search.StartsWith(TEXT("User."))) Search = TEXT("User.") + Search;
+	if (Search.StartsWith(TEXT("User."))) Search = Search.Mid(5); // Strip "User." prefix — store names are unprefixed
+	FString PrefixedSearch = TEXT("User.") + Search; // Keep prefixed form for graph pin matching
 
 	TSharedRef<FJsonObject> Trace = MakeShared<FJsonObject>();
-	Trace->SetStringField(TEXT("parameter"), Search);
+	Trace->SetStringField(TEXT("parameter"), PrefixedSearch);
 
 	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
 	TArray<FNiagaraVariable> UP;
@@ -1501,7 +1810,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleTraceParameterBinding(const
 					for (UEdGraphPin* LP : Pin->LinkedTo)
 					{
 						FString LN = LP->PinName.ToString();
-						if (LN.Contains(Search) || LN.Contains(ParamName))
+						if (LN.Contains(PrefixedSearch) || LN.Contains(Search))
 						{
 							TSharedRef<FJsonObject> BO = MakeShared<FJsonObject>();
 							BO->SetStringField(TEXT("emitter"), EN);
@@ -1521,7 +1830,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleTraceParameterBinding(const
 
 FMonolithActionResult FMonolithNiagaraActions::HandleAddUserParameter(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString ParamName = Params->GetStringField(TEXT("name"));
 	FString TypeName = Params->GetStringField(TEXT("type"));
 	FString DefaultJson = Params->HasField(TEXT("default")) ? JsonValueToString(Params->TryGetField(TEXT("default"))) : FString();
@@ -1551,14 +1860,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddUserParameter(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRemoveUserParameter(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString ParamName = Params->GetStringField(TEXT("name"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	FString Search = ParamName;
-	if (!Search.StartsWith(TEXT("User."))) Search = TEXT("User.") + Search;
+	if (Search.StartsWith(TEXT("User."))) Search = Search.Mid(5); // Strip "User." prefix — store names are unprefixed
 
 	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
 	TArray<FNiagaraVariable> UP;
@@ -1566,7 +1875,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveUserParameter(const T
 
 	for (const FNiagaraVariable& P : UP)
 	{
-		if (P.GetName().ToString() == Search || P.GetName().ToString() == ParamName)
+		if (P.GetName().ToString() == Search)
 		{
 			GEditor->BeginTransaction(NSLOCTEXT("Monolith", "RemUP", "Remove User Parameter"));
 			System->Modify();
@@ -1580,7 +1889,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveUserParameter(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetParameterDefault(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString ParamName = Params->GetStringField(TEXT("parameter"));
 	FString ValueJson = Params->HasField(TEXT("value")) ? JsonValueToString(Params->TryGetField(TEXT("value"))) : FString();
 
@@ -1588,7 +1897,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetParameterDefault(const T
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	FString Search = ParamName;
-	if (!Search.StartsWith(TEXT("User."))) Search = TEXT("User.") + Search;
+	if (Search.StartsWith(TEXT("User."))) Search = Search.Mid(5); // Strip "User." prefix — store names are unprefixed
 
 	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
 	TArray<FNiagaraVariable> UP;
@@ -1598,7 +1907,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetParameterDefault(const T
 	bool bFound = false;
 	for (const FNiagaraVariable& P : UP)
 	{
-		if (P.GetName().ToString() == Search || P.GetName().ToString() == ParamName)
+		if (P.GetName().ToString() == Search)
 		{ Found = P; bFound = true; break; }
 	}
 	if (!bFound) return FMonolithActionResult::Error(TEXT("Parameter not found"));
@@ -1618,9 +1927,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetParameterDefault(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetCurveValue(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleName = Params->GetStringField(TEXT("module"));
+	if (ModuleName.IsEmpty()) ModuleName = Params->GetStringField(TEXT("module_node"));
 	FString InputName = Params->GetStringField(TEXT("input"));
 	FString CurveKeysJson = Params->GetStringField(TEXT("keys"));
 
@@ -1679,7 +1989,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCurveValue(const TShared
 
 FMonolithActionResult FMonolithNiagaraActions::HandleAddRenderer(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString RendererClassStr = Params->GetStringField(TEXT("class"));
 
@@ -1715,7 +2025,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddRenderer(const TSharedPt
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRemoveRenderer(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 
@@ -1741,7 +2051,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveRenderer(const TShare
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererMaterial(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 	FString MaterialPath = Params->GetStringField(TEXT("material"));
@@ -1780,7 +2090,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererMaterial(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererProperty(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 	FString PropertyName = Params->GetStringField(TEXT("property"));
@@ -1851,7 +2161,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererProperty(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetRendererBindings(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 
@@ -1862,18 +2172,23 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetRendererBindings(const T
 	if (!Rend) return FMonolithActionResult::Error(TEXT("Renderer not found"));
 
 	TArray<TSharedPtr<FJsonValue>> Arr;
+	UScriptStruct* BindingStruct = FNiagaraVariableAttributeBinding::StaticStruct();
 	for (TFieldIterator<FProperty> It(Rend->GetClass()); It; ++It)
 	{
 		FStructProperty* SP = CastField<FStructProperty>(*It);
-		if (!SP || !SP->Struct->GetName().Contains(TEXT("Binding"))) continue;
+		if (!SP || SP->Struct != BindingStruct) continue;
 
-		const void* Addr = SP->ContainerPtrToValuePtr<void>(Rend);
+		const FNiagaraVariableAttributeBinding* Binding =
+			SP->ContainerPtrToValuePtr<FNiagaraVariableAttributeBinding>(Rend);
+
 		TSharedRef<FJsonObject> BO = MakeShared<FJsonObject>();
 		BO->SetStringField(TEXT("name"), (*It)->GetName());
-		BO->SetStringField(TEXT("struct_type"), SP->Struct->GetName());
-		FString Exported;
-		SP->ExportTextItem_Direct(Exported, Addr, nullptr, Rend, PPF_None);
-		BO->SetStringField(TEXT("value"), Exported);
+
+		const FNiagaraVariableBase& BV = Binding->GetParamMapBindableVariable();
+		FString BoundName = BV.GetName().ToString();
+		BO->SetStringField(TEXT("bound_to"), BoundName.IsEmpty() || BoundName == TEXT("NONE") ? TEXT("(unbound)") : BoundName);
+		BO->SetStringField(TEXT("type"), BV.GetType().GetName());
+
 		Arr.Add(MakeShared<FJsonValueObject>(BO));
 	}
 	return SuccessStr(JsonArrayToString(Arr));
@@ -1881,7 +2196,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetRendererBindings(const T
 
 FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererBinding(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 	FString BindingName = Params->GetStringField(TEXT("binding_name"));
@@ -1924,7 +2239,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererBinding(const TS
 
 FMonolithActionResult FMonolithNiagaraActions::HandleBatchExecute(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString OpsJson = Params->GetStringField(TEXT("operations"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -1967,14 +2282,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleBatchExecute(const TSharedP
 		else if (OpName == TEXT("remove_emitter")) SubResult = HandleRemoveEmitter(SubParams);
 		else if (OpName == TEXT("add_module")) SubResult = HandleAddModule(SubParams);
 		else if (OpName == TEXT("remove_module")) SubResult = HandleRemoveModule(SubParams);
-		else if (OpName == TEXT("set_module_input")) SubResult = HandleSetModuleInputValue(SubParams);
-		else if (OpName == TEXT("set_module_binding")) SubResult = HandleSetModuleInputBinding(SubParams);
+		else if (OpName == TEXT("set_module_input_value") || OpName == TEXT("set_module_input")) SubResult = HandleSetModuleInputValue(SubParams);
+		else if (OpName == TEXT("set_module_input_binding") || OpName == TEXT("set_module_binding")) SubResult = HandleSetModuleInputBinding(SubParams);
 		else if (OpName == TEXT("set_emitter_property")) SubResult = HandleSetEmitterProperty(SubParams);
 		else if (OpName == TEXT("add_renderer")) SubResult = HandleAddRenderer(SubParams);
 		else if (OpName == TEXT("remove_renderer")) SubResult = HandleRemoveRenderer(SubParams);
 		else if (OpName == TEXT("set_renderer_material")) SubResult = HandleSetRendererMaterial(SubParams);
 		else if (OpName == TEXT("set_renderer_property")) SubResult = HandleSetRendererProperty(SubParams);
-		else if (OpName == TEXT("add_user_param")) SubResult = HandleAddUserParameter(SubParams);
+		else if (OpName == TEXT("add_user_parameter") || OpName == TEXT("add_user_param")) SubResult = HandleAddUserParameter(SubParams);
 		else if (OpName == TEXT("set_module_enabled")) SubResult = HandleSetModuleEnabled(SubParams);
 		else if (OpName == TEXT("move_module")) SubResult = HandleMoveModule(SubParams);
 		else if (OpName == TEXT("set_emitter_enabled")) SubResult = HandleSetEmitterEnabled(SubParams);
@@ -2205,6 +2520,9 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetDIFunctions(const TShare
 		DIC = FindFirstObject<UClass>(*NP, EFindFirstObjectOptions::NativeFirst);
 		if (!DIC) DIC = FindFirstObject<UClass>(*NP.Mid(1), EFindFirstObjectOptions::NativeFirst);
 	}
+	// Try UE convention: UNiagaraDataInterface<Name>
+	if (!DIC) DIC = FindFirstObject<UClass>(*FString::Printf(TEXT("UNiagaraDataInterface%s"), *DIClassName), EFindFirstObjectOptions::NativeFirst);
+	if (!DIC) DIC = FindFirstObject<UClass>(*FString::Printf(TEXT("NiagaraDataInterface%s"), *DIClassName), EFindFirstObjectOptions::NativeFirst);
 	if (!DIC || !DIC->IsChildOf(UNiagaraDataInterface::StaticClass()))
 		return FMonolithActionResult::Error(TEXT("DI class not found"));
 
@@ -2260,7 +2578,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetDIFunctions(const TShare
 
 FMonolithActionResult FMonolithNiagaraActions::HandleGetCompiledGPUHLSL(const TSharedPtr<FJsonObject>& Params)
 {
-	FString SystemPath = Params->GetStringField(TEXT("system_path"));
+	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
@@ -2278,6 +2596,19 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetCompiledGPUHLSL(const TS
 	UNiagaraScript* GPU = ED->GetGPUComputeScript();
 	if (!GPU) return FMonolithActionResult::Error(TEXT("No GPU compute script"));
 
+	// Auto-compile if HLSL data is not available
+#if WITH_EDITORONLY_DATA
+	{
+		const FNiagaraVMExecutableData& PreCheck = GPU->GetVMExecutableData();
+		if (PreCheck.LastHlslTranslationGPU.IsEmpty() && PreCheck.LastHlslTranslation.IsEmpty())
+		{
+			UE_LOG(LogMonolithNiagara, Log, TEXT("HLSL not available — requesting compilation"));
+			System->RequestCompile(false);
+			System->WaitForCompilationComplete(true, false); // true = include GPU shaders, false = no progress dialog
+		}
+	}
+#endif
+
 	if (System->HasOutstandingCompilationRequests())
 		UE_LOG(LogMonolithNiagara, Warning, TEXT("System has outstanding compilation requests"));
 
@@ -2287,10 +2618,134 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetCompiledGPUHLSL(const TS
 	if (!ExeData.LastHlslTranslationGPU.IsEmpty()) HLSL = ExeData.LastHlslTranslationGPU;
 	else if (!ExeData.LastHlslTranslation.IsEmpty()) HLSL = ExeData.LastHlslTranslation;
 	else if (!ExeData.LastAssemblyTranslation.IsEmpty()) HLSL = ExeData.LastAssemblyTranslation;
-	else return FMonolithActionResult::Error(TEXT("No compiled HLSL available"));
+	else return FMonolithActionResult::Error(TEXT("Compilation completed but produced no GPU HLSL. The emitter may have compile errors or may not use GPU simulation."));
 #else
 	return FMonolithActionResult::Error(TEXT("HLSL only available in editor builds"));
 #endif
 
 	return SuccessStr(HLSL);
+}
+
+// ============================================================================
+// Read Actions (2)
+// ============================================================================
+
+FMonolithActionResult FMonolithNiagaraActions::HandleListEmitters(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+	TArray<TSharedPtr<FJsonValue>> EmitterArr;
+	EmitterArr.Reserve(Handles.Num());
+
+	for (int32 i = 0; i < Handles.Num(); ++i)
+	{
+		const FNiagaraEmitterHandle& Handle = Handles[i];
+		FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
+
+		TSharedRef<FJsonObject> EObj = MakeShared<FJsonObject>();
+		EObj->SetStringField(TEXT("name"), Handle.GetName().ToString());
+		EObj->SetNumberField(TEXT("index"), i);
+		EObj->SetBoolField(TEXT("enabled"), Handle.GetIsEnabled());
+
+		if (ED)
+		{
+			// Sim target
+			FString SimTarget;
+			switch (ED->SimTarget)
+			{
+			case ENiagaraSimTarget::CPUSim:          SimTarget = TEXT("CPUSim"); break;
+			case ENiagaraSimTarget::GPUComputeSim:   SimTarget = TEXT("GPUComputeSim"); break;
+			default:                                 SimTarget = TEXT("Unknown"); break;
+			}
+			EObj->SetStringField(TEXT("sim_target"), SimTarget);
+
+			// Renderer count
+			EObj->SetNumberField(TEXT("renderer_count"), ED->GetRenderers().Num());
+		}
+		else
+		{
+			EObj->SetStringField(TEXT("sim_target"), TEXT("Unknown"));
+			EObj->SetNumberField(TEXT("renderer_count"), 0);
+		}
+
+		EmitterArr.Add(MakeShared<FJsonValueObject>(EObj));
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetArrayField(TEXT("emitters"), EmitterArr);
+	R->SetNumberField(TEXT("count"), Handles.Num());
+	return SuccessObj(R);
+}
+
+FMonolithActionResult FMonolithNiagaraActions::HandleListRenderers(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	int32 EIdx = FindEmitterHandleIndex(System, EmitterHandleId);
+	if (EIdx == INDEX_NONE) return FMonolithActionResult::Error(TEXT("Emitter not found"));
+
+	FVersionedNiagaraEmitterData* ED = System->GetEmitterHandles()[EIdx].GetEmitterData();
+	if (!ED) return FMonolithActionResult::Error(TEXT("No emitter data"));
+
+	const TArray<UNiagaraRendererProperties*>& Renderers = ED->GetRenderers();
+	TArray<TSharedPtr<FJsonValue>> RendArr;
+	RendArr.Reserve(Renderers.Num());
+
+	for (int32 i = 0; i < Renderers.Num(); ++i)
+	{
+		UNiagaraRendererProperties* Rend = Renderers[i];
+		if (!Rend) continue;
+
+		TSharedRef<FJsonObject> RObj = MakeShared<FJsonObject>();
+		RObj->SetNumberField(TEXT("index"), i);
+		RObj->SetStringField(TEXT("class"), Rend->GetClass()->GetName());
+		RObj->SetBoolField(TEXT("enabled"), Rend->GetIsEnabled());
+
+		// Extract material path if applicable
+		UMaterialInterface* Mat = nullptr;
+		if (UNiagaraSpriteRendererProperties* S = Cast<UNiagaraSpriteRendererProperties>(Rend))
+		{
+			Mat = S->Material;
+		}
+		else if (UNiagaraRibbonRendererProperties* Rib = Cast<UNiagaraRibbonRendererProperties>(Rend))
+		{
+			Mat = Rib->Material;
+		}
+		else if (UNiagaraMeshRendererProperties* M = Cast<UNiagaraMeshRendererProperties>(Rend))
+		{
+			if (M->bOverrideMaterials && M->OverrideMaterials.Num() > 0)
+			{
+				Mat = M->OverrideMaterials[0].ExplicitMat;
+			}
+		}
+		else
+		{
+			// Generic fallback: check for a "Material" property
+			FProperty* MP = Rend->GetClass()->FindPropertyByName(TEXT("Material"));
+			if (FObjectProperty* OP = CastField<FObjectProperty>(MP))
+			{
+				Mat = Cast<UMaterialInterface>(OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(Rend)));
+			}
+		}
+
+		if (Mat)
+		{
+			RObj->SetStringField(TEXT("material"), Mat->GetPathName());
+		}
+
+		RendArr.Add(MakeShared<FJsonValueObject>(RObj));
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetArrayField(TEXT("renderers"), RendArr);
+	R->SetNumberField(TEXT("count"), Renderers.Num());
+	return SuccessObj(R);
 }

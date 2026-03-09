@@ -5,7 +5,7 @@ description: Use when working with Unreal Engine Blueprints via Monolith MCP —
 
 # Unreal Blueprint Workflows
 
-You have access to **Monolith** with deep Blueprint introspection via `blueprint.query()`.
+You have access to **Monolith** with 6 Blueprint introspection actions via `blueprint.query()`.
 
 ## Discovery
 
@@ -14,15 +14,22 @@ Always discover available actions first:
 monolith.discover({ namespace: "blueprint" })
 ```
 
+## Key Parameter Names
+
+- `asset_path` — the Blueprint asset path (NOT `asset`)
+- `graph_name` — graph name (returned by `list_graphs`)
+- `entry_point` — entry point for execution flow tracing
+
 ## Action Reference
 
 | Action | Key Params | Purpose |
 |--------|-----------|---------|
-| `list_graphs` | `asset` | List all event/function/macro graphs in a Blueprint |
-| `get_graph_data` | `asset`, `graph` | Full node topology — pins, connections, positions |
-| `get_variables` | `asset` | Variables with types, defaults, categories, replication |
-| `get_execution_flow` | `asset`, `graph` | Trace execution wires from entry to terminal nodes |
-| `search_nodes` | `asset`, `query` | Find nodes by class name, display name, or comment |
+| `list_graphs` | `asset_path` | List all event/function/macro graphs in a Blueprint |
+| `get_graph_summary` | `asset_path`, `graph_name` | Lightweight graph overview — node counts by type, entry points, no full payload |
+| `get_graph_data` | `asset_path`, `graph_name`, `node_class_filter`? | Full node topology — pins, connections, positions. Optional `node_class_filter` to return only specific node types |
+| `get_variables` | `asset_path` | Variables with types, real default values, categories, replication |
+| `get_execution_flow` | `asset_path`, `graph_name`, `entry_point` | Trace execution wires from entry to terminal nodes |
+| `search_nodes` | `asset_path`, `query` | Find nodes by class name, display name, or comment |
 
 ## Asset Path Conventions
 
@@ -30,32 +37,26 @@ All asset paths follow UE content browser format (no .uasset extension):
 
 | Location | Path Format | Example |
 |----------|------------|---------|
-| Project Content/ | `/Game/Path/To/Asset` | `/Game/Materials/M_Rock` |
-| Project Plugins/ | `/PluginName/Path/To/Asset` | `/CarnageFX/Materials/M_Blood` |
+| Project Content/ | `/Game/Path/To/Asset` | `/Game/Blueprints/BP_Player` |
+| Project Plugins/ | `/PluginName/Path/To/Asset` | `/CarnageFX/Blueprints/BP_Blood` |
 | Engine Plugins | `/PluginName/Path/To/Asset` | `/Niagara/DefaultAssets/SystemAssets/NS_Default` |
-
-**Note:** For project plugins, the path starts with the plugin name as configured in the .uplugin file's "MountPoint" — which defaults to `/<PluginName>/`. Most plugins mount their Content/ folder there directly.
-
-```
-blueprint.query({ action: "list_graphs", params: { asset: "/Game/Blueprints/BP_Player" } })
-```
 
 ## Common Workflows
 
 ### Understand a Blueprint's structure
 ```
-blueprint.query({ action: "list_graphs", params: { asset: "/Game/Blueprints/BP_Enemy" } })
-blueprint.query({ action: "get_variables", params: { asset: "/Game/Blueprints/BP_Enemy" } })
+blueprint.query({ action: "list_graphs", params: { asset_path: "/Game/Blueprints/BP_Enemy" } })
+blueprint.query({ action: "get_variables", params: { asset_path: "/Game/Blueprints/BP_Enemy" } })
 ```
 
 ### Trace logic flow
 ```
-blueprint.query({ action: "get_execution_flow", params: { asset: "/Game/Blueprints/BP_Enemy", graph: "EventGraph" } })
+blueprint.query({ action: "get_execution_flow", params: { asset_path: "/Game/Blueprints/BP_Enemy", graph_name: "EventGraph" } })
 ```
 
 ### Find where a function is called
 ```
-blueprint.query({ action: "search_nodes", params: { asset: "/Game/Blueprints/BP_Enemy", query: "TakeDamage" } })
+blueprint.query({ action: "search_nodes", params: { asset_path: "/Game/Blueprints/BP_Enemy", query: "TakeDamage" } })
 ```
 
 ### Find Blueprints across the project
@@ -66,8 +67,10 @@ project.query({ action: "search", params: { query: "BP_Enemy", type: "Blueprint"
 
 ## Tips
 
+- **Use `get_graph_summary` first** to understand structure, then `get_graph_data` with `node_class_filter` for specific node types — avoids 172KB+ payloads
 - **Graph names** are returned by `list_graphs` — use exact names for drill-down calls
+- The primary asset param is `asset_path` (not `asset`), and graph param is `graph_name` (not `graph`)
 - **Pin connections** in `get_graph_data` show both execution (white) and data (colored) wires
 - **Execution flow** traces only follow white exec pins — data flow is shown in graph data
-- **Variables** include replication flags (`Replicated`, `RepNotify`) and `EditAnywhere`/`BlueprintReadOnly` specifiers
+- **Variables** include replication flags (`Replicated`, `RepNotify`) and `EditAnywhere`/`BlueprintReadOnly` specifiers — `get_variables` now returns real default values
 - For C++ parent class analysis, combine with `source.query("get_class_hierarchy", ...)`

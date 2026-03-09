@@ -1,5 +1,6 @@
 #include "Actions/ProjectSearchAction.h"
 #include "MonolithIndexSubsystem.h"
+#include "MonolithParamSchema.h"
 #include "Editor.h"
 
 FMonolithActionResult FProjectSearchAction::Execute(const TSharedPtr<FJsonObject>& Params)
@@ -50,26 +51,8 @@ FMonolithActionResult FProjectSearchAction::Execute(const TSharedPtr<FJsonObject
 
 TSharedPtr<FJsonObject> FProjectSearchAction::GetSchema()
 {
-	auto Schema = MakeShared<FJsonObject>();
-	Schema->SetStringField(TEXT("type"), TEXT("object"));
-
-	auto Properties = MakeShared<FJsonObject>();
-
-	auto QueryProp = MakeShared<FJsonObject>();
-	QueryProp->SetStringField(TEXT("type"), TEXT("string"));
-	QueryProp->SetStringField(TEXT("description"), TEXT("FTS5 search query (supports AND, OR, NOT, prefix*)"));
-	Properties->SetObjectField(TEXT("query"), QueryProp);
-
-	auto LimitProp = MakeShared<FJsonObject>();
-	LimitProp->SetStringField(TEXT("type"), TEXT("integer"));
-	LimitProp->SetStringField(TEXT("description"), TEXT("Maximum results to return (default 50)"));
-	Properties->SetObjectField(TEXT("limit"), LimitProp);
-
-	Schema->SetObjectField(TEXT("properties"), Properties);
-
-	TArray<TSharedPtr<FJsonValue>> Required;
-	Required.Add(MakeShared<FJsonValueString>(TEXT("query")));
-	Schema->SetArrayField(TEXT("required"), Required);
-
-	return Schema;
+	return FParamSchemaBuilder()
+		.Required(TEXT("query"), TEXT("string"), TEXT("FTS5 search query (supports AND, OR, NOT, prefix*)"))
+		.Optional(TEXT("limit"), TEXT("integer"), TEXT("Maximum results to return"), TEXT("50"))
+		.Build();
 }

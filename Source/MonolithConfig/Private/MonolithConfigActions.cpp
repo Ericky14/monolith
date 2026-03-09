@@ -1,5 +1,6 @@
 #include "MonolithConfigActions.h"
 #include "MonolithToolRegistry.h"
+#include "MonolithParamSchema.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/ConfigCacheIni.h"
@@ -16,27 +17,53 @@ void FMonolithConfigActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("config"), TEXT("resolve_setting"),
 		TEXT("Get effective value of a config key across the full INI hierarchy"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::ResolveSetting));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::ResolveSetting),
+		FParamSchemaBuilder()
+			.Required(TEXT("file"), TEXT("string"), TEXT("Config category (e.g. Engine, Game, Input)"))
+			.Required(TEXT("section"), TEXT("string"), TEXT("Config section (e.g. /Script/Engine.RendererSettings)"))
+			.Required(TEXT("key"), TEXT("string"), TEXT("Config key name"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("config"), TEXT("explain_setting"),
 		TEXT("Show where a config value comes from across Base->Default->User layers"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::ExplainSetting));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::ExplainSetting),
+		FParamSchemaBuilder()
+			.Optional(TEXT("file"), TEXT("string"), TEXT("Config category (e.g. Engine, Game)"))
+			.Optional(TEXT("section"), TEXT("string"), TEXT("Config section"))
+			.Optional(TEXT("key"), TEXT("string"), TEXT("Config key name"))
+			.Optional(TEXT("setting"), TEXT("string"), TEXT("Convenience: search for this key across common categories"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("config"), TEXT("diff_from_default"),
 		TEXT("Show project config overrides vs engine defaults for a category"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::DiffFromDefault));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::DiffFromDefault),
+		FParamSchemaBuilder()
+			.Required(TEXT("file"), TEXT("string"), TEXT("Config category to diff (e.g. Engine, Game)"))
+			.Optional(TEXT("section"), TEXT("string"), TEXT("Filter to a specific section"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("config"), TEXT("search_config"),
 		TEXT("Full-text search across all config files"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::SearchConfig));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::SearchConfig),
+		FParamSchemaBuilder()
+			.Required(TEXT("query"), TEXT("string"), TEXT("Search text"))
+			.Optional(TEXT("category"), TEXT("string"), TEXT("Filter to a config category"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("config"), TEXT("get_section"),
 		TEXT("Read an entire config section from a specific file"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::GetSection));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::GetSection),
+		FParamSchemaBuilder()
+			.Required(TEXT("file"), TEXT("string"), TEXT("Config file name or category"))
+			.Required(TEXT("section"), TEXT("string"), TEXT("Section name"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("config"), TEXT("get_config_files"),
 		TEXT("List all config files with their hierarchy level"),
-		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::GetConfigFiles));
+		FMonolithActionHandler::CreateStatic(&FMonolithConfigActions::GetConfigFiles),
+		FParamSchemaBuilder()
+			.Optional(TEXT("category"), TEXT("string"), TEXT("Filter to a specific category"))
+			.Build());
 }
 
 // ============================================================================

@@ -1,5 +1,6 @@
 #include "Actions/ProjectFindReferencesAction.h"
 #include "MonolithIndexSubsystem.h"
+#include "MonolithParamSchema.h"
 #include "Editor.h"
 
 FMonolithActionResult FProjectFindReferencesAction::Execute(const TSharedPtr<FJsonObject>& Params)
@@ -35,19 +36,7 @@ FMonolithActionResult FProjectFindReferencesAction::Execute(const TSharedPtr<FJs
 
 TSharedPtr<FJsonObject> FProjectFindReferencesAction::GetSchema()
 {
-	auto Schema = MakeShared<FJsonObject>();
-	Schema->SetStringField(TEXT("type"), TEXT("object"));
-
-	auto Properties = MakeShared<FJsonObject>();
-	auto PathProp = MakeShared<FJsonObject>();
-	PathProp->SetStringField(TEXT("type"), TEXT("string"));
-	PathProp->SetStringField(TEXT("description"), TEXT("Package path of the asset (e.g. /Game/Characters/BP_Hero)"));
-	Properties->SetObjectField(TEXT("asset_path"), PathProp);
-	Schema->SetObjectField(TEXT("properties"), Properties);
-
-	TArray<TSharedPtr<FJsonValue>> Required;
-	Required.Add(MakeShared<FJsonValueString>(TEXT("asset_path")));
-	Schema->SetArrayField(TEXT("required"), Required);
-
-	return Schema;
+	return FParamSchemaBuilder()
+		.Required(TEXT("asset_path"), TEXT("string"), TEXT("Package path of the asset (e.g. /Game/Characters/BP_Hero)"))
+		.Build();
 }

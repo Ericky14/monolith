@@ -2,6 +2,7 @@
 #include "MonolithSourceDatabase.h"
 #include "MonolithSourceSubsystem.h"
 #include "MonolithToolRegistry.h"
+#include "MonolithParamSchema.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/FileHelper.h"
@@ -19,43 +20,89 @@ void FMonolithSourceActions::RegisterAll()
 
 	Registry.RegisterAction(TEXT("source"), TEXT("read_source"),
 		TEXT("Get the implementation source code for a class, function, or struct"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleReadSource));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleReadSource),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Symbol name (class, function, or struct)"))
+			.Optional(TEXT("include_header"), TEXT("bool"), TEXT("Include the header declaration"), TEXT("false"))
+			.Optional(TEXT("max_lines"), TEXT("integer"), TEXT("Max lines to return"), TEXT("500"))
+			.Optional(TEXT("members_only"), TEXT("bool"), TEXT("Only show class members, not full body"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("find_references"),
 		TEXT("Find all usage sites of a symbol (calls, includes, type references)"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindReferences));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindReferences),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Symbol name to find references for"))
+			.Optional(TEXT("ref_kind"), TEXT("string"), TEXT("Filter by reference kind"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results"), TEXT("50"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("find_callers"),
 		TEXT("Find all functions that call the given function"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindCallers));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindCallers),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Function name"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results"), TEXT("50"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("find_callees"),
 		TEXT("Find all functions called by the given function"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindCallees));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleFindCallees),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Function name"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results"), TEXT("50"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("search_source"),
 		TEXT("Full-text search across Unreal Engine source code and shaders"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleSearchSource));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleSearchSource),
+		FParamSchemaBuilder()
+			.Required(TEXT("query"), TEXT("string"), TEXT("Search query"))
+			.Optional(TEXT("scope"), TEXT("string"), TEXT("Search scope (all, engine, shaders)"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results"), TEXT("50"))
+			.Optional(TEXT("mode"), TEXT("string"), TEXT("Search mode (fts, regex, exact)"))
+			.Optional(TEXT("module"), TEXT("string"), TEXT("Filter to a specific module"))
+			.Optional(TEXT("path_filter"), TEXT("string"), TEXT("Filter by file path pattern"))
+			.Optional(TEXT("symbol_kind"), TEXT("string"), TEXT("Filter by symbol kind (class, function, enum, etc.)"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("get_class_hierarchy"),
 		TEXT("Show the inheritance tree for a class"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetClassHierarchy));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetClassHierarchy),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Class name"))
+			.Optional(TEXT("direction"), TEXT("string"), TEXT("Direction: up (parents) or down (children)"), TEXT("both"))
+			.Optional(TEXT("depth"), TEXT("integer"), TEXT("Max hierarchy depth"), TEXT("5"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("get_module_info"),
 		TEXT("Get module statistics: file count, symbol counts by kind, and key classes"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetModuleInfo));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetModuleInfo),
+		FParamSchemaBuilder()
+			.Required(TEXT("module_name"), TEXT("string"), TEXT("Module name"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("get_symbol_context"),
 		TEXT("Get a symbol definition with surrounding context lines"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetSymbolContext));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleGetSymbolContext),
+		FParamSchemaBuilder()
+			.Required(TEXT("symbol"), TEXT("string"), TEXT("Symbol name"))
+			.Optional(TEXT("context_lines"), TEXT("integer"), TEXT("Lines of context around the definition"), TEXT("10"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("read_file"),
 		TEXT("Read source lines from a file by path"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleReadFile));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleReadFile),
+		FParamSchemaBuilder()
+			.Required(TEXT("file_path"), TEXT("string"), TEXT("Source file path"))
+			.Optional(TEXT("start_line"), TEXT("integer"), TEXT("First line to read"), TEXT("1"))
+			.Optional(TEXT("end_line"), TEXT("integer"), TEXT("Last line to read"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("trigger_reindex"),
 		TEXT("Trigger Python indexer to rebuild the engine source DB"),
-		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleTriggerReindex));
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleTriggerReindex),
+		MakeShared<FJsonObject>());
 }
 
 // ============================================================================

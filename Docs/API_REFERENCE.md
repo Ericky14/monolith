@@ -1,6 +1,6 @@
 # Monolith API Reference
 
-**Total Actions: 119** across 9 namespaces
+**Total Actions: 122** across 9 namespaces
 
 > Auto-generated from action registration code. Each action is called via HTTP POST to `http://localhost:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`.
 
@@ -11,10 +11,10 @@
 | Namespace | Actions | Description |
 |-----------|---------|-------------|
 | [monolith](#monolith) | 4 | Core server tools (discover, status, update, reindex) |
-| [blueprint](#blueprint) | 5 | Blueprint graph introspection |
+| [blueprint](#blueprint) | 6 | Blueprint graph introspection |
 | [material](#material) | 14 | Material graph editing and inspection |
 | [animation](#animation) | 23 | Animation montages, blend spaces, state machines, skeletons |
-| [niagara](#niagara) | 39 | Niagara VFX system editing (emitters, modules, params, renderers) |
+| [niagara](#niagara) | 41 | Niagara VFX system editing (emitters, modules, params, renderers) |
 | [editor](#editor) | 13 | Live Coding builds, compile output capture, and editor log capture |
 | [config](#config) | 6 | INI config file inspection and search |
 | [project](#project) | 5 | Project-wide asset index (SQLite + FTS5) |
@@ -29,6 +29,8 @@ Core server management and introspection tools.
 ### `monolith.discover`
 
 List available tool namespaces and their actions. Pass namespace to filter.
+
+> **New in Wave 2:** `discover` now returns per-action param schemas for all 122 actions, so callers can see required/optional params without consulting docs.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -78,6 +80,19 @@ List all graphs in a Blueprint asset.
 
 ---
 
+### `blueprint.get_graph_summary`
+
+Get a lightweight graph overview with node id/class/title and exec connections only. Much smaller payload than `get_graph_data` (~10KB vs ~172KB for complex graphs).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Blueprint asset |
+| `graph_name` | string | optional | Graph name. Defaults to first UbergraphPage |
+
+**Returns:** Array of nodes (id, class, title) and exec-only connections. No pin details or positions.
+
+---
+
 ### `blueprint.get_graph_data`
 
 Get full graph data with all nodes, pins, and connections.
@@ -86,6 +101,7 @@ Get full graph data with all nodes, pins, and connections.
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the Blueprint asset |
 | `graph_name` | string | optional | Graph name. Defaults to first UbergraphPage |
+| `node_class_filter` | string | optional | Filter nodes by class name (case-insensitive substring match) |
 
 **Returns:** Full node list with IDs, classes, titles, positions, pin details, and connections.
 
@@ -214,6 +230,8 @@ Export complete material graph to JSON (round-trippable with build_material_grap
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the material asset |
+| `include_properties` | bool | optional | Include node property details. Default: `true` |
+| `include_positions` | bool | optional | Include node X/Y positions. Default: `true` |
 
 ---
 
@@ -259,6 +277,7 @@ Get material thumbnail as base64-encoded PNG.
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the material asset |
 | `resolution` | number | optional | Thumbnail resolution in pixels. Default: `256` |
+| `save_to_file` | bool | optional | Save thumbnail to `Saved/Monolith/thumbnails/` instead of returning base64. Default: `false` |
 
 ---
 
@@ -444,12 +463,13 @@ Get all graphs in an animation blueprint.
 
 ### `animation.get_nodes`
 
-Get animation nodes with optional class filter.
+Get animation nodes with optional class and graph filters.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the anim blueprint |
 | `node_class_filter` | string | optional | Filter by node class name |
+| `graph_name` | string | optional | Filter to a specific graph by name |
 
 ---
 
@@ -561,6 +581,8 @@ Get skeletal mesh info including morph targets, sockets, LODs, and materials.
 
 Niagara VFX system editing -- emitters, modules, parameters, renderers, and batch operations.
 
+> **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
+
 ### Emitter Actions
 
 #### `niagara.add_emitter`
@@ -652,6 +674,31 @@ Create a new Niagara system.
 |-----------|------|----------|-------------|
 | `save_path` | string | **required** | Package path to save the new system |
 | `template` | string | optional | Template system asset path |
+
+---
+
+#### `niagara.list_emitters`
+
+List all emitters in a Niagara system with summary info.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Niagara system |
+
+**Returns:** Array of emitters with name, index, enabled, sim_target, and renderer_count.
+
+---
+
+#### `niagara.list_renderers`
+
+List all renderers across emitters in a Niagara system.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Niagara system |
+| `emitter` | string | optional | Filter to a specific emitter |
+
+**Returns:** Array of renderers with emitter, renderer class, index, enabled, and material.
 
 ---
 
@@ -1317,7 +1364,7 @@ Find all functions that call the given function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `function` | string | **required** | Function name |
+| `symbol` | string | **required** | Function name |
 | `limit` | number | optional | Maximum results. Default: `50` |
 
 ---
@@ -1328,7 +1375,7 @@ Find all functions called by the given function.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `function` | string | **required** | Function name |
+| `symbol` | string | **required** | Function name |
 | `limit` | number | optional | Maximum results. Default: `50` |
 
 ---
@@ -1388,7 +1435,7 @@ Read source lines from a file by path.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | **required** | File path (relative to engine or absolute) |
+| `file_path` | string | **required** | File path (relative to engine or absolute) |
 | `start_line` | number | optional | Start line. Default: `1` |
 | `end_line` | number | optional | End line. Default: `0` (end of file) |
 

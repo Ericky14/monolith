@@ -5,7 +5,7 @@ description: Use when creating, editing, or inspecting Unreal Engine materials v
 
 # Unreal Material Workflows
 
-You have access to **Monolith** with 46 material actions via `material.query()`.
+You have access to **Monolith** with 14 material actions via `material.query()`.
 
 ## Discovery
 
@@ -23,31 +23,35 @@ All asset paths follow UE content browser format (no .uasset extension):
 | Project Plugins/ | `/PluginName/Path/To/Asset` | `/CarnageFX/Materials/M_Blood` |
 | Engine Plugins | `/PluginName/Path/To/Asset` | `/Niagara/DefaultAssets/SystemAssets/NS_Default` |
 
-**Note:** For project plugins, the path starts with the plugin name as configured in the .uplugin file's "MountPoint" — which defaults to `/<PluginName>/`. Most plugins mount their Content/ folder there directly.
+## Key Parameter Names
 
-## Key Actions
+- `asset_path` — the material asset path (NOT `asset`)
 
-| Action | Purpose |
-|--------|---------|
-| `get_all_expressions` | List all expression nodes in a material |
-| `get_expression_details` | Inspect a specific node's properties and pins |
-| `get_full_connection_graph` | Complete node/wire topology |
-| `build_material_graph` | Create an entire graph from a JSON spec (fastest path) |
-| `disconnect_expression` | Remove connections from a node |
-| `create_custom_hlsl_node` | Add a Custom HLSL expression |
-| `begin_transaction` / `end_transaction` | Wrap edits in undo groups |
-| `export_material_graph` / `import_material_graph` | Serialize/deserialize graphs as JSON |
-| `validate_material` | Check for broken connections, unused nodes, errors |
-| `render_preview` | Trigger material compilation and preview |
-| `get_thumbnail` | Get material thumbnail image |
-| `get_layer_info` | Inspect material layer/blend stack |
+## Action Reference (14 actions)
+
+| Action | Key Params | Purpose |
+|--------|-----------|---------|
+| `get_all_expressions` | `asset_path` | List all expression nodes in a material |
+| `get_expression_details` | `asset_path`, `expression` | Inspect a specific node's properties and pins |
+| `get_full_connection_graph` | `asset_path` | Complete node/wire topology |
+| `build_material_graph` | `asset_path`, `nodes`, `connections` | Create an entire graph from a JSON spec (fastest path) |
+| `disconnect_expression` | `asset_path`, `expression` | Remove connections from a node |
+| `create_custom_hlsl_node` | `asset_path`, `code`, `inputs`, `outputs` | Add a Custom HLSL expression |
+| `begin_transaction` | `asset_path`, `description` | Start an undo group |
+| `end_transaction` | `asset_path` | End an undo group |
+| `export_material_graph` | `asset_path`, `include_properties`?, `include_positions`? | Serialize graph as JSON. Pass `include_properties: false` to reduce payload by ~70% |
+| `import_material_graph` | `asset_path`, `graph` | Deserialize graph from JSON |
+| `validate_material` | `asset_path` | Check for broken connections, unused nodes, errors |
+| `render_preview` | `asset_path` | Trigger material compilation and preview |
+| `get_thumbnail` | `asset_path`, `save_to_file`? | Get material thumbnail image. Use `save_to_file: true` to save to disk instead of inline base64 |
+| `get_layer_info` | `asset_path` | Inspect material layer/blend stack |
 
 ## PBR Material Workflow
 
 ### 1. Create a material and build the full graph in one call
 ```
 material.query({ action: "build_material_graph", params: {
-  asset: "/Game/Materials/M_Rock",  // or "/MyPlugin/Materials/M_Rock" for plugin assets
+  asset_path: "/Game/Materials/M_Rock",
   create_if_missing: true,
   nodes: [
     { type: "TextureSample", name: "BaseColor", params: { Texture: "/Game/Textures/T_Rock_D" } },
@@ -66,28 +70,31 @@ material.query({ action: "build_material_graph", params: {
 
 ### 2. Validate after changes
 ```
-material.query({ action: "validate_material", params: { asset: "/Game/Materials/M_Rock" } })
+material.query({ action: "validate_material", params: { asset_path: "/Game/Materials/M_Rock" } })
 ```
 
 ## Editing Existing Materials
 
 Always inspect before modifying:
 ```
-material.query({ action: "get_all_expressions", params: { asset: "/Game/Materials/M_Skin" } })
-material.query({ action: "get_full_connection_graph", params: { asset: "/Game/Materials/M_Skin" } })
+material.query({ action: "get_all_expressions", params: { asset_path: "/Game/Materials/M_Skin" } })
+material.query({ action: "get_full_connection_graph", params: { asset_path: "/Game/Materials/M_Skin" } })
 ```
 
 Wrap modifications in transactions for undo support:
 ```
-material.query({ action: "begin_transaction", params: { asset: "/Game/Materials/M_Skin", description: "Add emissive" } })
+material.query({ action: "begin_transaction", params: { asset_path: "/Game/Materials/M_Skin", description: "Add emissive" } })
 // ... make changes ...
-material.query({ action: "end_transaction", params: { asset: "/Game/Materials/M_Skin" } })
+material.query({ action: "end_transaction", params: { asset_path: "/Game/Materials/M_Skin" } })
 ```
 
 ## Rules
 
 - **Graph editing only works on base Materials**, not MaterialInstanceConstants
+- The primary asset param is `asset_path` (not `asset`)
 - Always call `validate_material` after graph changes
 - `build_material_graph` is the fastest way to create complex graphs — single JSON spec for all nodes + wires
 - Use `export_material_graph` to snapshot a graph before making destructive changes
-- Asset paths follow the conventions in the Asset Path Conventions section above
+- Use `get_all_expressions` + `get_full_connection_graph` for inspection. Only use `export_material_graph` for round-tripping. Pass `include_properties: false` to reduce payload by ~70%
+- Use `render_preview` or `get_thumbnail` with `save_to_file: true` — inline base64 wastes context window
+- There are exactly 14 material actions — use `monolith.discover("material")` to see them all

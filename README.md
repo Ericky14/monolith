@@ -71,6 +71,14 @@ git clone https://github.com/tumourlove/monolith.git Monolith
 
 Download the latest release from [GitHub Releases](https://github.com/tumourlove/monolith/releases), extract it, and place the folder at `YourProject/Plugins/Monolith/`. The release ZIP includes precompiled DLLs — Blueprint-only projects can launch the editor immediately without rebuilding. C++ projects should rebuild first.
 
+**Option C: Let your AI install it**
+
+If you're already in a Claude Code, Cursor, or Cline session, just tell your AI:
+
+> "Install the Monolith plugin from https://github.com/tumourlove/monolith into my project's Plugins folder"
+
+The AI will clone the repo, create `.mcp.json`, and configure everything for you. It can also detect your MCP client and use the correct transport type automatically. After it finishes, **restart your AI session** so it picks up the new MCP server from `.mcp.json`, then skip to [Step 3](#step-3-launch-unreal-editor).
+
 ### Step 2: Configure the MCP Connection
 
 Create a file called `.mcp.json` in your **project root** — the same directory as your `.uproject` file:
@@ -85,6 +93,8 @@ YourProject/
 
 Paste this exact content into `.mcp.json`:
 
+**For Cursor / Cline:**
+
 ```json
 {
   "mcpServers": {
@@ -95,6 +105,21 @@ Paste this exact content into `.mcp.json`:
   }
 }
 ```
+
+**For Claude Code:**
+
+```json
+{
+  "mcpServers": {
+    "monolith": {
+      "type": "http",
+      "url": "http://localhost:9316/mcp"
+    }
+  }
+}
+```
+
+> **Important:** Claude Code uses `"http"` as the transport type, while Cursor and Cline use `"streamableHttp"`. Using the wrong type will cause connection failures.
 
 This tells your AI client where to find Monolith's MCP server. You can also copy the template:
 
@@ -156,17 +181,17 @@ cp -r Plugins/Monolith/Skills/* ~/.claude/skills/
 ```
 Monolith.uplugin
   MonolithCore          — HTTP server, tool registry, discovery, auto-updater (4 actions)
-  MonolithBlueprint     — Blueprint graph reading (5 actions)
+  MonolithBlueprint     — Blueprint graph reading (6 actions)
   MonolithMaterial      — Material inspection + graph editing (14 actions)
   MonolithAnimation     — Animation sequences, montages, ABPs (23 actions)
-  MonolithNiagara       — Niagara particle systems (39 actions)
+  MonolithNiagara       — Niagara particle systems (41 actions)
   MonolithEditor        — Build triggers, log capture, compile output, crash context (13 actions)
   MonolithConfig        — Config/INI resolution and search (6 actions)
   MonolithIndex         — SQLite FTS5 deep project indexer (5 actions)
   MonolithSource        — Engine source + API lookup (10 actions)
 ```
 
-**119 actions total across 9 modules, exposed through ~14 namespace tools.**
+**122 actions total across 9 modules, exposed through ~14 namespace tools.**
 
 ### Tool Reference
 
@@ -176,10 +201,10 @@ Monolith.uplugin
 | `monolith` | `monolith_status` | — | Server health, version, index status |
 | `monolith` | `monolith_reindex` | — | Trigger full project re-index |
 | `monolith` | `monolith_update` | — | Check or install updates |
-| `blueprint` | `blueprint.query` | 5 | Graph topology, variables, execution flow, node search |
+| `blueprint` | `blueprint.query` | 6 | Graph topology, variables, execution flow, node search, graph summary |
 | `material` | `material.query` | 14 | Inspection, editing, graph building, previews, validation |
 | `animation` | `animation.query` | 23 | Montages, blend spaces, ABPs, skeletons, bone tracks |
-| `niagara` | `niagara.query` | 39 | Systems, emitters, modules, parameters, renderers, HLSL |
+| `niagara` | `niagara.query` | 41 | Systems, emitters, modules, parameters, renderers, HLSL |
 | `editor` | `editor.query` | 13 | Build triggers, error logs, compile output, crash context |
 | `config` | `config.query` | 6 | INI resolution, explain, diff, search |
 | `project` | `project.query` | 5 | Deep project search — FTS5 across all indexed assets |
@@ -207,7 +232,7 @@ Monolith includes a built-in auto-updater:
 | **MCP connection refused** | Make sure the editor is open and running. Check Output Log for port conflicts. Verify `.mcp.json` is in your project root. |
 | **Index shows 0 assets** | Run `monolith_reindex` or restart the editor. Check Output Log for indexing errors. |
 | **Source tools return empty results** | The Python engine source indexer hasn't been run. See Step 5 above. |
-| **Claude can't find any tools** | Check that `.mcp.json` has `"type": "streamableHttp"` (not `"http"` or `"sse"`). Restart Claude Code after creating the file. |
+| **Claude can't find any tools** | Check `.mcp.json` transport type: Claude Code uses `"http"`, Cursor/Cline use `"streamableHttp"`. Restart your AI client after creating the file. |
 | **Tools fail on first try** | Restart Claude Code to refresh the MCP connection. This is a known quirk with initial connection timing. |
 | **Port 9316 already in use** | Change the port in Editor Preferences > Plugins > Monolith, then update the port in `.mcp.json` to match. |
 | **Mac/Linux not working** | Monolith currently supports Windows only. Mac and Linux support is planned for a future release. |

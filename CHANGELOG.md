@@ -4,6 +4,61 @@ All notable changes to Monolith will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.2] - 2026-03-09
+
+Wave 2: Blueprint expansion, Material export controls, Niagara HLSL auto-compile, and discover param schemas.
+
+### Added
+
+- **Blueprint** — `get_graph_summary` action: lightweight graph overview (id/class/title + exec connections only, ~10KB vs 172KB)
+- **Blueprint** — `get_graph_data` now accepts optional `node_class_filter` param
+- **Material** — `export_material_graph` now accepts `include_properties` (bool) and `include_positions` (bool) params
+- **Material** — `get_thumbnail` now accepts `save_to_file` (bool) param
+- **All** — Per-action param schemas in `monolith.discover()` output — all 122 actions now self-document their params
+
+### Fixed
+
+- **Blueprint** — `get_variables` now reads default values from CDO (was always empty)
+- **Blueprint** — BlueprintIndexer CDO fix — same default value extraction applied to indexer
+- **Niagara** — `get_compiled_gpu_hlsl` auto-compiles system if HLSL not available
+- **Niagara** — `User.` prefix now stripped in `get_parameter_value`, `trace_parameter_binding`, `remove_user_parameter`, `set_parameter_default`
+
+### Changed
+
+- **Blueprint** — Action count 5 -> 6
+- **Total** — Action count 121 -> 122
+
+## [0.5.1] - 2026-03-09
+
+Indexer reliability, Niagara usability, and Animation accuracy fixes.
+
+### Fixed
+
+- **Indexer** — Auto-index deferred to `IAssetRegistry::OnFilesLoaded()` — was running too early, only indexing 193 of 9560 assets
+- **Indexer** — Sanity check: if fewer than 500 assets indexed, skip writing `last_full_index` so next launch retries
+- **Indexer** — `bIsIndexing` reset in `Deinitialize()` to prevent stuck flag across editor sessions
+- **Indexer** — Index DB changed from WAL to DELETE journal mode
+- **Niagara** — `trace_parameter_binding` missing OR fallback for `User.` prefix
+- **Niagara** — `get_di_functions` reversed class name pattern — now tries `UNiagaraDataInterface<Name>`
+- **Niagara** — `batch_execute` had 3 op name mismatches — old names kept as aliases
+- **Animation** — State machine names stripped of `\n` suffix (clean names like "InAir" instead of "InAir\nState Machine")
+- **Animation** — `get_state_info` now validates required params (`machine_name`, `state_name`)
+- **Animation** — State machine matching changed from fuzzy `Contains()` to exact match
+
+### Added
+
+- **Niagara** — `list_emitters` action: returns emitter names, index, enabled, sim_target, renderer_count
+- **Niagara** — `list_renderers` action: returns renderer class, index, enabled, material
+- **Niagara** — All actions now accept `asset_path` (preferred) with `system_path` as backward-compat alias
+- **Niagara** — `duplicate_emitter` accepts `emitter` as alias for `source_emitter`
+- **Niagara** — `set_curve_value` accepts `module_node` as alias for `module`
+- **Animation** — `get_nodes` now accepts optional `graph_name` filter (makes `get_blend_nodes` redundant for filtered queries)
+
+### Changed
+
+- **Niagara** — Action count 39 → 41
+- **Total** — Action count 119 → 121
+
 ## [0.5.0] - 2026-03-08
 
 Auto-updater rewrite — fixes all swap script failures on Windows.
@@ -57,7 +112,7 @@ Initial beta release. One plugin, 9 domains, 119 actions.
 - **MonolithCore** — Plugin settings via UDeveloperSettings (port, auto-update, module toggles, DB paths)
 - **MonolithCore** — Auto-updater via GitHub Releases (download, stage, notify)
 - **MonolithCore** — Asset loading with 4-tier fallback (StaticLoadObject -> PackageName.ObjectName -> FindObject+_C -> ForEachObjectWithPackage)
-- **MonolithBlueprint** — 5 actions: graph topology, variables, execution flow tracing, node search
+- **MonolithBlueprint** — 6 actions: graph topology, graph summary, variables, execution flow tracing, node search
 - **MonolithMaterial** — 14 actions: inspection, graph editing, build/export/import, validation, preview rendering, Custom HLSL nodes
 - **MonolithAnimation** — 23 actions: montage sections, blend space samples, ABP graph reading, notify editing, bone tracks, skeleton info
 - **MonolithNiagara** — 39 actions: system/emitter management, module stack operations, parameters, renderers, batch execute, declarative system builder

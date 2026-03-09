@@ -1,5 +1,6 @@
 #include "MonolithMaterialActions.h"
 #include "MonolithToolRegistry.h"
+#include "MonolithParamSchema.h"
 
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
@@ -8,6 +9,8 @@
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialExpressionCustomOutput.h"
+#include "Materials/MaterialExpressionMaterialAttributeLayers.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialFunctionMaterialLayer.h"
@@ -38,59 +41,120 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("material"), TEXT("get_all_expressions"),
 		TEXT("Get all expression nodes in a base material"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetAllExpressions));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetAllExpressions),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("get_expression_details"),
 		TEXT("Get full property reflection, inputs, and outputs for a single expression"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetExpressionDetails));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetExpressionDetails),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("expression_name"), TEXT("string"), TEXT("Name of the expression node"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("get_full_connection_graph"),
 		TEXT("Get the complete connection graph (all wires) of a material"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetFullConnectionGraph));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetFullConnectionGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("disconnect_expression"),
 		TEXT("Disconnect inputs or outputs on a named expression"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DisconnectExpression));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DisconnectExpression),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("expression_name"), TEXT("string"), TEXT("Name of the expression to disconnect"))
+			.Optional(TEXT("input_name"), TEXT("string"), TEXT("Specific input to disconnect"))
+			.Optional(TEXT("disconnect_outputs"), TEXT("bool"), TEXT("Also disconnect outputs"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("build_material_graph"),
 		TEXT("Build entire material graph from JSON spec in a single undo transaction"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BuildMaterialGraph));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BuildMaterialGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("graph_spec"), TEXT("object"), TEXT("JSON specification of the material graph"))
+			.Optional(TEXT("clear_existing"), TEXT("bool"), TEXT("Clear existing expressions before building"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("begin_transaction"),
 		TEXT("Begin a named undo transaction for batching edits"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BeginTransaction));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BeginTransaction),
+		FParamSchemaBuilder()
+			.Required(TEXT("transaction_name"), TEXT("string"), TEXT("Name for the undo transaction"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("end_transaction"),
 		TEXT("End the current undo transaction"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::EndTransaction));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::EndTransaction),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("export_material_graph"),
 		TEXT("Export complete material graph to JSON (round-trippable with build_material_graph)"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ExportMaterialGraph));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ExportMaterialGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Optional(TEXT("include_properties"), TEXT("bool"), TEXT("Include full property data"), TEXT("true"))
+			.Optional(TEXT("include_positions"), TEXT("bool"), TEXT("Include node positions"), TEXT("true"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("import_material_graph"),
 		TEXT("Import material graph from JSON string. Mode: overwrite or merge"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ImportMaterialGraph));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ImportMaterialGraph),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("graph_json"), TEXT("string"), TEXT("JSON string of the material graph"))
+			.Optional(TEXT("mode"), TEXT("string"), TEXT("Import mode: overwrite or merge"), TEXT("overwrite"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("validate_material"),
 		TEXT("Validate material graph health and optionally auto-fix issues"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ValidateMaterial));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ValidateMaterial),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Optional(TEXT("fix_issues"), TEXT("bool"), TEXT("Auto-fix detected issues"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("render_preview"),
 		TEXT("Render material preview to PNG file"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenderPreview));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenderPreview),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Optional(TEXT("resolution"), TEXT("integer"), TEXT("Preview resolution in pixels"), TEXT("256"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("get_thumbnail"),
 		TEXT("Get material thumbnail as base64-encoded PNG"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetThumbnail));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetThumbnail),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Optional(TEXT("resolution"), TEXT("integer"), TEXT("Thumbnail resolution"), TEXT("256"))
+			.Optional(TEXT("save_to_file"), TEXT("string"), TEXT("Optional file path to save PNG to disk"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("create_custom_hlsl_node"),
 		TEXT("Create a Custom HLSL expression node with inputs, outputs, and code"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateCustomHLSLNode));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateCustomHLSLNode),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material asset path"))
+			.Required(TEXT("code"), TEXT("string"), TEXT("HLSL code for the custom node"))
+			.Optional(TEXT("description"), TEXT("string"), TEXT("Node description"))
+			.Optional(TEXT("output_type"), TEXT("string"), TEXT("Output type (float, float2, float3, float4)"))
+			.Optional(TEXT("pos_x"), TEXT("integer"), TEXT("Node X position in graph"))
+			.Optional(TEXT("pos_y"), TEXT("integer"), TEXT("Node Y position in graph"))
+			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of input pin definitions"))
+			.Optional(TEXT("additional_outputs"), TEXT("array"), TEXT("Array of additional output pin definitions"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("get_layer_info"),
 		TEXT("Get Material Layer or Material Layer Blend info"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetLayerInfo));
+		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetLayerInfo),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Material Layer or Layer Blend asset path"))
+			.Build());
 }
 
 // ============================================================================
@@ -237,6 +301,8 @@ static const EMaterialProperty AllMaterialProperties[] =
 	MP_EmissiveColor, MP_Opacity, MP_OpacityMask, MP_Normal,
 	MP_WorldPositionOffset, MP_SubsurfaceColor, MP_AmbientOcclusion,
 	MP_Refraction, MP_PixelDepthOffset, MP_ShadingModel,
+	MP_Tangent, MP_Displacement, MP_CustomData0, MP_CustomData1,
+	MP_SurfaceThickness, MP_FrontMaterial, MP_MaterialAttributes,
 };
 
 /** Material output entries for connection graph */
@@ -263,6 +329,13 @@ static const FMaterialOutputEntry MaterialOutputEntries[] =
 	{ MP_Refraction,             TEXT("Refraction") },
 	{ MP_PixelDepthOffset,       TEXT("PixelDepthOffset") },
 	{ MP_ShadingModel,           TEXT("ShadingModel") },
+	{ MP_Tangent,                TEXT("Tangent") },
+	{ MP_Displacement,           TEXT("Displacement") },
+	{ MP_CustomData0,            TEXT("ClearCoat") },
+	{ MP_CustomData1,            TEXT("ClearCoatRoughness") },
+	{ MP_SurfaceThickness,       TEXT("SurfaceThickness") },
+	{ MP_FrontMaterial,          TEXT("FrontMaterial") },
+	{ MP_MaterialAttributes,     TEXT("MaterialAttributes") },
 };
 
 // ============================================================================
@@ -967,12 +1040,20 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 
 // ============================================================================
 // Action: export_material_graph
-// Params: { "asset_path": "..." }
+// Params: { "asset_path": "...", "include_properties": true, "include_positions": true }
 // ============================================================================
 
 FMonolithActionResult FMonolithMaterialActions::ExportMaterialGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	bool bIncludeProperties = true;
+	bool bIncludePositions = true;
+	if (Params.IsValid())
+	{
+		Params->TryGetBoolField(TEXT("include_properties"), bIncludeProperties);
+		Params->TryGetBoolField(TEXT("include_positions"), bIncludePositions);
+	}
 
 	UMaterial* Mat = LoadBaseMaterial(AssetPath);
 	if (!Mat)
@@ -1008,10 +1089,13 @@ FMonolithActionResult FMonolithMaterialActions::ExportMaterialGraph(const TShare
 			auto NodeJson = MakeShared<FJsonObject>();
 			NodeJson->SetStringField(TEXT("id"), Expr->GetName());
 
-			TArray<TSharedPtr<FJsonValue>> PosArr;
-			PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorX));
-			PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorY));
-			NodeJson->SetArrayField(TEXT("pos"), PosArr);
+			if (bIncludePositions)
+			{
+				TArray<TSharedPtr<FJsonValue>> PosArr;
+				PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorX));
+				PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorY));
+				NodeJson->SetArrayField(TEXT("pos"), PosArr);
+			}
 
 			NodeJson->SetStringField(TEXT("code"), CustomExpr->Code);
 			NodeJson->SetStringField(TEXT("description"), CustomExpr->Description);
@@ -1050,32 +1134,38 @@ FMonolithActionResult FMonolithMaterialActions::ExportMaterialGraph(const TShare
 			}
 			NodeJson->SetStringField(TEXT("class"), ClassName);
 
-			TArray<TSharedPtr<FJsonValue>> PosArr;
-			PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorX));
-			PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorY));
-			NodeJson->SetArrayField(TEXT("pos"), PosArr);
-
-			auto PropsJson = MakeShared<FJsonObject>();
-			for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
+			if (bIncludePositions)
 			{
-				FProperty* Prop = *PropIt;
-				if (!Prop || Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient))
-				{
-					continue;
-				}
-				if (Prop->GetOwnerClass() == UMaterialExpression::StaticClass())
-				{
-					continue;
-				}
-				FString ValueStr;
-				const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Expr);
-				Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
-				if (!ValueStr.IsEmpty())
-				{
-					PropsJson->SetStringField(Prop->GetName(), ValueStr);
-				}
+				TArray<TSharedPtr<FJsonValue>> PosArr;
+				PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorX));
+				PosArr.Add(MakeShared<FJsonValueNumber>(Expr->MaterialExpressionEditorY));
+				NodeJson->SetArrayField(TEXT("pos"), PosArr);
 			}
-			NodeJson->SetObjectField(TEXT("props"), PropsJson);
+
+			if (bIncludeProperties)
+			{
+				auto PropsJson = MakeShared<FJsonObject>();
+				for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
+				{
+					FProperty* Prop = *PropIt;
+					if (!Prop || Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient))
+					{
+						continue;
+					}
+					if (Prop->GetOwnerClass() == UMaterialExpression::StaticClass())
+					{
+						continue;
+					}
+					FString ValueStr;
+					const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Expr);
+					Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
+					if (!ValueStr.IsEmpty())
+					{
+						PropsJson->SetStringField(Prop->GetName(), ValueStr);
+					}
+				}
+				NodeJson->SetObjectField(TEXT("props"), PropsJson);
+			}
 
 			NodesArray.Add(MakeShared<FJsonValueObject>(NodeJson));
 		}
@@ -1262,6 +1352,32 @@ FMonolithActionResult FMonolithMaterialActions::ValidateMaterial(const TSharedPt
 			{
 				ReachableSet.Add(PropInput->Expression);
 				BfsQueue.Add(PropInput->Expression);
+			}
+		}
+	}
+
+	// Also seed from UMaterialExpressionCustomOutput subclasses — they are output terminals too
+	for (UMaterialExpression* Expr : Expressions)
+	{
+		if (Expr && Expr->IsA<UMaterialExpressionCustomOutput>())
+		{
+			if (!ReachableSet.Contains(Expr))
+			{
+				ReachableSet.Add(Expr);
+				BfsQueue.Add(Expr);
+			}
+		}
+	}
+
+	// Seed from UMaterialExpressionMaterialAttributeLayers — implicit output terminals for layer-blend materials
+	for (UMaterialExpression* Expr : Expressions)
+	{
+		if (Expr && Expr->IsA<UMaterialExpressionMaterialAttributeLayers>())
+		{
+			if (!ReachableSet.Contains(Expr))
+			{
+				ReachableSet.Add(Expr);
+				BfsQueue.Add(Expr);
 			}
 		}
 	}
@@ -1488,7 +1604,7 @@ FMonolithActionResult FMonolithMaterialActions::RenderPreview(const TSharedPtr<F
 
 // ============================================================================
 // Action: get_thumbnail
-// Params: { "asset_path": "...", "resolution": 256 }
+// Params: { "asset_path": "...", "resolution": 256, "save_to_file": false }
 // ============================================================================
 
 FMonolithActionResult FMonolithMaterialActions::GetThumbnail(const TSharedPtr<FJsonObject>& Params)
@@ -1498,6 +1614,12 @@ FMonolithActionResult FMonolithMaterialActions::GetThumbnail(const TSharedPtr<FJ
 	if (Resolution <= 0)
 	{
 		Resolution = 256;
+	}
+
+	bool bSaveToFile = false;
+	if (Params.IsValid())
+	{
+		Params->TryGetBoolField(TEXT("save_to_file"), bSaveToFile);
 	}
 
 	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
@@ -1528,15 +1650,32 @@ FMonolithActionResult FMonolithMaterialActions::GetThumbnail(const TSharedPtr<FJ
 		return FMonolithActionResult::Error(TEXT("Failed to compress thumbnail to PNG"));
 	}
 
-	FString Base64String = FBase64::Encode(PngData.GetData(), static_cast<uint32>(PngData.Num()));
-
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetNumberField(TEXT("width"), Width);
 	ResultJson->SetNumberField(TEXT("height"), Height);
-	ResultJson->SetStringField(TEXT("format"), TEXT("png"));
-	ResultJson->SetStringField(TEXT("encoding"), TEXT("base64"));
-	ResultJson->SetStringField(TEXT("data"), Base64String);
+
+	if (bSaveToFile)
+	{
+		FString AssetName = FPaths::GetBaseFilename(AssetPath);
+		FString SaveDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Monolith"), TEXT("previews"));
+		IFileManager::Get().MakeDirectory(*SaveDir, true);
+		FString FullPath = FPaths::Combine(SaveDir, FString::Printf(TEXT("%s_%d.png"), *AssetName, Resolution));
+
+		if (!FFileHelper::SaveArrayToFile(PngData, *FullPath))
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save thumbnail to '%s'"), *FullPath));
+		}
+
+		ResultJson->SetStringField(TEXT("file_path"), FullPath);
+	}
+	else
+	{
+		FString Base64String = FBase64::Encode(PngData.GetData(), static_cast<uint32>(PngData.Num()));
+		ResultJson->SetStringField(TEXT("format"), TEXT("png"));
+		ResultJson->SetStringField(TEXT("encoding"), TEXT("base64"));
+		ResultJson->SetStringField(TEXT("data"), Base64String);
+	}
 
 	return FMonolithActionResult::Success(ResultJson);
 }

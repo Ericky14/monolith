@@ -144,6 +144,19 @@ void FBlueprintIndexer::IndexVariables(UBlueprint* Blueprint, FMonolithIndexData
 		Var.VarType = VarDesc.VarType.PinCategory.ToString();
 		Var.Category = VarDesc.Category.ToString();
 		Var.DefaultValue = VarDesc.DefaultValue;
+		if (Var.DefaultValue.IsEmpty() && Blueprint->GeneratedClass)
+		{
+			UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject(false);
+			if (CDO)
+			{
+				FProperty* Prop = Blueprint->GeneratedClass->FindPropertyByName(VarDesc.VarName);
+				if (Prop)
+				{
+					const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CDO);
+					Prop->ExportTextItem_Direct(Var.DefaultValue, ValuePtr, nullptr, CDO, PPF_None);
+				}
+			}
+		}
 		Var.bIsExposed = !!(VarDesc.PropertyFlags & CPF_ExposeOnSpawn);
 		Var.bIsReplicated = !!(VarDesc.PropertyFlags & CPF_Net);
 

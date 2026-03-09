@@ -27,13 +27,13 @@ All asset paths follow UE content browser format (no .uasset extension):
 
 ## Action Reference
 
-| Action | Purpose |
-|--------|---------|
-| `search` | Full-text search across all indexed assets, nodes, variables, parameters |
-| `find_references` | Find all assets that reference a given asset |
-| `find_by_type` | List all assets of a specific type |
-| `get_asset_details` | Detailed metadata for a specific asset |
-| `get_stats` | Index statistics — asset counts by type, index freshness |
+| Action | Params | Purpose |
+|--------|--------|---------|
+| `search` | `query` (string) | Full-text search across all indexed assets, nodes, variables, parameters |
+| `find_references` | `asset_path` (string) | Find all assets that reference a given asset |
+| `find_by_type` | `asset_type` (string) | List all assets of a specific type |
+| `get_asset_details` | `asset_path` (string) | Detailed metadata for a specific asset |
+| `get_stats` | _(none)_ | Index statistics — asset counts by type, index freshness |
 
 ## FTS5 Search Syntax
 
@@ -57,22 +57,22 @@ project.query({ action: "search", params: { query: "BP_Player*" } })
 
 ### Find all Blueprints in the project
 ```
-project.query({ action: "find_by_type", params: { type: "Blueprint" } })
+project.query({ action: "find_by_type", params: { asset_type: "Blueprint" } })
 ```
 
 ### Find all assets referencing a material
 ```
-project.query({ action: "find_references", params: { asset: "/Game/Materials/M_Skin" } })
+project.query({ action: "find_references", params: { asset_path: "/Game/Materials/M_Skin" } })
 ```
 
 ### Find references to a plugin asset
 ```
-project.query({ action: "find_references", params: { asset: "/CarnageFX/Materials/M_Blood" } })
+project.query({ action: "find_references", params: { asset_path: "/CarnageFX/Materials/M_Blood" } })
 ```
 
 ### Get detailed metadata for an asset
 ```
-project.query({ action: "get_asset_details", params: { asset: "/Game/Blueprints/BP_Player" } })
+project.query({ action: "get_asset_details", params: { asset_path: "/Game/Blueprints/BP_Player" } })
 ```
 
 ### Check index health
@@ -82,7 +82,7 @@ project.query({ action: "get_stats", params: {} })
 
 ### Find all Niagara systems
 ```
-project.query({ action: "find_by_type", params: { type: "NiagaraSystem" } })
+project.query({ action: "find_by_type", params: { asset_type: "NiagaraSystem" } })
 ```
 
 ### Find assets by variable or parameter name
@@ -107,3 +107,4 @@ The index covers these types for `find_by_type`:
 - Use `find_references` to understand dependency chains before deleting or renaming assets
 - Combine with domain-specific tools: search first, then inspect with `blueprint.query`, `material.query`, etc.
 - `get_stats` shows last index time — if stale, trigger `monolith.reindex()`
+- Call `monolith.discover('namespace')` to see required/optional params for every action

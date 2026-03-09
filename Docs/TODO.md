@@ -1,6 +1,6 @@
 # Monolith — TODO
 
-Last updated: 2026-03-08
+Last updated: 2026-03-09
 
 ---
 
@@ -16,7 +16,8 @@ None! All moderate bugs resolved.
 
 ### Minor
 
-None! All minor bugs resolved.
+- [x] **Material `validate_material` false positive islands** — FIXED (2026-03-09). Added MP_MaterialAttributes + 6 missing properties to AllMaterialProperties, seeded BFS from UMaterialExpressionMaterialAttributeLayers. 0 false positives on standard materials. Layer-blend materials still have a known limitation (implicit layer system connections not traversable via pin graph).
+- [x] **Blueprint `get_execution_flow` matches comments before events** — FIXED (2026-03-09). Two-pass FindEntryNode: Pass 1 checks events/functions (prefers K2Node_Event, K2Node_FunctionEntry), Pass 2 is fuzzy fallback that skips EdGraphNode_Comment.
 
 ---
 
@@ -126,3 +127,36 @@ None! All minor bugs resolved.
 - [x] Release script `Scripts/make_release.ps1` — sets `"Installed": true` in zip for BP-only users (2026-03-08)
 - [x] BP-only support — release zips work without rebuild for Blueprint-only projects (2026-03-08)
 - [x] GitHub Wiki — 11 pages: Installation, Tool Reference, Test Status, Auto-Updater, FAQ, Changelog, etc. (2026-03-08)
+- [x] Indexer auto-index deferred to `IAssetRegistry::OnFilesLoaded()` — was running too early, only indexing 193/9560 assets (2026-03-09)
+- [x] Indexer sanity check — if < 500 assets indexed, skip writing `last_full_index` so next launch retries (2026-03-09)
+- [x] Indexer `bIsIndexing` reset in `Deinitialize()` to prevent stuck flag (2026-03-09)
+- [x] Index DB changed from WAL to DELETE journal mode (2026-03-09)
+- [x] Niagara `trace_parameter_binding` — fixed missing OR fallback for `User.` prefix (2026-03-09)
+- [x] Niagara `get_di_functions` — fixed reversed class name pattern, now tries `UNiagaraDataInterface<Name>` (2026-03-09)
+- [x] Niagara `batch_execute` — fixed 3 op name mismatches, old names kept as aliases (2026-03-09)
+- [x] Niagara actions now accept `asset_path` (preferred) with `system_path` as backward-compat alias (2026-03-09)
+- [x] Niagara `duplicate_emitter` accepts `emitter` as alias for `source_emitter` (2026-03-09)
+- [x] Niagara `set_curve_value` accepts `module_node` as alias for `module` (2026-03-09)
+- [x] NEW: Niagara `list_emitters` action — returns emitter names, index, enabled, sim_target, renderer_count (2026-03-09)
+- [x] NEW: Niagara `list_renderers` action — returns renderer class, index, enabled, material (2026-03-09)
+- [x] Animation state machine names stripped of `\n` — clean names like "InAir" not "InAir\nState Machine" (2026-03-09)
+- [x] Animation `get_state_info` validates required params (machine_name, state_name) (2026-03-09)
+- [x] Animation state machine matching changed from fuzzy Contains() to exact match (2026-03-09)
+- [x] Animation `get_nodes` now accepts optional `graph_name` filter (2026-03-09)
+- [x] NEW: Blueprint `get_graph_summary` — lightweight graph overview (id/class/title + exec connections only, ~10KB vs 172KB) (2026-03-09)
+- [x] Blueprint `get_graph_data` now accepts optional `node_class_filter` param (2026-03-09)
+- [x] Blueprint `get_variables` now reads default values from CDO (was always empty) (2026-03-09)
+- [x] Blueprint indexer CDO fix — same default value extraction fix applied to BlueprintIndexer (2026-03-09)
+- [x] Material `export_material_graph` now accepts `include_properties` and `include_positions` params (2026-03-09)
+- [x] Material `get_thumbnail` now accepts `save_to_file` param (2026-03-09)
+- [x] Niagara `get_compiled_gpu_hlsl` auto-compiles system if HLSL not available (2026-03-09)
+- [x] Niagara `User.` prefix stripped in get_parameter_value, trace_parameter_binding, remove_user_parameter, set_parameter_default (2026-03-09)
+- [x] Per-action param schemas in `monolith.discover()` output — all 122 actions now have param documentation (2026-03-09)
+- [x] Niagara `get_module_inputs` — types now use `PinToTypeDefinition` instead of default Vector4f (2026-03-09)
+- [x] Niagara `get_ordered_modules` — usage filter now works with shorthands ("spawn", "update"), returns error on invalid values, returns all stages when omitted (2026-03-09)
+- [x] Niagara `get_renderer_bindings` — clean JSON output (name/bound_to/type) instead of raw UE struct dumps (2026-03-09)
+- [x] Niagara `get_all_parameters` — added optional `emitter` and `scope` filters (2026-03-09)
+- [x] Animation `get_transitions` — cast to `UAnimStateNodeBase*` instead of `UAnimStateNode*`, resolves conduit names. Added from_type/to_type fields (2026-03-09)
+- [x] Material `validate_material` — seeds BFS from `UMaterialExpressionCustomOutput` subclasses + `UMaterialExpressionMaterialAttributeLayers`, added MP_MaterialAttributes + 6 missing properties. 0 false positives on standard materials (2026-03-09)
+- [x] Blueprint `get_execution_flow` — two-pass FindEntryNode: Pass 1 prefers events/functions, Pass 2 fuzzy fallback skips comments (2026-03-09)
+- [x] Blueprint `get_graph_summary` all-graphs mode — returns all graphs when graph_name empty, single graph when specified (2026-03-09)

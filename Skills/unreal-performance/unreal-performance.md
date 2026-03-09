@@ -1,6 +1,6 @@
 ---
 name: unreal-performance
-description: Use when analyzing or optimizing Unreal Engine performance via Monolith MCP — config auditing, material shader stats, Niagara scalability, draw call analysis, INI tuning. Triggers on performance, optimization, FPS, frame time, GPU, draw calls, shader complexity.
+description: Use when analyzing or optimizing Unreal Engine performance via Monolith MCP — config auditing, material shader stats, draw call analysis, INI tuning. Triggers on performance, optimization, FPS, frame time, GPU, draw calls, shader complexity.
 ---
 
 # Unreal Performance Analysis Workflows
@@ -40,13 +40,19 @@ monolith.discover({ namespace: "config" })
 | `get_all_expressions` | Count instruction/texture samples per material |
 | `render_preview` | Trigger compilation to get shader stats |
 
-### Niagara Scalability (`niagara.query`)
+### Niagara Inspection (`niagara.query`)
+
+Use `monolith.discover({ namespace: "niagara" })` to see all 41 available actions. Key ones for performance:
+
 | Action | Purpose |
 |--------|---------|
-| `audit_scalability` | Check LOD, distance culling, budget settings |
-| `audit_pooling` | Verify effect pooling configuration |
-| `preview_particle_count` | Estimate particle counts at runtime |
-| `get_stats` | Emitter/module/renderer counts |
+| `list_emitters` | List all emitters in a system — check emitter count |
+| `list_renderers` | List all renderers on an emitter — check renderer count |
+| `get_ordered_modules` | Get modules in a script stage — audit module complexity |
+| `get_all_parameters` | Get all parameters — review parameter overhead |
+| `get_compiled_gpu_hlsl` | Get compiled GPU HLSL — inspect shader complexity |
+
+**Note:** Niagara actions use `asset_path` as the parameter name (not `system`).
 
 ## Common Workflows
 
@@ -59,14 +65,15 @@ config.query({ action: "explain_setting", params: { setting: "r.Lumen.TraceMeshS
 
 ### Check material shader complexity
 ```
-material.query({ action: "get_all_expressions", params: { asset: "/Game/Materials/M_Character" } })
-material.query({ action: "validate_material", params: { asset: "/Game/Materials/M_Character" } })
+material.query({ action: "get_all_expressions", params: { asset_path: "/Game/Materials/M_Character" } })
+material.query({ action: "validate_material", params: { asset_path: "/Game/Materials/M_Character" } })
 ```
 
-### Audit Niagara effect scalability
+### Audit Niagara effect complexity
 ```
-niagara.query({ action: "audit_scalability", params: { system: "/Game/VFX/NS_Blood" } })
-niagara.query({ action: "audit_pooling", params: { system: "/Game/VFX/NS_Blood" } })
+niagara.query({ action: "list_emitters", params: { asset_path: "/Game/VFX/NS_Blood" } })
+niagara.query({ action: "list_renderers", params: { asset_path: "/Game/VFX/NS_Blood", emitter_name: "Emitter0" } })
+niagara.query({ action: "get_compiled_gpu_hlsl", params: { asset_path: "/Game/VFX/NS_Blood", emitter_name: "Emitter0" } })
 ```
 
 ### Find expensive config settings
@@ -94,4 +101,4 @@ These are the most impactful performance CVars to audit:
 - Use `explain_setting` before changing any unfamiliar CVar
 - `diff_from_default` is the fastest way to see all project customizations
 - Material instruction counts from `get_all_expressions` correlate with pixel shader cost
-- Niagara `audit_scalability` flags common mistakes like missing distance culling
+- Use `list_emitters` + `list_renderers` to audit Niagara system complexity

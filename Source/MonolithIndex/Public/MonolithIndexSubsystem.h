@@ -74,6 +74,7 @@ private:
 	};
 
 	void OnIndexingFinished(bool bSuccess);
+	void OnAssetRegistryFilesLoaded();
 	void RegisterDefaultIndexers();
 	FString GetDatabasePath() const;
 	bool ShouldAutoIndex() const;

@@ -22,7 +22,7 @@ struct FNiagaraParameterStore;
 class FMonolithNiagaraActions
 {
 public:
-	/** Register all 39 niagara actions with the tool registry */
+	/** Register all 41 niagara actions with the tool registry */
 	static void RegisterActions(FMonolithToolRegistry& Registry);
 
 	// --- System (8) ---
@@ -68,6 +68,10 @@ public:
 	static FMonolithActionResult HandleGetRendererBindings(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetRendererBinding(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Read (2) ---
+	static FMonolithActionResult HandleListEmitters(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListRenderers(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Batch (2) ---
 	static FMonolithActionResult HandleBatchExecute(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCreateSystemFromSpec(const TSharedPtr<FJsonObject>& Params);
@@ -85,7 +89,8 @@ private:
 	// --- Internal helpers ---
 	static UNiagaraSystem* LoadSystem(const FString& SystemPath);
 	static int32 FindEmitterHandleIndex(UNiagaraSystem* System, const FString& HandleIdOrName);
-	static ENiagaraScriptUsage ResolveScriptUsage(const FString& UsageString);
+	static bool ResolveScriptUsage(const FString& UsageString, ENiagaraScriptUsage& OutUsage);
+	static FString UsageToString(ENiagaraScriptUsage Usage);
 	static UNiagaraGraph* GetGraphForUsage(UNiagaraSystem* System, const FString& EmitterHandleId, ENiagaraScriptUsage Usage);
 	static UNiagaraNodeOutput* FindOutputNode(UNiagaraSystem* System, const FString& EmitterHandleId, ENiagaraScriptUsage Usage);
 	static UNiagaraNodeFunctionCall* FindModuleNode(UNiagaraSystem* System, const FString& EmitterHandleId, const FString& NodeGuidStr, ENiagaraScriptUsage* OutUsage = nullptr);

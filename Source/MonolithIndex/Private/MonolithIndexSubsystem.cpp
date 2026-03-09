@@ -41,16 +41,54 @@ void UMonolithIndexSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	if (ShouldAutoIndex())
 	{
-		UE_LOG(LogMonolithIndex, Log, TEXT("First launch detected -- starting full project index"));
+		UE_LOG(LogMonolithIndex, Log, TEXT("First launch detected -- deferring full index until Asset Registry is ready"));
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+		if (AssetRegistry.IsLoadingAssets())
+		{
+			AssetRegistry.OnFilesLoaded().AddUObject(this, &UMonolithIndexSubsystem::OnAssetRegistryFilesLoaded);
+		}
+		else
+		{
+			// Asset Registry already done (unlikely at Initialize time, but handle it)
+			UE_LOG(LogMonolithIndex, Log, TEXT("Asset Registry already loaded -- starting full project index"));
+			StartFullIndex();
+		}
+	}
+}
+
+void UMonolithIndexSubsystem::OnAssetRegistryFilesLoaded()
+{
+	// Unbind ourselves — this is a one-shot callback
+	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+	AssetRegistry.OnFilesLoaded().RemoveAll(this);
+
+	if (ShouldAutoIndex())
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Asset Registry fully loaded -- starting full project index"));
 		StartFullIndex();
+	}
+	else
+	{
+		UE_LOG(LogMonolithIndex, Log, TEXT("Asset Registry loaded but auto-index no longer needed (already indexed)"));
 	}
 }
 
 void UMonolithIndexSubsystem::Deinitialize()
 {
+	// Unbind from Asset Registry delegate if still bound
+	if (FModuleManager::Get().IsModuleLoaded("AssetRegistry"))
+	{
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+		AssetRegistry.OnFilesLoaded().RemoveAll(this);
+	}
+
 	// Stop any running indexing
 	if (IndexingTaskPtr.IsValid())
 	{
+		if (bIsIndexing)
+		{
+			UE_LOG(LogMonolithIndex, Warning, TEXT("Indexing was still in progress during shutdown — force-stopped"));
+		}
 		IndexingTaskPtr->Stop();
 		if (IndexingThread)
 		{
@@ -59,6 +97,8 @@ void UMonolithIndexSubsystem::Deinitialize()
 		}
 		IndexingTaskPtr.Reset();
 	}
+
+	bIsIndexing = false;
 
 	TaskNotification.Reset();
 
@@ -601,10 +641,19 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		UE_LOG(LogMonolithIndex, Log, TEXT("Niagara indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 	}
 
-	// Write index timestamp to meta (only if not cancelled)
+	// Write index timestamp to meta (only if not cancelled and asset count looks valid)
 	if (!bShouldStop)
 	{
-		DB->WriteMeta(TEXT("last_full_index"), FDateTime::UtcNow().ToString());
+		constexpr int32 MinAssetCountThreshold = 500;
+		if (Indexed < MinAssetCountThreshold)
+		{
+			UE_LOG(LogMonolithIndex, Warning, TEXT("Index only found %d assets — Asset Registry may not have been fully loaded. Skipping last_full_index write so next launch will re-index."), Indexed);
+		}
+		else
+		{
+			DB->WriteMeta(TEXT("last_full_index"), FDateTime::UtcNow().ToString());
+			UE_LOG(LogMonolithIndex, Log, TEXT("Wrote last_full_index timestamp (%d assets indexed)"), Indexed);
+		}
 	}
 
 	AsyncTask(ENamedThreads::GameThread, [this]()

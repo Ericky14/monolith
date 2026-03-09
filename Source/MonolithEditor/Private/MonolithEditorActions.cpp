@@ -1,5 +1,6 @@
 #include "MonolithEditorActions.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithParamSchema.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/OutputDeviceRedirector.h"
@@ -247,55 +248,88 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("trigger_build"),
 		TEXT("Trigger a Live Coding compile"),
-		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild));
+		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
+		FParamSchemaBuilder()
+			.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("live_compile"),
-		TEXT("Trigger a Live Coding compile (alias for trigger_build). Params: wait (bool, optional) - block until compile finishes"),
-		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild));
+		TEXT("Trigger a Live Coding compile (alias for trigger_build)"),
+		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
+		FParamSchemaBuilder()
+			.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_errors"),
-		TEXT("Get build errors and warnings. Params: since (float, seconds ago), category (string), compile_only (bool, filter to LogLiveCoding/LogCompile/LogLinker)"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildErrors));
+		TEXT("Get build errors and warnings"),
+		FMonolithActionHandler::CreateStatic(&HandleGetBuildErrors),
+		FParamSchemaBuilder()
+			.Optional(TEXT("since"), TEXT("number"), TEXT("Only errors from the last N seconds ago"))
+			.Optional(TEXT("category"), TEXT("string"), TEXT("Filter to a specific log category"))
+			.Optional(TEXT("compile_only"), TEXT("bool"), TEXT("Filter to compile categories only"), TEXT("false"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_status"),
 		TEXT("Check compile status: compiling, last_result, last_compile_time, errors_since_compile, patch_applied"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildStatus));
+		FMonolithActionHandler::CreateStatic(&HandleGetBuildStatus),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_summary"),
 		TEXT("Get summary of last build (errors, warnings, time)"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildSummary));
+		FMonolithActionHandler::CreateStatic(&HandleGetBuildSummary),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("search_build_output"),
 		TEXT("Search build log output by pattern"),
-		FMonolithActionHandler::CreateStatic(&HandleSearchBuildOutput));
+		FMonolithActionHandler::CreateStatic(&HandleSearchBuildOutput),
+		FParamSchemaBuilder()
+			.Required(TEXT("pattern"), TEXT("string"), TEXT("Search pattern"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_recent_logs"),
 		TEXT("Get recent editor log entries"),
-		FMonolithActionHandler::CreateStatic(&HandleGetRecentLogs));
+		FMonolithActionHandler::CreateStatic(&HandleGetRecentLogs),
+		FParamSchemaBuilder()
+			.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of entries to return"), TEXT("50"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("search_logs"),
 		TEXT("Search log entries by category, verbosity, and text pattern"),
-		FMonolithActionHandler::CreateStatic(&HandleSearchLogs));
+		FMonolithActionHandler::CreateStatic(&HandleSearchLogs),
+		FParamSchemaBuilder()
+			.Optional(TEXT("pattern"), TEXT("string"), TEXT("Text pattern to search for"))
+			.Optional(TEXT("category"), TEXT("string"), TEXT("Log category filter"))
+			.Optional(TEXT("verbosity"), TEXT("string"), TEXT("Max verbosity level (error, warning, log, verbose)"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("tail_log"),
 		TEXT("Get last N log lines"),
-		FMonolithActionHandler::CreateStatic(&HandleTailLog));
+		FMonolithActionHandler::CreateStatic(&HandleTailLog),
+		FParamSchemaBuilder()
+			.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of lines to return"), TEXT("50"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_log_categories"),
 		TEXT("List active log categories"),
-		FMonolithActionHandler::CreateStatic(&HandleGetLogCategories));
+		FMonolithActionHandler::CreateStatic(&HandleGetLogCategories),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_log_stats"),
 		TEXT("Get log statistics by verbosity level"),
-		FMonolithActionHandler::CreateStatic(&HandleGetLogStats));
+		FMonolithActionHandler::CreateStatic(&HandleGetLogStats),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_compile_output"),
 		TEXT("Get structured compile report: result, time, log lines from compile categories, error/warning counts, patch status"),
-		FMonolithActionHandler::CreateStatic(&HandleGetCompileOutput));
+		FMonolithActionHandler::CreateStatic(&HandleGetCompileOutput),
+		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_crash_context"),
 		TEXT("Get last crash/ensure context information"),
-		FMonolithActionHandler::CreateStatic(&HandleGetCrashContext));
+		FMonolithActionHandler::CreateStatic(&HandleGetCrashContext),
+		MakeShared<FJsonObject>());
 
 	InitLiveCodingDelegate();
 }

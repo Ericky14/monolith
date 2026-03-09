@@ -250,8 +250,9 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 		return false;
 	}
 
-	// Enable WAL mode for better concurrent read performance
-	ExecuteSQL(TEXT("PRAGMA journal_mode=WAL;"));
+	// Force DELETE journal mode — WAL + ReadOnly on Windows silently returns 0 rows.
+	// Belt-and-suspenders: force DELETE here regardless of what the DB was created with.
+	ExecuteSQL(TEXT("PRAGMA journal_mode=DELETE;"));
 	ExecuteSQL(TEXT("PRAGMA synchronous=NORMAL;"));
 	ExecuteSQL(TEXT("PRAGMA foreign_keys=ON;"));
 	ExecuteSQL(TEXT("PRAGMA cache_size=-64000;")); // 64MB cache
