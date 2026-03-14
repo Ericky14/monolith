@@ -15,6 +15,12 @@
 #include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraNodeInput.h"
 #include "NiagaraDataInterface.h"
+#include "NiagaraDataInterfaceCurve.h"
+#include "NiagaraDataInterfaceColorCurve.h"
+#include "NiagaraDataInterfaceVector2DCurve.h"
+#include "NiagaraDataInterfaceVectorCurve.h"
+#include "NiagaraDataInterfaceVector4Curve.h"
+#include "Curves/RichCurve.h"
 #include "NiagaraConstants.h"
 #include "NiagaraTypes.h"
 #include "NiagaraParameterStore.h"
@@ -31,7 +37,9 @@
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "NiagaraParameterMapHistory.h"
 #include "NiagaraSystemEditorData.h"
+#include "NiagaraScriptVariable.h"
 #include "NiagaraEditorUtilities.h"
+#include "NiagaraShared.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -142,6 +150,8 @@ namespace MonolithNiagaraHelpers
 
 	// RemoveModuleFromStack — splice the node out of the ParameterMap chain, then destroy it.
 	// Uses ParameterMap pins (matching engine's ConnectStackNodeGroup) for correct wiring.
+	// Also removes any upstream OverrideNode (UNiagaraNodeParameterMapSet) that was created
+	// by GetOrCreateStackFunctionInputOverridePin / set_curve_value for data input overrides.
 	bool RemoveModuleFromStack(UNiagaraSystem& System, FGuid EmitterGuid, UNiagaraNodeFunctionCall& ModuleNode)
 	{
 		UEdGraph* Graph = ModuleNode.GetGraph();
@@ -157,7 +167,36 @@ namespace MonolithNiagaraHelpers
 		UEdGraphPin* DownstreamInputPin = (TargetMapOut && TargetMapOut->LinkedTo.Num() > 0)
 			? TargetMapOut->LinkedTo[0] : nullptr;
 
-		// Splice: reconnect upstream → downstream, bypassing the target
+		// Check if the immediate upstream node is an OverrideNode (ParameterMapSet)
+		// that serves this module's data input overrides. If so, we need to walk past it to
+		// find the real previous chain node and remove the OverrideNode too.
+		// Note: UNiagaraNodeParameterMapSet is only forward-declared, so we work with UEdGraphNode*.
+		UEdGraphNode* OverrideNode = nullptr;
+		if (UpstreamOutputPin)
+		{
+			UEdGraphNode* UpstreamNode = UpstreamOutputPin->GetOwningNode();
+			// Check if upstream is a ParameterMapSet (not a FunctionCall — those are other modules).
+			// IMPORTANT: The stack's input connector (UNiagaraNodeInput) also passes the old check
+			// (!FunctionCall && is NiagaraNode) but must NOT be treated as an OverrideNode.
+			// Real OverrideNodes (ParameterMapSet) have BOTH ParameterMap input and output pins.
+			// The input connector only has an output pin.
+			if (UpstreamNode && !Cast<UNiagaraNodeFunctionCall>(UpstreamNode) && Cast<UNiagaraNode>(UpstreamNode))
+			{
+				UEdGraphPin* CandidateMapIn = GetParameterMapPin(*CastChecked<UNiagaraNode>(UpstreamNode), EGPD_Input);
+				UEdGraphPin* CandidateMapOut = GetParameterMapPin(*CastChecked<UNiagaraNode>(UpstreamNode), EGPD_Output);
+				if (CandidateMapIn && CandidateMapOut)
+				{
+					OverrideNode = UpstreamNode;
+					// Walk one more step upstream past the override node via its ParameterMap input pin
+					if (CandidateMapIn->LinkedTo.Num() > 0)
+					{
+						UpstreamOutputPin = CandidateMapIn->LinkedTo[0];
+					}
+				}
+			}
+		}
+
+		// Splice: reconnect upstream → downstream, bypassing the target (and its OverrideNode)
 		if (UpstreamOutputPin && DownstreamInputPin)
 		{
 			DownstreamInputPin->BreakLinkTo(TargetMapOut);
@@ -165,7 +204,13 @@ namespace MonolithNiagaraHelpers
 			DownstreamInputPin->MakeLinkTo(UpstreamOutputPin);
 		}
 
-		// Now safe to break remaining links and destroy the node
+		// Remove the OverrideNode first (if present), then the FunctionCall
+		if (OverrideNode)
+		{
+			OverrideNode->BreakAllNodeLinks();
+			Graph->RemoveNode(OverrideNode);
+		}
+
 		ModuleNode.BreakAllNodeLinks();
 		Graph->RemoveNode(&ModuleNode);
 		return true;
@@ -208,6 +253,174 @@ namespace MonolithNiagaraHelpers
 		}
 		return FullName;
 	}
+	// Serialize an FRichCurve to a JSON array of key objects
+	TArray<TSharedPtr<FJsonValue>> SerializeCurveKeys(const FRichCurve& Curve)
+	{
+		TArray<TSharedPtr<FJsonValue>> KeyArr;
+		for (const FRichCurveKey& Key : Curve.GetConstRefOfKeys())
+		{
+			TSharedRef<FJsonObject> KO = MakeShared<FJsonObject>();
+			KO->SetNumberField(TEXT("time"), Key.Time);
+			KO->SetNumberField(TEXT("value"), Key.Value);
+			KO->SetNumberField(TEXT("arrive_tangent"), Key.ArriveTangent);
+			KO->SetNumberField(TEXT("leave_tangent"), Key.LeaveTangent);
+			KO->SetStringField(TEXT("interp_mode"),
+				Key.InterpMode == RCIM_Constant ? TEXT("constant") :
+				Key.InterpMode == RCIM_Linear ? TEXT("linear") : TEXT("cubic"));
+			KeyArr.Add(MakeShared<FJsonValueObject>(KO));
+		}
+		return KeyArr;
+	}
+
+	// Serialize a DI's curve data into a JSON object (works for float, color, vec2, vec3, vec4 curves)
+	TSharedPtr<FJsonObject> SerializeDICurveData(UNiagaraDataInterface* DI)
+	{
+		if (!DI) return nullptr;
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("di_class"), DI->GetClass()->GetName());
+
+		if (UNiagaraDataInterfaceCurve* FloatCurve = Cast<UNiagaraDataInterfaceCurve>(DI))
+		{
+			Result->SetField(TEXT("curve"), MakeShared<FJsonValueArray>(SerializeCurveKeys(FloatCurve->Curve)));
+		}
+		else if (UNiagaraDataInterfaceColorCurve* ColorCurve = Cast<UNiagaraDataInterfaceColorCurve>(DI))
+		{
+			Result->SetField(TEXT("red"), MakeShared<FJsonValueArray>(SerializeCurveKeys(ColorCurve->RedCurve)));
+			Result->SetField(TEXT("green"), MakeShared<FJsonValueArray>(SerializeCurveKeys(ColorCurve->GreenCurve)));
+			Result->SetField(TEXT("blue"), MakeShared<FJsonValueArray>(SerializeCurveKeys(ColorCurve->BlueCurve)));
+			Result->SetField(TEXT("alpha"), MakeShared<FJsonValueArray>(SerializeCurveKeys(ColorCurve->AlphaCurve)));
+		}
+		else if (UNiagaraDataInterfaceVector2DCurve* Vec2Curve = Cast<UNiagaraDataInterfaceVector2DCurve>(DI))
+		{
+			Result->SetField(TEXT("x"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec2Curve->XCurve)));
+			Result->SetField(TEXT("y"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec2Curve->YCurve)));
+		}
+		else if (UNiagaraDataInterfaceVectorCurve* Vec3Curve = Cast<UNiagaraDataInterfaceVectorCurve>(DI))
+		{
+			Result->SetField(TEXT("x"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec3Curve->XCurve)));
+			Result->SetField(TEXT("y"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec3Curve->YCurve)));
+			Result->SetField(TEXT("z"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec3Curve->ZCurve)));
+		}
+		else if (UNiagaraDataInterfaceVector4Curve* Vec4Curve = Cast<UNiagaraDataInterfaceVector4Curve>(DI))
+		{
+			Result->SetField(TEXT("x"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec4Curve->XCurve)));
+			Result->SetField(TEXT("y"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec4Curve->YCurve)));
+			Result->SetField(TEXT("z"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec4Curve->ZCurve)));
+			Result->SetField(TEXT("w"), MakeShared<FJsonValueArray>(SerializeCurveKeys(Vec4Curve->WCurve)));
+		}
+		return Result;
+	}
+
+	// Parse JSON keys array into an FRichCurve
+	void ParseKeysIntoCurve(FRichCurve& Curve, const TArray<TSharedPtr<FJsonValue>>& Keys)
+	{
+		Curve.Reset();
+		TArray<FRichCurveKey> NewKeys;
+		NewKeys.Reserve(Keys.Num());
+		for (const TSharedPtr<FJsonValue>& KeyVal : Keys)
+		{
+			const TSharedPtr<FJsonObject>& KO = KeyVal->AsObject();
+			if (!KO.IsValid()) continue;
+			float Time = static_cast<float>(KO->GetNumberField(TEXT("time")));
+			float Value = static_cast<float>(KO->GetNumberField(TEXT("value")));
+			float ArriveTangent = KO->HasField(TEXT("arrive_tangent")) ? static_cast<float>(KO->GetNumberField(TEXT("arrive_tangent"))) : 0.f;
+			float LeaveTangent = KO->HasField(TEXT("leave_tangent")) ? static_cast<float>(KO->GetNumberField(TEXT("leave_tangent"))) : 0.f;
+
+			ERichCurveInterpMode InterpMode = RCIM_Linear;
+			if (KO->HasField(TEXT("interp_mode")))
+			{
+				FString Mode = KO->GetStringField(TEXT("interp_mode"));
+				if (Mode == TEXT("constant")) InterpMode = RCIM_Constant;
+				else if (Mode == TEXT("cubic")) InterpMode = RCIM_Cubic;
+			}
+
+			NewKeys.Add(FRichCurveKey(Time, Value, ArriveTangent, LeaveTangent, InterpMode));
+		}
+		Curve.SetKeys(NewKeys);
+	}
+
+	// Apply curve keys from config JSON to a DI curve object.
+	// Supports config formats:
+	//   Float curve:  {"keys": [{time, value}, ...]}
+	//   Color curve:  {"red": [{...}], "green": [{...}], "blue": [{...}], "alpha": [{...}]}
+	//   Vec2 curve:   {"x": [{...}], "y": [{...}]}
+	//   Vec3 curve:   {"x": [{...}], "y": [{...}], "z": [{...}]}
+	//   Vec4 curve:   {"x": [{...}], "y": [{...}], "z": [{...}], "w": [{...}]}
+	bool ApplyCurveConfig(UNiagaraDataInterface* DI, const TSharedPtr<FJsonObject>& Config)
+	{
+		if (!DI || !Config.IsValid()) return false;
+
+		auto GetKeysArray = [&Config](const FString& FieldName) -> TArray<TSharedPtr<FJsonValue>>
+		{
+			TSharedPtr<FJsonValue> Field = Config->TryGetField(FieldName);
+			if (!Field.IsValid()) return {};
+			if (Field->Type == EJson::Array) return Field->AsArray();
+			if (Field->Type == EJson::String)
+			{
+				TArray<TSharedPtr<FJsonValue>> Parsed;
+				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Field->AsString());
+				FJsonSerializer::Deserialize(Reader, Parsed);
+				return Parsed;
+			}
+			return {};
+		};
+
+		if (UNiagaraDataInterfaceCurve* FloatCurve = Cast<UNiagaraDataInterfaceCurve>(DI))
+		{
+			TArray<TSharedPtr<FJsonValue>> Keys = GetKeysArray(TEXT("keys"));
+			if (Keys.Num() == 0) Keys = GetKeysArray(TEXT("curve"));
+			if (Keys.Num() > 0) { ParseKeysIntoCurve(FloatCurve->Curve, Keys); return true; }
+		}
+		else if (UNiagaraDataInterfaceColorCurve* ColorCurve = Cast<UNiagaraDataInterfaceColorCurve>(DI))
+		{
+			bool bAny = false;
+			TArray<TSharedPtr<FJsonValue>> R = GetKeysArray(TEXT("red"));
+			TArray<TSharedPtr<FJsonValue>> G = GetKeysArray(TEXT("green"));
+			TArray<TSharedPtr<FJsonValue>> B = GetKeysArray(TEXT("blue"));
+			TArray<TSharedPtr<FJsonValue>> A = GetKeysArray(TEXT("alpha"));
+			if (R.Num() > 0) { ParseKeysIntoCurve(ColorCurve->RedCurve, R); bAny = true; }
+			if (G.Num() > 0) { ParseKeysIntoCurve(ColorCurve->GreenCurve, G); bAny = true; }
+			if (B.Num() > 0) { ParseKeysIntoCurve(ColorCurve->BlueCurve, B); bAny = true; }
+			if (A.Num() > 0) { ParseKeysIntoCurve(ColorCurve->AlphaCurve, A); bAny = true; }
+			return bAny;
+		}
+		else if (UNiagaraDataInterfaceVector2DCurve* Vec2Curve = Cast<UNiagaraDataInterfaceVector2DCurve>(DI))
+		{
+			bool bAny = false;
+			TArray<TSharedPtr<FJsonValue>> X = GetKeysArray(TEXT("x"));
+			TArray<TSharedPtr<FJsonValue>> Y = GetKeysArray(TEXT("y"));
+			if (X.Num() > 0) { ParseKeysIntoCurve(Vec2Curve->XCurve, X); bAny = true; }
+			if (Y.Num() > 0) { ParseKeysIntoCurve(Vec2Curve->YCurve, Y); bAny = true; }
+			return bAny;
+		}
+		else if (UNiagaraDataInterfaceVectorCurve* Vec3Curve = Cast<UNiagaraDataInterfaceVectorCurve>(DI))
+		{
+			bool bAny = false;
+			TArray<TSharedPtr<FJsonValue>> X = GetKeysArray(TEXT("x"));
+			TArray<TSharedPtr<FJsonValue>> Y = GetKeysArray(TEXT("y"));
+			TArray<TSharedPtr<FJsonValue>> Z = GetKeysArray(TEXT("z"));
+			if (X.Num() > 0) { ParseKeysIntoCurve(Vec3Curve->XCurve, X); bAny = true; }
+			if (Y.Num() > 0) { ParseKeysIntoCurve(Vec3Curve->YCurve, Y); bAny = true; }
+			if (Z.Num() > 0) { ParseKeysIntoCurve(Vec3Curve->ZCurve, Z); bAny = true; }
+			return bAny;
+		}
+		else if (UNiagaraDataInterfaceVector4Curve* Vec4Curve = Cast<UNiagaraDataInterfaceVector4Curve>(DI))
+		{
+			bool bAny = false;
+			TArray<TSharedPtr<FJsonValue>> X = GetKeysArray(TEXT("x"));
+			TArray<TSharedPtr<FJsonValue>> Y = GetKeysArray(TEXT("y"));
+			TArray<TSharedPtr<FJsonValue>> Z = GetKeysArray(TEXT("z"));
+			TArray<TSharedPtr<FJsonValue>> W = GetKeysArray(TEXT("w"));
+			if (X.Num() > 0) { ParseKeysIntoCurve(Vec4Curve->XCurve, X); bAny = true; }
+			if (Y.Num() > 0) { ParseKeysIntoCurve(Vec4Curve->YCurve, Y); bAny = true; }
+			if (Z.Num() > 0) { ParseKeysIntoCurve(Vec4Curve->ZCurve, Z); bAny = true; }
+			if (W.Num() > 0) { ParseKeysIntoCurve(Vec4Curve->WCurve, W); bAny = true; }
+			return bAny;
+		}
+		return false;
+	}
+
 } // namespace MonolithNiagaraHelpers
 
 // Helper: wrap a string result in a FJsonObject for FMonolithActionResult::Success
@@ -321,6 +534,13 @@ int32 FMonolithNiagaraActions::FindEmitterHandleIndex(UNiagaraSystem* System, co
 	for (int32 i = 0; i < Handles.Num(); ++i)
 	{
 		if (Handles[i].GetUniqueInstanceName().Equals(HandleIdOrName, ESearchCase::IgnoreCase)) return i;
+	}
+
+	// Numeric index fallback ("0", "1", "2")
+	if (HandleIdOrName.IsNumeric())
+	{
+		int32 Idx = FCString::Atoi(*HandleIdOrName);
+		if (Handles.IsValidIndex(Idx)) return Idx;
 	}
 
 	// If only one emitter exists and caller passed empty string, auto-select it.
@@ -443,6 +663,40 @@ UNiagaraNodeFunctionCall* FMonolithNiagaraActions::FindModuleNode(UNiagaraSystem
 		}
 	}
 
+	// Pass 3: If no graphs were visited (emitter resolution failed for all usages), scan ALL
+	// emitter handles as a last resort. This catches cases where the emitter identifier is wrong
+	// but the module GUID is valid somewhere in the system.
+	if (VisitedGraphs.Num() == 0)
+	{
+		for (int32 i = 0; i < System->GetEmitterHandles().Num(); i++)
+		{
+			const FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[i];
+			const FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
+			if (!ED) continue;
+			UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(ED->GraphSource);
+			if (!Source) continue;
+			UNiagaraGraph* Graph = Source->NodeGraph;
+			if (!Graph || VisitedGraphs.Contains(Graph)) continue;
+			VisitedGraphs.Add(Graph);
+
+			for (UEdGraphNode* N : Graph->Nodes)
+			{
+				UNiagaraNodeFunctionCall* FN = Cast<UNiagaraNodeFunctionCall>(N);
+				if (!FN) continue;
+				if (bHasGuid && FN->NodeGuid == TargetGuid)
+				{
+					if (OutUsage) *OutUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+					return FN;
+				}
+				if (!bHasGuid && FN->GetFunctionName() == NodeGuidStr)
+				{
+					if (OutUsage) *OutUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+					return FN;
+				}
+			}
+		}
+	}
+
 	return nullptr;
 }
 
@@ -544,6 +798,29 @@ FNiagaraVariable FMonolithNiagaraActions::MakeUserVariable(const FString& ParamN
 	return FNiagaraVariable(TypeDef, FName(*Full));
 }
 
+// Helper: extract JSON object from a value that may be an object or a string-serialized object
+// (Claude Code often serializes nested JSON objects as strings via MCP)
+static TSharedPtr<FJsonObject> AsObjectOrParseString(const TSharedPtr<FJsonValue>& JsonValue)
+{
+	if (!JsonValue.IsValid()) return nullptr;
+	TSharedPtr<FJsonObject> O = JsonValue->AsObject();
+	// UE 5.7: AsObject() on a FJsonValueString returns a valid but EMPTY FJsonObject
+	// instead of nullptr. Check that the object actually has fields before accepting it.
+	if (O.IsValid() && O->Values.Num() > 0) return O;
+	// Fallback: try parsing as a JSON string
+	// Claude Code double-serializes MCP params, so strings may contain backslash-escaped quotes
+	// e.g. {\"r\":1,\"g\":0} instead of {"r":1,"g":0}. Unescape before parsing.
+	if (JsonValue->Type == EJson::String)
+	{
+		FString Str = JsonValue->AsString();
+		Str.ReplaceInline(TEXT("\\\""), TEXT("\""), ESearchCase::CaseSensitive);
+		Str.ReplaceInline(TEXT("\\\\"), TEXT("\\"), ESearchCase::CaseSensitive);
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Str);
+		FJsonSerializer::Deserialize(Reader, O);
+	}
+	return O;
+}
+
 // Helper: set typed value on parameter store from JSON
 static bool SetTypedParameterValue(FNiagaraUserRedirectionParameterStore& Store, const FNiagaraVariable& Var,
 	const FNiagaraTypeDefinition& TypeDef, const TSharedPtr<FJsonValue>& JsonValue)
@@ -567,7 +844,7 @@ static bool SetTypedParameterValue(FNiagaraUserRedirectionParameterStore& Store,
 	}
 	if (TypeDef == FNiagaraTypeDefinition::GetVec2Def())
 	{
-		TSharedPtr<FJsonObject> O = JsonValue->AsObject();
+		TSharedPtr<FJsonObject> O = AsObjectOrParseString(JsonValue);
 		if (!O) return false;
 		FVector2f V(static_cast<float>(O->GetNumberField(TEXT("x"))), static_cast<float>(O->GetNumberField(TEXT("y"))));
 		Store.SetParameterValue<FVector2f>(V, Var, true);
@@ -575,7 +852,7 @@ static bool SetTypedParameterValue(FNiagaraUserRedirectionParameterStore& Store,
 	}
 	if (TypeDef == FNiagaraTypeDefinition::GetVec3Def() || TypeDef == FNiagaraTypeDefinition::GetPositionDef())
 	{
-		TSharedPtr<FJsonObject> O = JsonValue->AsObject();
+		TSharedPtr<FJsonObject> O = AsObjectOrParseString(JsonValue);
 		if (!O) return false;
 		FVector3f V(static_cast<float>(O->GetNumberField(TEXT("x"))), static_cast<float>(O->GetNumberField(TEXT("y"))),
 			static_cast<float>(O->GetNumberField(TEXT("z"))));
@@ -584,7 +861,7 @@ static bool SetTypedParameterValue(FNiagaraUserRedirectionParameterStore& Store,
 	}
 	if (TypeDef == FNiagaraTypeDefinition::GetVec4Def() || TypeDef == FNiagaraTypeDefinition::GetQuatDef())
 	{
-		TSharedPtr<FJsonObject> O = JsonValue->AsObject();
+		TSharedPtr<FJsonObject> O = AsObjectOrParseString(JsonValue);
 		if (!O) return false;
 		FVector4f V(static_cast<float>(O->GetNumberField(TEXT("x"))), static_cast<float>(O->GetNumberField(TEXT("y"))),
 			static_cast<float>(O->GetNumberField(TEXT("z"))), static_cast<float>(O->GetNumberField(TEXT("w"))));
@@ -593,7 +870,7 @@ static bool SetTypedParameterValue(FNiagaraUserRedirectionParameterStore& Store,
 	}
 	if (TypeDef == FNiagaraTypeDefinition::GetColorDef())
 	{
-		TSharedPtr<FJsonObject> O = JsonValue->AsObject();
+		TSharedPtr<FJsonObject> O = AsObjectOrParseString(JsonValue);
 		if (!O) return false;
 		FLinearColor V(static_cast<float>(O->GetNumberField(TEXT("r"))), static_cast<float>(O->GetNumberField(TEXT("g"))),
 			static_cast<float>(O->GetNumberField(TEXT("b"))),
@@ -761,12 +1038,26 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("di_class"), TEXT("string"), TEXT("Data interface class name"))
 			.Optional(TEXT("config"), TEXT("object"), TEXT("Data interface configuration"))
 			.Build());
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_module_from_hlsl"), TEXT("Create a Niagara module from HLSL"),
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_module_from_hlsl"), TEXT("Create a Niagara module script from custom HLSL"),
 		FMonolithActionHandler::CreateStatic(&HandleCreateModuleFromHLSL),
-		MakeShared<FJsonObject>());
-	Registry.RegisterAction(TEXT("niagara"), TEXT("create_function_from_hlsl"), TEXT("Create a Niagara function from HLSL"),
+		FParamSchemaBuilder()
+			.Required(TEXT("name"), TEXT("string"), TEXT("Display name for the module"))
+			.Required(TEXT("save_path"), TEXT("string"), TEXT("Asset path to save (e.g. /Game/VFX/Modules/MyModule)"))
+			.Required(TEXT("hlsl"), TEXT("string"), TEXT("HLSL code body"))
+			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of {name, type} objects for input parameters"))
+			.Optional(TEXT("outputs"), TEXT("array"), TEXT("Array of {name, type} objects for output parameters"))
+			.Optional(TEXT("description"), TEXT("string"), TEXT("Optional description for the module"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("create_function_from_hlsl"), TEXT("Create a Niagara function script from custom HLSL"),
 		FMonolithActionHandler::CreateStatic(&HandleCreateFunctionFromHLSL),
-		MakeShared<FJsonObject>());
+		FParamSchemaBuilder()
+			.Required(TEXT("name"), TEXT("string"), TEXT("Display name for the function"))
+			.Required(TEXT("save_path"), TEXT("string"), TEXT("Asset path to save (e.g. /Game/VFX/Functions/MyFunc)"))
+			.Required(TEXT("hlsl"), TEXT("string"), TEXT("HLSL code body"))
+			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of {name, type} objects for input parameters"))
+			.Optional(TEXT("outputs"), TEXT("array"), TEXT("Array of {name, type} objects for output parameters"))
+			.Optional(TEXT("description"), TEXT("string"), TEXT("Optional description for the function"))
+			.Build());
 
 	// Parameter (9)
 	Registry.RegisterAction(TEXT("niagara"), TEXT("get_all_parameters"), TEXT("Get all parameters in a system"),
@@ -891,6 +1182,22 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
 			.Build());
 
+	// Discovery (2)
+	Registry.RegisterAction(TEXT("niagara"), TEXT("list_module_scripts"), TEXT("Search available Niagara module scripts by keyword"),
+		FMonolithActionHandler::CreateStatic(&HandleListModuleScripts),
+		FParamSchemaBuilder()
+			.Optional(TEXT("search"), TEXT("string"), TEXT("Search keyword (e.g. 'gravity', 'color', 'velocity'). Omit to list all."))
+			.Optional(TEXT("usage"), TEXT("string"), TEXT("Filter by usage: 'module', 'dynamic_input', 'function'. Default: module."))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results (default: 50)"))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("list_renderer_properties"), TEXT("List editable properties on a renderer"),
+		FMonolithActionHandler::CreateStatic(&HandleListRendererProperties),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("renderer_index"), TEXT("integer"), TEXT("Renderer index (from list_renderers)"))
+			.Build());
+
 	// Batch (2)
 	Registry.RegisterAction(TEXT("niagara"), TEXT("batch_execute"), TEXT("Execute multiple operations in one transaction"),
 		FMonolithActionHandler::CreateStatic(&HandleBatchExecute),
@@ -901,7 +1208,8 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 	Registry.RegisterAction(TEXT("niagara"), TEXT("create_system_from_spec"), TEXT("Create a full system from JSON spec"),
 		FMonolithActionHandler::CreateStatic(&HandleCreateSystemFromSpec),
 		FParamSchemaBuilder()
-			.Required(TEXT("spec"), TEXT("object"), TEXT("Full system specification JSON"))
+			.Required(TEXT("save_path"), TEXT("string"), TEXT("Asset save path, e.g. /Game/VFX/NS_MySystem"))
+			.Required(TEXT("spec"), TEXT("object"), TEXT("System specification (emitters, modules, renderers, user_parameters)"))
 			.Build());
 
 	// DI (1)
@@ -918,6 +1226,40 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
 			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
 			.Build());
+
+	// Diagnostics (1)
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_system_diagnostics"), TEXT("Get compile errors, warnings, renderer issues, and script stats"),
+		FMonolithActionHandler::CreateStatic(&HandleGetSystemDiagnostics),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Optional(TEXT("compile_first"), TEXT("boolean"), TEXT("Force synchronous compile before collecting diagnostics (default: true)"))
+			.Build());
+
+	// System Property (2)
+	Registry.RegisterAction(TEXT("niagara"), TEXT("get_system_property"), TEXT("Read a system-level property (WarmupTime, bDeterminism, RandomSeed, etc.)"),
+		FMonolithActionHandler::CreateStatic(&HandleGetSystemProperty),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("property"), TEXT("string"), TEXT("Property name or snake_case alias: warmup_time, determinism, random_seed, max_pool_size, etc."))
+			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_system_property"), TEXT("Set a system-level property (WarmupTime, bDeterminism, etc.)"),
+		FMonolithActionHandler::CreateStatic(&HandleSetSystemProperty),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("property"), TEXT("string"), TEXT("Property: WarmupTime, WarmupTickCount, WarmupTickDelta, bFixedTickDelta, FixedTickDeltaTime, bDeterminism, RandomSeed, bSupportLargeWorldCoordinates, bNeedsSortedSignificanceHandling, SignificanceHandlerLink, MaxPoolSize"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Property value"))
+			.Build());
+
+	// Static Switch (1)
+	Registry.RegisterAction(TEXT("niagara"), TEXT("set_static_switch_value"), TEXT("Set a static switch value on a module"),
+		FMonolithActionHandler::CreateStatic(&HandleSetStaticSwitchValue),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Niagara system asset path"))
+			.Required(TEXT("emitter"), TEXT("string"), TEXT("Emitter name"))
+			.Required(TEXT("module_node"), TEXT("string"), TEXT("Module node name"))
+			.Required(TEXT("input"), TEXT("string"), TEXT("Static switch input name"))
+			.Required(TEXT("value"), TEXT("string"), TEXT("Value to set (true/false for bool, enum value name for enums, integer for int switches)"))
+			.Build());
 }
 
 // ============================================================================
@@ -927,13 +1269,19 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 FMonolithActionResult FMonolithNiagaraActions::HandleAddEmitter(const TSharedPtr<FJsonObject>& Params)
 {
 	FString SystemPath = GetAssetPath(Params);
+	// Accept common alias names for the emitter asset path
 	FString EmitterAssetPath = Params->GetStringField(TEXT("emitter_asset"));
+	if (EmitterAssetPath.IsEmpty()) EmitterAssetPath = Params->GetStringField(TEXT("emitter_path"));
+	if (EmitterAssetPath.IsEmpty()) EmitterAssetPath = Params->GetStringField(TEXT("template"));
+	if (EmitterAssetPath.IsEmpty()) EmitterAssetPath = Params->GetStringField(TEXT("template_path"));
+	if (EmitterAssetPath.IsEmpty())
+		return FMonolithActionResult::Error(TEXT("Missing required param 'emitter_asset': provide a NiagaraEmitter asset path"));
 	FString EmitterName = Params->HasField(TEXT("name")) ? Params->GetStringField(TEXT("name")) : FString();
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
-	UNiagaraEmitter* EmitterAsset = LoadObject<UNiagaraEmitter>(nullptr, *EmitterAssetPath);
+	UNiagaraEmitter* EmitterAsset = FMonolithAssetUtils::LoadAssetByPath<UNiagaraEmitter>(EmitterAssetPath);
 	if (!EmitterAsset) return FMonolithActionResult::Error(FString::Printf(
 		TEXT("Failed to load emitter asset '%s'. Ensure path points to a NiagaraEmitter (not a NiagaraSystem)."), *EmitterAssetPath));
 
@@ -1109,6 +1457,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterProperty(const TS
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString PropertyName = Params->GetStringField(TEXT("property"));
+	if (PropertyName.IsEmpty()) PropertyName = Params->GetStringField(TEXT("property_name"));
 	TSharedPtr<FJsonValue> JV = Params->TryGetField(TEXT("value"));
 	if (!JV.IsValid())
 		return FMonolithActionResult::Error(TEXT("Missing required field: value"));
@@ -1129,13 +1478,53 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetEmitterProperty(const TS
 	if (PropertyName == TEXT("SimTarget") || PropertyName == TEXT("sim_target"))
 	{
 		FString V = JV->AsString();
-		if (V == TEXT("CPU") || V == TEXT("CPUSim")) { ED->SimTarget = ENiagaraSimTarget::CPUSim; bOk = true; }
-		else if (V == TEXT("GPU") || V == TEXT("GPUComputeSim")) { ED->SimTarget = ENiagaraSimTarget::GPUComputeSim; bOk = true; }
+		ENiagaraSimTarget NewTarget = ED->SimTarget;
+		if (V == TEXT("CPU") || V == TEXT("CPUSim")) { NewTarget = ENiagaraSimTarget::CPUSim; bOk = true; }
+		else if (V == TEXT("GPU") || V == TEXT("GPUComputeSim")) { NewTarget = ENiagaraSimTarget::GPUComputeSim; bOk = true; }
+
+		if (bOk && NewTarget != ED->SimTarget)
+		{
+			FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[Index];
+			Handle.GetInstance().Emitter->Modify();
+			ED->SimTarget = NewTarget;
+
+			// Fire PostEditChangeVersionedProperty so the graph source is marked dirty.
+			// Without this, RequestCompile sees unchanged hash and skips compilation,
+			// leaving VM scripts with zero bytecode ("Data missing please force a recompile").
+			FProperty* SimTargetProp = FindFProperty<FProperty>(
+				FVersionedNiagaraEmitterData::StaticStruct(),
+				GET_MEMBER_NAME_CHECKED(FVersionedNiagaraEmitterData, SimTarget));
+			FPropertyChangedEvent PCE(SimTargetProp);
+			Handle.GetInstance().Emitter->PostEditChangeVersionedProperty(PCE, Handle.GetInstance().Version);
+
+			// Request compile for this specific emitter (mirrors engine's SNiagaraSimTargetToggle)
+			UNiagaraSystem::RequestCompileForEmitter(Handle.GetInstance());
+		}
 	}
 	else if (PropertyName == TEXT("bLocalSpace") || PropertyName == TEXT("local_space"))
-	{ ED->bLocalSpace = JV->AsBool(); bOk = true; }
+	{
+		ED->bLocalSpace = JV->AsBool(); bOk = true;
+		// bLocalSpace affects compilation — notify via PostEditChangeVersionedProperty
+		FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[Index];
+		FProperty* Prop = FindFProperty<FProperty>(FVersionedNiagaraEmitterData::StaticStruct(), GET_MEMBER_NAME_CHECKED(FVersionedNiagaraEmitterData, bLocalSpace));
+		FPropertyChangedEvent PCE(Prop);
+		Handle.GetInstance().Emitter->PostEditChangeVersionedProperty(PCE, Handle.GetInstance().Version);
+	}
 	else if (PropertyName == TEXT("bDeterminism") || PropertyName == TEXT("determinism"))
-	{ ED->bDeterminism = JV->AsBool(); bOk = true; }
+	{
+		ED->bDeterminism = JV->AsBool(); bOk = true;
+		FNiagaraEmitterHandle& Handle = System->GetEmitterHandles()[Index];
+		FProperty* Prop = FindFProperty<FProperty>(FVersionedNiagaraEmitterData::StaticStruct(), GET_MEMBER_NAME_CHECKED(FVersionedNiagaraEmitterData, bDeterminism));
+		FPropertyChangedEvent PCE(Prop);
+		Handle.GetInstance().Emitter->PostEditChangeVersionedProperty(PCE, Handle.GetInstance().Version);
+	}
+	else if (PropertyName == TEXT("CalculateBoundsMode") || PropertyName == TEXT("calculate_bounds_mode") || PropertyName == TEXT("bounds_mode"))
+	{
+		FString V = JV->AsString();
+		if (V == TEXT("Dynamic")) { ED->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Dynamic; bOk = true; }
+		else if (V == TEXT("Fixed")) { ED->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Fixed; bOk = true; }
+		else if (V == TEXT("Programmable")) { ED->CalculateBoundsMode = ENiagaraEmitterCalculateBoundMode::Programmable; bOk = true; }
+	}
 	else if (PropertyName == TEXT("RandomSeed") || PropertyName == TEXT("random_seed"))
 	{ ED->RandomSeed = static_cast<int32>(JV->AsNumber()); bOk = true; }
 	else if (PropertyName == TEXT("AllocationMode") || PropertyName == TEXT("allocation_mode"))
@@ -1162,7 +1551,15 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRequestCompile(const TShare
 	FString SystemPath = GetAssetPath(Params);
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
-	System->RequestCompile(false);
+
+	bool bForce = Params->HasField(TEXT("force")) && Params->GetBoolField(TEXT("force"));
+	bool bSync = Params->HasField(TEXT("synchronous")) && Params->GetBoolField(TEXT("synchronous"));
+
+	System->RequestCompile(bForce);
+	if (bSync)
+	{
+		System->WaitForCompilationComplete();
+	}
 	return SuccessStr(TEXT("Compile requested"));
 }
 
@@ -1173,7 +1570,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 
 	if (!TemplatePath.IsEmpty())
 	{
-		UNiagaraSystem* Template = LoadObject<UNiagaraSystem>(nullptr, *TemplatePath);
+		UNiagaraSystem* Template = FMonolithAssetUtils::LoadAssetByPath<UNiagaraSystem>(TemplatePath);
 		if (!Template) return FMonolithActionResult::Error(TEXT("Failed to load template"));
 
 		FString PackagePath, AssetName;
@@ -1290,9 +1687,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module_name"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
 
 	ENiagaraScriptUsage FoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
 	UNiagaraNodeFunctionCall* ModuleNode = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
@@ -1316,6 +1718,22 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 			FNiagaraStackGraphUtilities::ENiagaraGetStackFunctionInputPinsOptions::ModuleInputsOnly, false);
 	}
 
+	// Fallback for CustomHlsl modules: GetStackFunctionInputs returns empty because the
+	// parameter map history doesn't contain our typed inputs (they're function-locals, not
+	// Module.-prefixed map entries). Read the FunctionCall's typed input pins directly instead.
+	if (Inputs.Num() == 0)
+	{
+		const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
+		for (UEdGraphPin* Pin : ModuleNode->Pins)
+		{
+			if (Pin->Direction != EGPD_Input) continue;
+			FNiagaraTypeDefinition PinType = Schema->PinToTypeDefinition(Pin);
+			if (PinType == FNiagaraTypeDefinition::GetParameterMapDef()) continue;
+			if (Pin->PinName.IsNone() || Pin->PinName == TEXT("Add")) continue;
+			Inputs.Add(FNiagaraVariable(PinType, Pin->PinName));
+		}
+	}
+
 	TArray<TSharedPtr<FJsonValue>> Arr;
 	for (const FNiagaraVariable& Input : Inputs)
 	{
@@ -1325,8 +1743,9 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 		IO->SetStringField(TEXT("name"), ShortName.ToString());
 		IO->SetStringField(TEXT("type"), Input.GetType().GetName());
 
+		// Use full name (with Module. prefix) for aliased handle — stripped name produces wrong namespace
 		FNiagaraParameterHandle AH = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(
-			FNiagaraParameterHandle(ShortName), ModuleNode);
+			FNiagaraParameterHandle(Input.GetName()), ModuleNode);
 		UEdGraphPin* OP = MonolithNiagaraHelpers::GetStackFunctionInputOverridePin(*ModuleNode, AH);
 		if (OP)
 		{
@@ -1336,7 +1755,35 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 			{
 				IO->SetBoolField(TEXT("is_linked"), true);
 				if (UNiagaraNodeInput* LI = Cast<UNiagaraNodeInput>(OP->LinkedTo[0]->GetOwningNode()))
+				{
 					IO->SetStringField(TEXT("linked_parameter"), LI->Input.GetName().ToString());
+					// For DI inputs (curves, etc.), serialize the actual DI data
+					// UNiagaraNodeInput::GetDataInterface() is not exported — access via UProperty reflection
+					FObjectProperty* DIProp = FindFProperty<FObjectProperty>(LI->GetClass(), TEXT("DataInterface"));
+					UNiagaraDataInterface* DI = DIProp ? Cast<UNiagaraDataInterface>(DIProp->GetObjectPropertyValue(DIProp->ContainerPtrToValuePtr<void>(LI))) : nullptr;
+					if (DI)
+					{
+						TSharedPtr<FJsonObject> CurveData = MonolithNiagaraHelpers::SerializeDICurveData(DI);
+						if (CurveData.IsValid())
+						{
+							// Check if curve data has any actual keys (not just empty arrays)
+							bool bHasKeys = false;
+							for (const auto& Field : CurveData->Values)
+							{
+								if (Field.Value->Type == EJson::Array && Field.Value->AsArray().Num() > 0)
+								{
+									bHasKeys = true;
+									break;
+								}
+							}
+							IO->SetObjectField(TEXT("di_data"), CurveData);
+							if (!bHasKeys)
+							{
+								IO->SetBoolField(TEXT("di_using_defaults"), true);
+							}
+						}
+					}
+				}
 			}
 		}
 		else
@@ -1545,6 +1992,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleMoveModule(const TSharedPtr
 	R->SetStringField(TEXT("new_node_guid"), NewNode->NodeGuid.ToString());
 	R->SetNumberField(TEXT("new_index"), NewIndex);
 	R->SetStringField(TEXT("status"), TEXT("Module moved"));
+	R->SetStringField(TEXT("warning"), TEXT("Move removes and re-adds the module, so any input overrides are lost. Re-apply them with set_module_input_value after moving."));
 	return SuccessObj(R);
 }
 
@@ -1575,13 +2023,19 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module_name"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module"));
 	FString InputName = Params->GetStringField(TEXT("input"));
+	if (InputName.IsEmpty()) InputName = Params->GetStringField(TEXT("input_name"));
 	TSharedPtr<FJsonValue> JV = Params->TryGetField(TEXT("value"));
 	if (!JV.IsValid())
 		return FMonolithActionResult::Error(TEXT("Missing required field: value"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
 
 	ENiagaraScriptUsage FoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
 	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
@@ -1604,6 +2058,23 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 			FNiagaraStackGraphUtilities::ENiagaraGetStackFunctionInputPinsOptions::ModuleInputsOnly, false);
 	}
 
+	// Fallback for CustomHlsl modules: GetStackFunctionInputs returns empty because typed
+	// inputs aren't Module.-prefixed map entries. Read FunctionCall pins directly.
+	bool bCustomHlslFallback = false;
+	if (Inputs.Num() == 0)
+	{
+		bCustomHlslFallback = true;
+		const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
+		for (UEdGraphPin* Pin : MN->Pins)
+		{
+			if (Pin->Direction != EGPD_Input) continue;
+			FNiagaraTypeDefinition PinType = Schema->PinToTypeDefinition(Pin);
+			if (PinType == FNiagaraTypeDefinition::GetParameterMapDef()) continue;
+			if (Pin->PinName.IsNone() || Pin->PinName == TEXT("Add")) continue;
+			Inputs.Add(FNiagaraVariable(PinType, Pin->PinName));
+		}
+	}
+
 	// Match input by short name (strip Module. prefix for comparison)
 	FNiagaraTypeDefinition InputType;
 	bool bInputFound = false;
@@ -1623,20 +2094,48 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 			*InputName, *FString::Join(ValidNames, TEXT(", "))));
 	}
 
-	FNiagaraParameterHandle AH = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(
-		FNiagaraParameterHandle(MatchedFullName), MN);
-
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetModIn", "Set Module Input"));
 	System->Modify();
 
-	// UE 5.7 FIX: 5-param version of GetOrCreateStackFunctionInputOverridePin
-	UEdGraphPin& OverridePin = FNiagaraStackGraphUtilities::GetOrCreateStackFunctionInputOverridePin(
-		*MN, AH, InputType, FGuid(), FGuid());
-
-	// Guard: break existing links so the literal DefaultValue actually takes effect
-	if (OverridePin.LinkedTo.Num() > 0)
+	UEdGraphPin* TargetPin = nullptr;
+	if (bCustomHlslFallback)
 	{
-		OverridePin.BreakAllPinLinks();
+		// CustomHlsl fallback: set DefaultValue directly on the FunctionCall's typed input pin.
+		// No ParameterMapSet override node exists for these modules.
+		for (UEdGraphPin* Pin : MN->Pins)
+		{
+			if (Pin->Direction == EGPD_Input && Pin->PinName == MatchedFullName)
+			{
+				TargetPin = Pin;
+				break;
+			}
+		}
+		if (!TargetPin)
+		{
+			GEditor->EndTransaction();
+			return FMonolithActionResult::Error(TEXT("Failed to find pin on FunctionCall node"));
+		}
+		if (TargetPin->LinkedTo.Num() > 0)
+		{
+			TargetPin->BreakAllPinLinks();
+		}
+	}
+	else
+	{
+		// Standard path: use the ParameterMap override pin system
+		FNiagaraParameterHandle AH = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(
+			FNiagaraParameterHandle(MatchedFullName), MN);
+
+		// UE 5.7 FIX: 5-param version of GetOrCreateStackFunctionInputOverridePin
+		UEdGraphPin& OverridePin = FNiagaraStackGraphUtilities::GetOrCreateStackFunctionInputOverridePin(
+			*MN, AH, InputType, FGuid(), FGuid());
+
+		// Guard: break existing links so the literal DefaultValue actually takes effect
+		if (OverridePin.LinkedTo.Num() > 0)
+		{
+			OverridePin.BreakAllPinLinks();
+		}
+		TargetPin = &OverridePin;
 	}
 
 	FString ValStr;
@@ -1669,7 +2168,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 	}
 	else ValStr = JsonValueToString(JV);
 
-	OverridePin.DefaultValue = ValStr;
+	TargetPin->DefaultValue = ValStr;
 	GEditor->EndTransaction();
 	System->RequestCompile(false);
 
@@ -1681,11 +2180,17 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputBinding(const
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module_name"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module"));
 	FString InputName = Params->GetStringField(TEXT("input"));
+	if (InputName.IsEmpty()) InputName = Params->GetStringField(TEXT("input_name"));
 	FString BindingPath = Params->GetStringField(TEXT("binding"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
 
 	ENiagaraScriptUsage FoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
 	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
@@ -1771,7 +2276,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module_name"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module"));
 	FString InputName = Params->GetStringField(TEXT("input"));
+	if (InputName.IsEmpty()) InputName = Params->GetStringField(TEXT("input_name"));
 	FString DIClass = Params->GetStringField(TEXT("di_class"));
 	TSharedPtr<FJsonObject> DIConfig;
 	if (Params->HasField(TEXT("config")))
@@ -1792,14 +2300,92 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
+
 	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid);
 	if (!MN) return FMonolithActionResult::Error(TEXT("Module node not found"));
 
-	FString FullName = DIClass;
-	if (!FullName.StartsWith(TEXT("UNiagara"))) FullName = TEXT("UNiagara") + DIClass;
-	UClass* DIUClass = FindFirstObject<UClass>(*FullName, EFindFirstObjectOptions::NativeFirst);
-	if (!DIUClass) DIUClass = FindFirstObject<UClass>(*FullName.Mid(1), EFindFirstObjectOptions::NativeFirst);
-	if (!DIUClass) return FMonolithActionResult::Error(TEXT("DI class not found"));
+	// Normalize DI class name — accept any of these forms:
+	//   "UNiagaraDataInterfaceCurve"      (full with U prefix)
+	//   "NiagaraDataInterfaceCurve"       (no U prefix — exact object name)
+	//   "NiagaraDataInterfaceColorCurve"  (exact object name, works)
+	//   "CurveLinearColor"                (short name — old prefix logic had word-order bugs)
+	//   "Curve"                           (minimal short name)
+	//
+	// Strategy: strip U prefix, build exact-name candidates, then fall back to
+	// GetDerivedClasses fuzzy suffix matching. This is robust against:
+	//   1. Word-order mismatches ("CurveLinearColor" → actual class "ColorCurve")
+	//   2. FindFirstObject returning null for classes with ambiguous/colliding names
+	//   3. Short names that don't map predictably to full class names
+	UClass* DIUClass = nullptr;
+
+	// Step 1: normalize input — strip leading "U" if it's the class-prefix U
+	FString Stripped = DIClass;
+	if (Stripped.StartsWith(TEXT("U")) && Stripped.Len() > 1 && FChar::IsUpper(Stripped[1]))
+		Stripped = Stripped.Mid(1);
+
+	// Step 2: build exact-name candidates (most specific first) and try FindFirstObject.
+	// These work when the caller supplies the correct full object name.
+	TArray<FString> ExactCandidates;
+	if (!Stripped.StartsWith(TEXT("NiagaraDataInterface")))
+		ExactCandidates.Add(TEXT("NiagaraDataInterface") + Stripped);
+	ExactCandidates.AddUnique(Stripped);
+
+	for (const FString& Candidate : ExactCandidates)
+	{
+		UClass* Found = FindFirstObject<UClass>(*Candidate, EFindFirstObjectOptions::NativeFirst);
+		if (Found && Found->IsChildOf<UNiagaraDataInterface>())
+		{
+			DIUClass = Found;
+			break;
+		}
+	}
+
+	// Step 3: if exact lookup failed, fall back to GetDerivedClasses suffix scan.
+	// This handles short/mangled names like "Curve", "CurveLinearColor", "ColorCurve", etc.
+	// It's O(N) over all DI subclasses but that's ~30 classes — fine for MCP calls.
+	if (!DIUClass)
+	{
+		// Build a lowercase suffix to match against. Try progressively shorter suffixes:
+		// full Stripped, then just the token after the last known prefix.
+		FString LowerStripped = Stripped.ToLower();
+
+		TArray<UClass*> DerivedClasses;
+		GetDerivedClasses(UNiagaraDataInterface::StaticClass(), DerivedClasses, /*bRecursive=*/true);
+
+		UClass* BestMatch = nullptr;
+		for (UClass* DI : DerivedClasses)
+		{
+			if (!DI || DI->HasAnyClassFlags(CLASS_Abstract))
+				continue;
+			FString ClassName = DI->GetName(); // e.g. "NiagaraDataInterfaceColorCurve"
+			FString LowerClass = ClassName.ToLower();
+
+			// Exact match (case-insensitive) — highest priority
+			if (LowerClass == LowerStripped)
+			{
+				BestMatch = DI;
+				break;
+			}
+
+			// Suffix match: class name ends with the stripped input
+			// e.g. "Curve" matches "NiagaraDataInterfaceCurve" (ends with "Curve")
+			// and "ColorCurve" matches "NiagaraDataInterfaceColorCurve"
+			if (LowerClass.EndsWith(LowerStripped))
+			{
+				// Prefer the shortest matching class name — it's the most specific match.
+				// "Curve" → NiagaraDataInterfaceCurve (31) wins over NiagaraDataInterfaceVectorCurve (35)
+				if (!BestMatch || ClassName.Len() < BestMatch->GetName().Len())
+					BestMatch = DI;
+			}
+		}
+		DIUClass = BestMatch;
+	}
+
+	if (!DIUClass) return FMonolithActionResult::Error(FString::Printf(
+		TEXT("DI class not found (must be a UNiagaraDataInterface subclass). Tried exact: [%s], then fuzzy suffix scan over all DI subclasses. Input was: '%s'"),
+		*FString::Join(ExactCandidates, TEXT(", ")), *DIClass));
 
 	// Enumerate all inputs using the engine's full API (includes data + DI inputs from the script)
 	ENiagaraScriptUsage FoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
@@ -1821,18 +2407,30 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 	}
 
 	// Validate input exists on this module (accept both short "Gravity" and full "Module.Gravity")
+	// Also accepts space-stripped names ("UniformCurve" matches "Uniform Curve")
 	FName InputFName(*InputName);
+	FString InputNameNoSpaces = InputName;
+	InputNameNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
 	bool bFoundInput = false;
 	FNiagaraTypeDefinition InputType(DIUClass);
+	FName MatchedDIFullName; // store full Module.X name for correct PH construction
 	for (const FNiagaraVariable& In : Inputs)
 	{
 		FName ShortName = MonolithNiagaraHelpers::StripModulePrefix(In.GetName());
-		if (ShortName == InputFName || In.GetName() == InputFName)
+		// Exact match on short or full name
+		bool bMatch = (ShortName == InputFName || In.GetName() == InputFName);
+		// Fallback: space-stripped comparison (e.g. "UniformCurve" matches "Uniform Curve")
+		if (!bMatch)
+		{
+			FString ShortNameNoSpaces = ShortName.ToString();
+			ShortNameNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+			bMatch = ShortNameNoSpaces.Equals(InputNameNoSpaces, ESearchCase::IgnoreCase);
+		}
+		if (bMatch)
 		{
 			InputType = In.GetType();
 			bFoundInput = true;
-			// Normalize to short name for downstream AliasedModuleParameterHandle
-			InputName = ShortName.ToString();
+			MatchedDIFullName = In.GetName();
 
 			// Validate type compatibility: input must already be a DataInterface type
 			if (!InputType.IsDataInterface())
@@ -1846,13 +2444,16 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 	}
 	if (!bFoundInput)
 	{
+		TArray<FString> ValidNames;
+		for (const FNiagaraVariable& In : Inputs) { ValidNames.Add(MonolithNiagaraHelpers::StripModulePrefix(In.GetName()).ToString()); }
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Input '%s' not found on module '%s'. Use get_module_inputs to list available inputs."),
-			*InputName, *MN->GetFunctionName()));
+			TEXT("Input '%s' not found on module '%s'. Valid inputs: [%s]"),
+			*InputName, *MN->GetFunctionName(), *FString::Join(ValidNames, TEXT(", "))));
 	}
 
+	// Use the full Module.X name for correct namespace aliasing
 	FNiagaraParameterHandle AH = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(
-		FNiagaraParameterHandle(FName(*InputName)), MN);
+		FNiagaraParameterHandle(MatchedDIFullName), MN);
 
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetModDI", "Set Module DI"));
 	System->Modify();
@@ -1880,8 +2481,20 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 
 	if (DIInst && DIConfig.IsValid())
 	{
+		// Try curve-specific config first (handles keys, red/green/blue/alpha, x/y/z/w)
+		bool bCurveApplied = MonolithNiagaraHelpers::ApplyCurveConfig(DIInst, DIConfig);
+
+		// Fall back to simple property reflection for non-curve properties
 		for (auto& Pair : DIConfig->Values)
 		{
+			// Skip curve-specific keys that were already handled
+			static const TSet<FString> CurveKeys = {
+				TEXT("keys"), TEXT("curve"),
+				TEXT("red"), TEXT("green"), TEXT("blue"), TEXT("alpha"),
+				TEXT("x"), TEXT("y"), TEXT("z"), TEXT("w")
+			};
+			if (CurveKeys.Contains(Pair.Key)) continue;
+
 			FProperty* Prop = DIUClass->FindPropertyByName(FName(*Pair.Key));
 			if (!Prop) continue;
 			void* Addr = Prop->ContainerPtrToValuePtr<void>(DIInst);
@@ -1889,6 +2502,17 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 			else if (FIntProperty* IP = CastField<FIntProperty>(Prop)) IP->SetPropertyValue(Addr, static_cast<int32>(Pair.Value->AsNumber()));
 			else if (FBoolProperty* BP = CastField<FBoolProperty>(Prop)) BP->SetPropertyValue(Addr, Pair.Value->AsBool());
 			else if (FStrProperty* SP = CastField<FStrProperty>(Prop)) SP->SetPropertyValue(Addr, Pair.Value->AsString());
+		}
+
+		// For curve DIs, rebuild the LUT after setting keys
+		if (bCurveApplied)
+		{
+			if (UNiagaraDataInterfaceCurveBase* CurveBase = Cast<UNiagaraDataInterfaceCurveBase>(DIInst))
+			{
+#if WITH_EDITORONLY_DATA
+				CurveBase->UpdateLUT();
+#endif
+			}
 		}
 	}
 
@@ -1900,9 +2524,363 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 
 FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TSharedPtr<FJsonObject>& Params, ENiagaraScriptUsage Usage)
 {
-	// UNiagaraNodeCustomHlsl::SetCustomHlsl and RequestNewTypedPin are not exported from NiagaraEditor.
-	// Use the unreal-niagara MCP server's Python-based HLSL creation instead.
-	return FMonolithActionResult::Error(TEXT("HLSL script creation requires Python bridge (NiagaraEditor internal APIs not exported). Use unreal-niagara MCP create_niagara_module instead."));
+	// === Parse and validate params ===
+	FString Name = Params->GetStringField(TEXT("name"));
+	FString SavePath = Params->GetStringField(TEXT("save_path"));
+	FString HlslBody = Params->GetStringField(TEXT("hlsl"));
+	FString Description = Params->HasField(TEXT("description")) ? Params->GetStringField(TEXT("description")) : FString();
+
+	if (Name.IsEmpty()) return FMonolithActionResult::Error(TEXT("'name' is required"));
+	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("'save_path' is required"));
+	if (HlslBody.IsEmpty()) return FMonolithActionResult::Error(TEXT("'hlsl' is required"));
+
+	// Parse inputs array
+	struct FPinDef { FString Name; FNiagaraTypeDefinition Type; };
+	TArray<FPinDef> ParsedInputs;
+	TArray<FPinDef> ParsedOutputs;
+
+	// Helper: extract an array from a field that may be a JSON array or a string-serialized JSON array
+	// (Claude Code sometimes serializes nested JSON arrays as strings via MCP)
+	auto GetJsonArray = [](const TSharedPtr<FJsonObject>& P, const FString& FieldName) -> TArray<TSharedPtr<FJsonValue>>
+	{
+		if (!P->HasField(FieldName)) return {};
+		const TArray<TSharedPtr<FJsonValue>>* ArrPtr;
+		if (P->TryGetArrayField(FieldName, ArrPtr)) return *ArrPtr;
+		// Fallback: try parsing as string
+		FString Str = P->GetStringField(FieldName);
+		if (!Str.IsEmpty())
+		{
+			TArray<TSharedPtr<FJsonValue>> Parsed;
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Str);
+			FJsonSerializer::Deserialize(Reader, Parsed);
+			return Parsed;
+		}
+		return {};
+	};
+
+	for (const TSharedPtr<FJsonValue>& Val : GetJsonArray(Params, TEXT("inputs")))
+	{
+		TSharedPtr<FJsonObject> Obj = AsObjectOrParseString(Val);
+		if (!Obj.IsValid() || Obj->Values.Num() == 0) continue;
+		FString PinName = Obj->GetStringField(TEXT("name"));
+		FString TypeStr = Obj->GetStringField(TEXT("type"));
+		if (PinName.IsEmpty() || TypeStr.IsEmpty()) continue;
+		ParsedInputs.Add({ PinName, ResolveNiagaraType(TypeStr) });
+	}
+
+	for (const TSharedPtr<FJsonValue>& Val : GetJsonArray(Params, TEXT("outputs")))
+	{
+		TSharedPtr<FJsonObject> Obj = AsObjectOrParseString(Val);
+		if (!Obj.IsValid() || Obj->Values.Num() == 0) continue;
+		FString PinName = Obj->GetStringField(TEXT("name"));
+		FString TypeStr = Obj->GetStringField(TEXT("type"));
+		if (PinName.IsEmpty() || TypeStr.IsEmpty()) continue;
+		ParsedOutputs.Add({ PinName, ResolveNiagaraType(TypeStr) });
+	}
+
+	// Validate: no dots in I/O names — engine generates "In_X" / "Out_X" as HLSL parameter
+	// names with bCollapseNamespaces=false, so dots become struct member access → compile error.
+	for (const FPinDef& Pin : ParsedInputs)
+	{
+		if (Pin.Name.Contains(TEXT(".")))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Input name '%s' contains a dot. Use a bare identifier (e.g. 'InColor' not 'Module.InColor'). "
+					 "The Niagara translator prefixes 'In_' producing 'In_%s' which is invalid HLSL."),
+				*Pin.Name, *Pin.Name));
+		}
+	}
+	for (const FPinDef& Pin : ParsedOutputs)
+	{
+		if (Pin.Name.Contains(TEXT(".")))
+		{
+			if (Usage == ENiagaraScriptUsage::Module)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Output name '%s' contains a dot — invalid for module outputs. "
+						 "Write to particle attributes directly in the HLSL body (e.g. 'Particles.Color = ...;'). "
+						 "The ParameterMap handles namespace resolution. Remove '%s' from outputs."),
+					*Pin.Name, *Pin.Name));
+			}
+			else
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("Output name '%s' contains a dot. Use a bare identifier (e.g. 'Result' not 'Module.Result'). "
+						 "The translator generates 'Out_%s' which is invalid HLSL."),
+					*Pin.Name, *Pin.Name));
+			}
+		}
+	}
+
+	// === Create package and NiagaraScript asset ===
+	FString PackagePath, AssetName;
+	int32 LastSlash;
+	if (!SavePath.FindLastChar('/', LastSlash))
+		return FMonolithActionResult::Error(TEXT("Invalid save_path - must contain '/'"));
+	PackagePath = SavePath.Left(LastSlash);
+	AssetName = SavePath.Mid(LastSlash + 1);
+
+	FString FullPath = PackagePath / AssetName;
+	UPackage* Pkg = CreatePackage(*FullPath);
+	if (!Pkg) return FMonolithActionResult::Error(TEXT("Failed to create package"));
+
+	UNiagaraScript* Script = NewObject<UNiagaraScript>(Pkg, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
+	if (!Script) return FMonolithActionResult::Error(TEXT("Failed to create NiagaraScript"));
+	Script->Usage = Usage;
+
+	// === Create graph structure manually ===
+	// We build the graph ourselves instead of calling InitializeScript because InitializeScript
+	// creates ParameterMapGet/Set nodes whose headers are private to NiagaraEditor.
+	// Our approach: InputNode → CustomHlslNode (with ParameterMap flow pins via Signature) → OutputNode
+
+	UNiagaraScriptSource* Source = NewObject<UNiagaraScriptSource>(Script, NAME_None, RF_Transactional);
+	UNiagaraGraph* Graph = NewObject<UNiagaraGraph>(Source, NAME_None, RF_Transactional);
+	Source->NodeGraph = Graph;
+
+	const UEdGraphSchema_Niagara* Schema = Cast<UEdGraphSchema_Niagara>(Graph->GetSchema());
+	if (!Schema) Schema = GetDefault<UEdGraphSchema_Niagara>();
+
+	const bool bIsModule = (Usage == ENiagaraScriptUsage::Module);
+
+	// --- OutputNode ---
+	FGraphNodeCreator<UNiagaraNodeOutput> OutputCreator(*Graph);
+	UNiagaraNodeOutput* OutputNode = OutputCreator.CreateNode();
+	OutputNode->SetUsage(Usage);
+	if (bIsModule)
+	{
+		// Module outputs use ParameterMap
+		OutputNode->Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("Output")));
+	}
+	else
+	{
+		// Function outputs use typed pins — add one per output
+		if (ParsedOutputs.Num() > 0)
+		{
+			OutputNode->Outputs.Add(FNiagaraVariable(ParsedOutputs[0].Type, FName(*ParsedOutputs[0].Name)));
+		}
+		else
+		{
+			// Default to float output if none specified
+			OutputNode->Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Output")));
+		}
+	}
+	OutputCreator.Finalize();
+
+	// --- InputNode ---
+	FGraphNodeCreator<UNiagaraNodeInput> InputCreator(*Graph);
+	UNiagaraNodeInput* InputNode = InputCreator.CreateNode();
+	InputNode->Usage = ENiagaraInputNodeUsage::Parameter;
+	if (bIsModule)
+	{
+		InputNode->Input = FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("MapIn"));
+	}
+	else
+	{
+		// Function inputs use typed pins — use first input or default float
+		if (ParsedInputs.Num() > 0)
+		{
+			InputNode->Input = FNiagaraVariable(ParsedInputs[0].Type, FName(*ParsedInputs[0].Name));
+		}
+		else
+		{
+			InputNode->Input = FNiagaraVariable(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Input"));
+		}
+	}
+	InputCreator.Finalize();
+
+	// --- Typed UNiagaraNodeInput nodes for each user-defined input ---
+	// FindInputNodes (called by UNiagaraNodeFunctionCall::AllocateDefaultPins when
+	// HasValidScriptAndGraph() is true) scans ALL graph nodes for UNiagaraNodeInput
+	// with Usage == Parameter. These nodes don't need wiring — their mere existence
+	// causes the FunctionCall to create override pins that set_module_input_value can write to.
+	// ExposureOptions defaults: bExposed=1, bRequired=1 — pins are immediately visible.
+	for (int32 i = 0; i < ParsedInputs.Num(); ++i)
+	{
+		const FPinDef& Input = ParsedInputs[i];
+
+		// For the Function path, the first input already has an InputNode created above.
+		// Skip it to avoid a duplicate (FindInputNodes deduplicates by name, but cleaner to not create it).
+		if (!bIsModule && i == 0) continue;
+
+		FGraphNodeCreator<UNiagaraNodeInput> TypedInputCreator(*Graph);
+		UNiagaraNodeInput* TypedInputNode = TypedInputCreator.CreateNode();
+		TypedInputNode->Usage = ENiagaraInputNodeUsage::Parameter;
+		TypedInputNode->Input = FNiagaraVariable(Input.Type, FName(*Input.Name));
+		TypedInputNode->CallSortPriority = i;  // controls pin order on the FunctionCall node
+		TypedInputCreator.Finalize();
+	}
+
+	// --- CustomHlsl Node ---
+	// Set up the Signature BEFORE Finalize so AllocateDefaultPins creates the correct pins.
+	// For Module usage, bRequiresExecPin=true creates ParameterMap flow pins automatically.
+	FGraphNodeCreator<UNiagaraNodeCustomHlsl> HlslCreator(*Graph);
+	UNiagaraNodeCustomHlsl* HlslNode = HlslCreator.CreateNode(/*bSelectNewNode=*/ false);
+
+	// Set ScriptUsage (public UPROPERTY)
+	HlslNode->ScriptUsage = Usage;
+
+	// Set FunctionDisplayName (protected UPROPERTY on UNiagaraNodeFunctionCall — access via reflection)
+	{
+		FProperty* NameProp = UNiagaraNodeFunctionCall::StaticClass()->FindPropertyByName(TEXT("FunctionDisplayName"));
+		if (NameProp)
+		{
+			void* NameAddr = NameProp->ContainerPtrToValuePtr<void>(HlslNode);
+			if (FStrProperty* NameStrProp = CastField<FStrProperty>(NameProp))
+			{
+				NameStrProp->SetPropertyValue(NameAddr, Name);
+			}
+		}
+	}
+
+	// Set CustomHlsl body via UPROPERTY reflection (it's a private EditAnywhere field)
+	// NOTE: No HLSL preprocessing needed — input/output names in the Signature use bare names
+	// (e.g. "InValue" not "Module.InValue"). The compiler's ProcessCustomHlsl replaces
+	// "InValue" → "In_InValue" and "OutValue" → "Out_OutValue" via ReplaceExactMatchTokens.
+	// The Module. namespace aliasing is handled at the system level by CreateAliasedModuleParameterHandle.
+	FProperty* HlslProp = UNiagaraNodeCustomHlsl::StaticClass()->FindPropertyByName(TEXT("CustomHlsl"));
+	if (HlslProp)
+	{
+		void* Addr = HlslProp->ContainerPtrToValuePtr<void>(HlslNode);
+		FStrProperty* StrProp = CastField<FStrProperty>(HlslProp);
+		if (StrProp)
+		{
+			StrProp->SetPropertyValue(Addr, HlslBody);
+		}
+	}
+
+	// Build the Signature — this drives pin creation in AllocateDefaultPins.
+	// CRITICAL: For Module usage, the ParameterMap must be the FIRST entry in Signature.Inputs
+	// and Signature.Outputs (NOT via bRequiresExecPin). BuildParameterMapHistory at
+	// NiagaraNodeCustomHlsl.cpp:478 checks: InputPins.Num() == Signature.Inputs.Num() + 1
+	// where +1 accounts for the "Add" dynamic pin. If bRequiresExecPin creates extra ParameterMap
+	// pins outside the Signature, the count fails and parameter map registration is skipped,
+	// causing "Incorrect number of outputs" compile errors.
+	HlslNode->Signature.Name = FName(*Name);
+	HlslNode->Signature.bRequiresExecPin = false;
+
+	if (bIsModule)
+	{
+		// Module: ParameterMap as first Signature entry (creates the flow pins),
+		// followed by typed I/O for user parameters.
+		// IMPORTANT: Use bare names (e.g. "InValue" not "Module.InValue") in the Signature.
+		// The Module. namespace causes dots in generated HLSL variable names (In_Module.InValue),
+		// which the HLSL compiler parses as struct member access → 'In_Module' undeclared.
+		// Module-level parameter aliasing happens at the system level via CreateAliasedModuleParameterHandle.
+		HlslNode->Signature.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), FName(TEXT(""))));
+		for (const FPinDef& Input : ParsedInputs)
+		{
+			HlslNode->Signature.Inputs.Add(FNiagaraVariable(Input.Type, FName(*Input.Name)));
+		}
+
+		HlslNode->Signature.Outputs.Add(FNiagaraVariableBase(FNiagaraTypeDefinition::GetParameterMapDef(), FName(TEXT(""))));
+		for (const FPinDef& Output : ParsedOutputs)
+		{
+			// Module outputs keep their namespace (e.g. Particles.Position, Module.Result)
+			HlslNode->Signature.Outputs.Add(FNiagaraVariableBase(Output.Type, FName(*Output.Name)));
+		}
+	}
+	else
+	{
+		// Function: no ParameterMap pins, direct typed I/O
+		for (const FPinDef& Input : ParsedInputs)
+		{
+			HlslNode->Signature.Inputs.Add(FNiagaraVariable(Input.Type, FName(*Input.Name)));
+		}
+		for (const FPinDef& Output : ParsedOutputs)
+		{
+			HlslNode->Signature.Outputs.Add(FNiagaraVariableBase(Output.Type, FName(*Output.Name)));
+		}
+	}
+
+	// Finalize calls AllocateDefaultPins which reads Signature to create pins
+	HlslCreator.Finalize();
+
+	// === Wire the graph ===
+	if (bIsModule)
+	{
+		// Module wiring: InputNode(MapOut) → HlslNode(MapIn) → OutputNode(MapIn)
+		// The ParameterMap pins are unnamed (empty FName) — find them by type
+		UEdGraphPin* InputMapOut = InputNode->GetOutputPin(0);
+		UEdGraphPin* HlslMapIn = MonolithNiagaraHelpers::GetParameterMapPin(*HlslNode, EGPD_Input);
+		UEdGraphPin* HlslMapOut = MonolithNiagaraHelpers::GetParameterMapPin(*HlslNode, EGPD_Output);
+		UEdGraphPin* OutputMapIn = OutputNode->GetInputPin(0);
+
+		if (InputMapOut && HlslMapIn)
+			Schema->TryCreateConnection(InputMapOut, HlslMapIn);
+		if (HlslMapOut && OutputMapIn)
+			Schema->TryCreateConnection(HlslMapOut, OutputMapIn);
+	}
+	else
+	{
+		// Function wiring: InputNode(typed) → HlslNode(first input) and HlslNode(first output) → OutputNode
+		UEdGraphPin* InputOut = InputNode->GetOutputPin(0);
+		UEdGraphPin* OutputIn = OutputNode->GetInputPin(0);
+
+		// Connect input node to first typed input pin on HlslNode (skip Add pins and empty-name pins)
+		if (InputOut && HlslNode->Pins.Num() > 0)
+		{
+			for (UEdGraphPin* Pin : HlslNode->Pins)
+			{
+				if (Pin->Direction == EGPD_Input && !Pin->PinName.IsNone()
+					&& Pin->PinName != TEXT("Add"))
+				{
+					Schema->TryCreateConnection(InputOut, Pin);
+					break;
+				}
+			}
+		}
+
+		// Connect first typed output pin on HlslNode to output node (skip Add pins and empty-name pins)
+		if (OutputIn)
+		{
+			for (UEdGraphPin* Pin : HlslNode->Pins)
+			{
+				if (Pin->Direction == EGPD_Output && !Pin->PinName.IsNone()
+					&& Pin->PinName != TEXT("Add"))
+				{
+					Schema->TryCreateConnection(Pin, OutputIn);
+					break;
+				}
+			}
+		}
+	}
+
+	// Mark graph as needing recompile
+	HlslNode->MarkNodeRequiresSynchronization(TEXT("MonolithHLSL"), true);
+
+	// Set source on script — compilation happens when the module is added to a system
+	Script->SetLatestSource(Source);
+
+	// === Register and save ===
+	FAssetRegistryModule::AssetCreated(Script);
+	Pkg->MarkPackageDirty();
+
+	FString PackageFilename;
+	if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+	{
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.Error = GError;
+		UPackage::SavePackage(Pkg, Script, *PackageFilename, SaveArgs);
+	}
+
+	// === Build response ===
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("asset_path"), Script->GetPathName());
+
+	int32 NodeCount = Graph->Nodes.Num();
+	Result->SetNumberField(TEXT("node_count"), NodeCount);
+
+	TArray<TSharedPtr<FJsonValue>> InputPinNames, OutputPinNames;
+	for (const FPinDef& P : ParsedInputs)
+		InputPinNames.Add(MakeShared<FJsonValueString>(P.Name));
+	for (const FPinDef& P : ParsedOutputs)
+		OutputPinNames.Add(MakeShared<FJsonValueString>(P.Name));
+	Result->SetArrayField(TEXT("input_pins"), InputPinNames);
+	Result->SetArrayField(TEXT("output_pins"), OutputPinNames);
+
+	return SuccessObj(Result);
 }
 
 FMonolithActionResult FMonolithNiagaraActions::HandleCreateModuleFromHLSL(const TSharedPtr<FJsonObject>& Params)
@@ -1973,19 +2951,11 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetUserParameters(const TSh
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
+	// Use ReadParameterVariables (live store entries) instead of GetUserParameters()
+	// which the engine warns returns STALE redirect-map keys.
 	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
-	TArray<FNiagaraVariable> UP;
-	US.GetUserParameters(UP);
-
 	TArray<TSharedPtr<FJsonValue>> Arr;
-	for (const FNiagaraVariable& P : UP)
-	{
-		TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
-		O->SetStringField(TEXT("name"), P.GetName().ToString());
-		O->SetStringField(TEXT("type"), P.GetType().GetName());
-		O->SetStringField(TEXT("value"), SerializeParameterValue(P, US));
-		Arr.Add(MakeShared<FJsonValueObject>(O));
-	}
+	CollectParametersFromStore(US, TEXT("User"), Arr);
 	return SuccessStr(JsonArrayToString(Arr));
 }
 
@@ -2132,18 +3102,130 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddUserParameter(const TSha
 	FNiagaraTypeDefinition TD = ResolveNiagaraType(TypeName);
 	FNiagaraVariable NV = MakeUserVariable(ParamName, TD);
 
+	// Pre-set the default value on the FNiagaraVariable BEFORE adding to the store.
+	// Setting after AddParameter fails because FNiagaraUserRedirectionParameterStore
+	// has a redirection layer — the name lookup in SetParameterValue may not match.
+	// By setting data on the variable first, AddParameter copies it into the store directly.
+	bool bDefaultSet = false;
+	if (DefaultJV.IsValid())
+	{
+		NV.AllocateData();
+		if (TD == FNiagaraTypeDefinition::GetColorDef())
+		{
+			TSharedPtr<FJsonObject> O = AsObjectOrParseString(DefaultJV);
+			if (O.IsValid())
+			{
+				FLinearColor V(
+					static_cast<float>(O->GetNumberField(TEXT("r"))),
+					static_cast<float>(O->GetNumberField(TEXT("g"))),
+					static_cast<float>(O->GetNumberField(TEXT("b"))),
+					O->HasField(TEXT("a")) ? static_cast<float>(O->GetNumberField(TEXT("a"))) : 1.0f);
+				NV.SetValue<FLinearColor>(V);
+				bDefaultSet = true;
+			}
+		}
+		else if (TD == FNiagaraTypeDefinition::GetFloatDef())
+		{
+			NV.SetValue<float>(static_cast<float>(DefaultJV->AsNumber()));
+			bDefaultSet = true;
+		}
+		else if (TD == FNiagaraTypeDefinition::GetIntDef())
+		{
+			NV.SetValue<int32>(static_cast<int32>(DefaultJV->AsNumber()));
+			bDefaultSet = true;
+		}
+		else if (TD == FNiagaraTypeDefinition::GetBoolDef())
+		{
+			FNiagaraBool BV; BV.SetValue(DefaultJV->AsBool());
+			NV.SetValue<FNiagaraBool>(BV);
+			bDefaultSet = true;
+		}
+		else if (TD == FNiagaraTypeDefinition::GetVec3Def() || TD == FNiagaraTypeDefinition::GetPositionDef())
+		{
+			TSharedPtr<FJsonObject> O = AsObjectOrParseString(DefaultJV);
+			if (O.IsValid())
+			{
+				FVector3f V(static_cast<float>(O->GetNumberField(TEXT("x"))),
+					static_cast<float>(O->GetNumberField(TEXT("y"))),
+					static_cast<float>(O->GetNumberField(TEXT("z"))));
+				NV.SetValue<FVector3f>(V);
+				bDefaultSet = true;
+			}
+		}
+		else if (TD == FNiagaraTypeDefinition::GetVec2Def())
+		{
+			TSharedPtr<FJsonObject> O = AsObjectOrParseString(DefaultJV);
+			if (O.IsValid())
+			{
+				FVector2f V(static_cast<float>(O->GetNumberField(TEXT("x"))),
+					static_cast<float>(O->GetNumberField(TEXT("y"))));
+				NV.SetValue<FVector2f>(V);
+				bDefaultSet = true;
+			}
+		}
+		else if (TD == FNiagaraTypeDefinition::GetVec4Def() || TD == FNiagaraTypeDefinition::GetQuatDef())
+		{
+			TSharedPtr<FJsonObject> O = AsObjectOrParseString(DefaultJV);
+			if (O.IsValid())
+			{
+				FVector4f V(static_cast<float>(O->GetNumberField(TEXT("x"))),
+					static_cast<float>(O->GetNumberField(TEXT("y"))),
+					static_cast<float>(O->GetNumberField(TEXT("z"))),
+					static_cast<float>(O->GetNumberField(TEXT("w"))));
+				NV.SetValue<FVector4f>(V);
+				bDefaultSet = true;
+			}
+		}
+	}
+
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "AddUP", "Add User Parameter"));
 	System->Modify();
 	FNiagaraUserRedirectionParameterStore& US = System->GetExposedParameters();
-	US.AddParameter(NV, true, false);
 
-	if (DefaultJV.IsValid())
+	// Let the entire add + transaction cascade happen normally.
+	// AddParameter fires OnStructureChangedDelegate, EndTransaction fires OnChangedDelegate —
+	// both trigger the editor's FNiagaraSystemUserParameterBuilder::Rebuild() which resets
+	// the value to (0,0,0,1). We can't prevent this without breaking editor sync.
+	//
+	// Strategy: let the cascade finish, THEN write our value in a suppressed scope.
+	// The suppression prevents our write from triggering another cascade.
+	US.AddParameter(NV, true, true);
+	GEditor->EndTransaction();
+
+	// NOW the slot exists with the editor's default (0,0,0,1). All cascades have settled.
+	// Write our actual value to BOTH storage layers:
+	// Layer 1: Runtime store (ExposedParameters) — for immediate use
+	// Layer 2: Editor data (UNiagaraScriptVariable::DefaultValueVariant) — survives recompile/re-sync
+	if (bDefaultSet)
 	{
-		SetTypedParameterValue(US, NV, TD, DefaultJV);
+		// Layer 1: runtime store — suppressed to prevent another cascade
+		{
+			FNiagaraParameterStore::FScopedSuppressOnChanged Suppress(US);
+			const int32 Offset = US.IndexOf(NV);
+			if (Offset != INDEX_NONE)
+			{
+				US.SetParameterData(NV.GetData(), Offset, TD.GetSize());
+			}
+		}
+
+		// Layer 2: editor data — persists the default across recompiles
+		if (UNiagaraSystemEditorData* EditorData = Cast<UNiagaraSystemEditorData>(System->GetEditorData()))
+		{
+			UNiagaraScriptVariable* ScriptVar = EditorData->FindOrAddUserScriptVariable(NV, *System);
+			if (ScriptVar)
+			{
+				ScriptVar->Modify();
+				ScriptVar->DefaultMode = ENiagaraDefaultMode::Value;
+				ScriptVar->SetDefaultValueData(NV.GetData());
+			}
+		}
 	}
 
-	GEditor->EndTransaction();
-	return SuccessStr(FString::Printf(TEXT("Added user parameter '%s'"), *ParamName));
+	if (DefaultJV.IsValid() && !bDefaultSet)
+	{
+		return SuccessStr(FString::Printf(TEXT("Added user parameter '%s' but failed to set default value — check value format matches type '%s'"), *ParamName, *TypeName));
+	}
+	return SuccessStr(FString::Printf(TEXT("Added user parameter '%s'%s"), *ParamName, bDefaultSet ? TEXT(" with default") : TEXT("")));
 }
 
 FMonolithActionResult FMonolithNiagaraActions::HandleRemoveUserParameter(const TSharedPtr<FJsonObject>& Params)
@@ -2202,10 +3284,68 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetParameterDefault(const T
 	}
 	if (!bFound) return FMonolithActionResult::Error(TEXT("Parameter not found"));
 
+	// Let the transaction complete and all editor cascades settle first.
+	// Then write the value in a suppressed scope so it sticks.
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetPDef", "Set Parameter Default"));
 	System->Modify();
-	bool bOk = SetTypedParameterValue(US, Found, Found.GetType(), JV);
 	GEditor->EndTransaction();
+
+	FNiagaraTypeDefinition FTD = Found.GetType();
+	bool bOk = false;
+	FNiagaraVariable WriteVar = Found;
+
+	if (FTD == FNiagaraTypeDefinition::GetColorDef())
+	{
+		TSharedPtr<FJsonObject> O = AsObjectOrParseString(JV);
+		if (O.IsValid())
+		{
+			WriteVar.AllocateData();
+			FLinearColor V(
+				static_cast<float>(O->GetNumberField(TEXT("r"))),
+				static_cast<float>(O->GetNumberField(TEXT("g"))),
+				static_cast<float>(O->GetNumberField(TEXT("b"))),
+				O->HasField(TEXT("a")) ? static_cast<float>(O->GetNumberField(TEXT("a"))) : 1.0f);
+			WriteVar.SetValue<FLinearColor>(V);
+
+			// Layer 1: runtime store — suppressed to prevent cascade
+			{
+				FNiagaraParameterStore::FScopedSuppressOnChanged Suppress(US);
+				const int32 Offset = US.IndexOf(Found);
+				if (Offset != INDEX_NONE)
+				{
+					US.SetParameterData(WriteVar.GetData(), Offset, FTD.GetSize());
+					bOk = true;
+				}
+			}
+
+			// Layer 2: editor data — persists across recompiles
+			if (bOk)
+			{
+				if (UNiagaraSystemEditorData* EditorData = Cast<UNiagaraSystemEditorData>(System->GetEditorData()))
+				{
+					// Found has the short name from GetUserParameters — need full User. name for FindOrAddUserScriptVariable
+					FNiagaraVariable FullVar = Found;
+					if (!FullVar.GetName().ToString().StartsWith(TEXT("User.")))
+					{
+						FString FullName = TEXT("User.") + FullVar.GetName().ToString();
+						FullVar.SetName(FName(*FullName));
+					}
+					UNiagaraScriptVariable* ScriptVar = EditorData->FindOrAddUserScriptVariable(FullVar, *System);
+					if (ScriptVar)
+					{
+						ScriptVar->Modify();
+						ScriptVar->DefaultMode = ENiagaraDefaultMode::Value;
+						ScriptVar->SetDefaultValueData(WriteVar.GetData());
+					}
+				}
+			}
+		}
+	}
+	if (!bOk)
+	{
+		// Fallback for non-color types (float, int, bool, vec) — these work fine via SetTypedParameterValue
+		bOk = SetTypedParameterValue(US, Found, FTD, JV);
+	}
 
 	return bOk ? SuccessStr(TEXT("Default set")) : FMonolithActionResult::Error(TEXT("Unsupported type"));
 }
@@ -2214,9 +3354,11 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCurveValue(const TShared
 {
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
-	FString ModuleName = Params->GetStringField(TEXT("module"));
-	if (ModuleName.IsEmpty()) ModuleName = Params->GetStringField(TEXT("module_node"));
+	FString ModuleName = Params->GetStringField(TEXT("module_node"));
+	if (ModuleName.IsEmpty()) ModuleName = Params->GetStringField(TEXT("module"));
+	if (ModuleName.IsEmpty()) ModuleName = Params->GetStringField(TEXT("module_name"));
 	FString InputName = Params->GetStringField(TEXT("input"));
+	if (InputName.IsEmpty()) InputName = Params->GetStringField(TEXT("input_name"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
@@ -2254,30 +3396,79 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCurveValue(const TShared
 	}
 	FString CurveStr = TEXT("(") + FString::Join(KS, TEXT(",")) + TEXT(")");
 
-	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleName);
-	if (!MN) return FMonolithActionResult::Error(TEXT("Module not found"));
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found. Use list_emitters to get valid emitter names or GUIDs."), *EmitterHandleId));
 
-	// Find input type — validate input exists before proceeding
+	// Bug fix: use the engine's full GetStackFunctionInputs API (same as get_module_inputs)
+	// instead of the local pin-scan helper, which returns display names that don't match
+	// the short names callers get from get_module_inputs.
+	ENiagaraScriptUsage CurveFoundUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleName, &CurveFoundUsage);
+	if (!MN) return FMonolithActionResult::Error(TEXT("Module not found"));
 	TArray<FNiagaraVariable> Inputs;
-	MonolithNiagaraHelpers::GetStackFunctionInputs(*MN, Inputs);
+	int32 CurveEmitterIdx = FindEmitterHandleIndex(System, EmitterHandleId);
+	if (CurveEmitterIdx != INDEX_NONE)
+	{
+		FVersionedNiagaraEmitter VE = System->GetEmitterHandles()[CurveEmitterIdx].GetInstance();
+		FCompileConstantResolver Resolver(VE, CurveFoundUsage);
+		FNiagaraStackGraphUtilities::GetStackFunctionInputs(*MN, Inputs, Resolver,
+			FNiagaraStackGraphUtilities::ENiagaraGetStackFunctionInputPinsOptions::ModuleInputsOnly, false);
+	}
+	else
+	{
+		FCompileConstantResolver Resolver(System, CurveFoundUsage);
+		FNiagaraStackGraphUtilities::GetStackFunctionInputs(*MN, Inputs, Resolver,
+			FNiagaraStackGraphUtilities::ENiagaraGetStackFunctionInputPinsOptions::ModuleInputsOnly, false);
+	}
+
 	FNiagaraTypeDefinition InputType;
 	bool bInputFound = false;
+	FName MatchedFullName; // store the full Module.X name for correct PH construction
+	FName InputFName(*InputName);
+	FString CurveInputNoSpaces = InputName;
+	CurveInputNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
 	for (const FNiagaraVariable& In : Inputs)
 	{
-		if (In.GetName() == FName(*InputName)) { InputType = In.GetType(); bInputFound = true; break; }
+		FName ShortName = MonolithNiagaraHelpers::StripModulePrefix(In.GetName());
+		bool bMatch = (ShortName == InputFName || In.GetName() == InputFName);
+		// Fallback: space-stripped comparison (e.g. "ScaleAlpha" matches "Scale Alpha")
+		if (!bMatch)
+		{
+			FString ShortNameNoSpaces = ShortName.ToString();
+			ShortNameNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+			bMatch = ShortNameNoSpaces.Equals(CurveInputNoSpaces, ESearchCase::IgnoreCase);
+		}
+		if (bMatch)
+		{
+			InputType = In.GetType();
+			MatchedFullName = In.GetName();
+			bInputFound = true;
+			break;
+		}
 	}
 
 	if (!bInputFound)
 	{
 		TArray<FString> ValidNames;
-		for (const FNiagaraVariable& In : Inputs) { ValidNames.Add(In.GetName().ToString()); }
+		for (const FNiagaraVariable& In : Inputs) { ValidNames.Add(MonolithNiagaraHelpers::StripModulePrefix(In.GetName()).ToString()); }
 		return FMonolithActionResult::Error(FString::Printf(
 			TEXT("Input '%s' not found on module '%s'. Valid inputs: [%s]"),
 			*InputName, *ModuleName, *FString::Join(ValidNames, TEXT(", "))));
 	}
 
+	// Guard: DI-typed inputs cannot have string DefaultValues — they need set_module_input_di
+	if (InputType.IsDataInterface())
+	{
+		// Extract the DI class name for a helpful error message
+		FString DIClassName = InputType.GetClass() ? InputType.GetClass()->GetName() : InputType.GetName();
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Input '%s' is a DataInterface type. Use set_module_input_di with di_class: \"%s\" instead. Example: {\"op\": \"set_module_input_di\", \"input\": \"%s\", \"di_class\": \"%s\", \"config\": {\"keys\": [...]}}"),
+			*InputName, *DIClassName, *InputName, *DIClassName));
+	}
+
+	// Use the full Module.X name from the engine enumeration for correct namespace aliasing
 	FNiagaraParameterHandle PH = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(
-		FNiagaraParameterHandle(FName(*InputName)), MN);
+		FNiagaraParameterHandle(MatchedFullName), MN);
 
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetCurve", "Set Curve"));
 	System->Modify();
@@ -2309,6 +3500,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleAddRenderer(const TSharedPt
 	FString SystemPath = GetAssetPath(Params);
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	FString RendererClassStr = Params->GetStringField(TEXT("class"));
+	if (RendererClassStr.IsEmpty()) RendererClassStr = Params->GetStringField(TEXT("renderer_class"));
+	if (RendererClassStr.IsEmpty()) RendererClassStr = Params->GetStringField(TEXT("renderer_type"));
 
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
@@ -2411,6 +3604,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetRendererProperty(const T
 	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
 	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
 	FString PropertyName = Params->GetStringField(TEXT("property"));
+	if (PropertyName.IsEmpty()) PropertyName = Params->GetStringField(TEXT("property_name"));
 	TSharedPtr<FJsonValue> JV = Params->TryGetField(TEXT("value"));
 	if (!JV.IsValid())
 		return FMonolithActionResult::Error(TEXT("Missing required field: value"));
@@ -2631,9 +3825,18 @@ FMonolithActionResult FMonolithNiagaraActions::HandleBatchExecute(const TSharedP
 		else if (OpName == TEXT("duplicate_emitter")) SubResult = HandleDuplicateEmitter(SubParams);
 		else if (OpName == TEXT("set_renderer_binding")) SubResult = HandleSetRendererBinding(SubParams);
 		else if (OpName == TEXT("request_compile")) SubResult = HandleRequestCompile(SubParams);
+		else if (OpName == TEXT("get_system_diagnostics")) SubResult = HandleGetSystemDiagnostics(SubParams);
+		else if (OpName == TEXT("get_system_property")) SubResult = HandleGetSystemProperty(SubParams);
+		else if (OpName == TEXT("set_system_property")) SubResult = HandleSetSystemProperty(SubParams);
+		else if (OpName == TEXT("set_static_switch_value")) SubResult = HandleSetStaticSwitchValue(SubParams);
 
 		RO->SetBoolField(TEXT("success"), SubResult.bSuccess);
 		if (!SubResult.bSuccess) RO->SetStringField(TEXT("error"), SubResult.ErrorMessage);
+		// Include result data for read/getter operations so batch callers can see return values
+		if (SubResult.bSuccess && SubResult.Result.IsValid())
+		{
+			RO->SetObjectField(TEXT("data"), SubResult.Result);
+		}
 		Results.Add(MakeShared<FJsonValueObject>(RO));
 		if (SubResult.bSuccess) Ok++; else Fail++;
 	}
@@ -2677,9 +3880,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystemFromSpec(const 
 	if (!Spec.IsValid())
 		return FMonolithActionResult::Error(TEXT("Failed to parse spec"));
 
-	FString SavePath = Spec->GetStringField(TEXT("save_path"));
+	// Accept save_path at top-level params (intuitive) or inside spec (legacy)
+	FString SavePath;
+	if (Params->HasField(TEXT("save_path")))
+		SavePath = Params->GetStringField(TEXT("save_path"));
+	if (SavePath.IsEmpty() && Spec->HasField(TEXT("save_path")))
+		SavePath = Spec->GetStringField(TEXT("save_path"));
 	FString Template = Spec->HasField(TEXT("template")) ? Spec->GetStringField(TEXT("template")) : FString();
-	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("save_path required"));
+	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("save_path required (provide at params root or inside spec)"));
 
 	// Create system
 	TSharedRef<FJsonObject> CreateParams = MakeShared<FJsonObject>();
@@ -3028,6 +4236,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleListEmitters(const TSharedP
 
 		TSharedRef<FJsonObject> EObj = MakeShared<FJsonObject>();
 		EObj->SetStringField(TEXT("name"), Handle.GetName().ToString());
+		EObj->SetStringField(TEXT("id"), Handle.GetId().ToString());
 		EObj->SetNumberField(TEXT("index"), i);
 		EObj->SetBoolField(TEXT("enabled"), Handle.GetIsEnabled());
 
@@ -3086,7 +4295,16 @@ FMonolithActionResult FMonolithNiagaraActions::HandleListRenderers(const TShared
 
 		TSharedRef<FJsonObject> RObj = MakeShared<FJsonObject>();
 		RObj->SetNumberField(TEXT("index"), i);
-		RObj->SetStringField(TEXT("class"), Rend->GetClass()->GetName());
+		FString ClassName = Rend->GetClass()->GetName();
+		RObj->SetStringField(TEXT("class"), ClassName);
+		// Add short name that add_renderer accepts directly
+		FString ShortName = TEXT("unknown");
+		if (ClassName.Contains(TEXT("Sprite"))) ShortName = TEXT("sprite");
+		else if (ClassName.Contains(TEXT("Mesh"))) ShortName = TEXT("mesh");
+		else if (ClassName.Contains(TEXT("Ribbon"))) ShortName = TEXT("ribbon");
+		else if (ClassName.Contains(TEXT("Light"))) ShortName = TEXT("light");
+		else if (ClassName.Contains(TEXT("Component"))) ShortName = TEXT("component");
+		RObj->SetStringField(TEXT("type"), ShortName);
 		RObj->SetBoolField(TEXT("enabled"), Rend->GetIsEnabled());
 
 		// Extract material path if applicable
@@ -3128,4 +4346,528 @@ FMonolithActionResult FMonolithNiagaraActions::HandleListRenderers(const TShared
 	R->SetArrayField(TEXT("renderers"), RendArr);
 	R->SetNumberField(TEXT("count"), Renderers.Num());
 	return SuccessObj(R);
+}
+
+// ============================================================================
+// Diagnostics (1)
+// ============================================================================
+
+FMonolithActionResult FMonolithNiagaraActions::HandleGetSystemDiagnostics(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	// Optionally force a synchronous compile first (default: true)
+	bool bCompileFirst = true;
+	if (Params->HasField(TEXT("compile_first")))
+	{
+		bCompileFirst = Params->GetBoolField(TEXT("compile_first"));
+	}
+	if (bCompileFirst)
+	{
+		System->RequestCompile(true);
+		System->WaitForCompilationComplete();
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Errors;
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	TArray<TSharedPtr<FJsonValue>> Info;
+
+	auto MakeDiag = [](const FString& Emitter, const FString& Source, const FString& Message) -> TSharedPtr<FJsonValue>
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("emitter"), Emitter);
+		Obj->SetStringField(TEXT("source"), Source);
+		Obj->SetStringField(TEXT("message"), Message);
+		return MakeShared<FJsonValueObject>(Obj);
+	};
+
+	// ---- Category A: Compile events from script executable data ----
+	auto GatherScriptEvents = [&](UNiagaraScript* Script, const FString& EmitterLabel, const FString& ScriptLabel)
+	{
+		if (!Script) return;
+		const FNiagaraVMExecutableData& VMData = Script->GetVMExecutableData();
+		if (!VMData.IsValid())
+		{
+			Errors.Add(MakeDiag(EmitterLabel, ScriptLabel, TEXT("Data missing — script has no compiled bytecode (force recompile or recreate)")));
+			return;
+		}
+		for (const FNiagaraCompileEvent& Event : VMData.LastCompileEvents)
+		{
+			TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+			Obj->SetStringField(TEXT("emitter"), EmitterLabel);
+			Obj->SetStringField(TEXT("source"), ScriptLabel);
+			Obj->SetStringField(TEXT("message"), Event.Message);
+			if (!Event.ShortDescription.IsEmpty())
+				Obj->SetStringField(TEXT("short"), Event.ShortDescription);
+
+			TSharedPtr<FJsonValue> Val = MakeShared<FJsonValueObject>(Obj);
+			switch (Event.Severity)
+			{
+			case FNiagaraCompileEventSeverity::Error:   Errors.Add(Val);   break;
+			case FNiagaraCompileEventSeverity::Warning: Warnings.Add(Val); break;
+			default:                                    Info.Add(Val);     break;
+			}
+		}
+	};
+
+	// System-level scripts
+	GatherScriptEvents(System->GetSystemSpawnScript(), TEXT("System"), TEXT("SystemSpawnScript"));
+	GatherScriptEvents(System->GetSystemUpdateScript(), TEXT("System"), TEXT("SystemUpdateScript"));
+
+	// Per-emitter scripts
+	TArray<TSharedPtr<FJsonValue>> EmitterStats;
+	for (const FNiagaraEmitterHandle& Handle : System->GetEmitterHandles())
+	{
+		FVersionedNiagaraEmitterData* ED = Handle.GetEmitterData();
+		if (!ED) continue;
+		FString EmitterName = Handle.GetName().ToString();
+
+		TArray<UNiagaraScript*> Scripts;
+		ED->GetScripts(Scripts, true);  // bCompilableOnly — skip editor-only emitter spawn/update scripts (inlined into system scripts)
+		for (UNiagaraScript* S : Scripts)
+		{
+			if (!S) continue;
+			FString ScriptLabel = FString::Printf(TEXT("%s_%s"),
+				*StaticEnum<ENiagaraScriptUsage>()->GetDisplayNameTextByValue(static_cast<int64>(S->GetUsage())).ToString(),
+				S->GetUsage() == ENiagaraScriptUsage::ParticleGPUComputeScript ? TEXT("GPU") : TEXT("VM"));
+			GatherScriptEvents(S, EmitterName, ScriptLabel);
+		}
+
+		// ---- Category B: Renderer compatibility ----
+		for (UNiagaraRendererProperties* Renderer : ED->GetRenderers())
+		{
+			if (!Renderer || !Renderer->GetIsEnabled()) continue;
+
+			if (!Renderer->IsSimTargetSupported(ED->SimTarget))
+			{
+				Errors.Add(MakeDiag(EmitterName,
+					FString::Printf(TEXT("Renderer:%s"), *Renderer->GetClass()->GetName()),
+					FString::Printf(TEXT("Renderer incompatible with chosen Sim Target (%s)"),
+						ED->SimTarget == ENiagaraSimTarget::GPUComputeSim ? TEXT("GPU") : TEXT("CPU"))));
+			}
+
+#if WITH_EDITOR
+			// Detailed renderer feedback
+			FVersionedNiagaraEmitter VersionedEmitter = Handle.GetInstance();
+			TArray<FNiagaraRendererFeedback> RErrors, RWarnings, RInfos;
+			Renderer->GetRendererFeedback(VersionedEmitter, RErrors, RWarnings, RInfos);
+			for (const FNiagaraRendererFeedback& F : RErrors)
+				Errors.Add(MakeDiag(EmitterName, FString::Printf(TEXT("Renderer:%s"), *Renderer->GetClass()->GetName()), F.GetDescriptionText().ToString()));
+			for (const FNiagaraRendererFeedback& F : RWarnings)
+				Warnings.Add(MakeDiag(EmitterName, FString::Printf(TEXT("Renderer:%s"), *Renderer->GetClass()->GetName()), F.GetDescriptionText().ToString()));
+#endif
+		}
+
+		// ---- Category C: Bounds mode validation ----
+		if (ED->SimTarget == ENiagaraSimTarget::GPUComputeSim
+			&& ED->CalculateBoundsMode == ENiagaraEmitterCalculateBoundMode::Dynamic
+			&& !System->bFixedBounds)
+		{
+			Warnings.Add(MakeDiag(EmitterName, TEXT("EmitterProperties"),
+				TEXT("GPU emitter using dynamic bounds mode — bounds may be incorrect. Set CalculateBoundsMode to Fixed or enable system fixed bounds.")));
+		}
+
+		// ---- Category D: Script stats (instruction count, resources) ----
+		TSharedRef<FJsonObject> EStats = MakeShared<FJsonObject>();
+		EStats->SetStringField(TEXT("emitter"), EmitterName);
+		EStats->SetStringField(TEXT("sim_target"), ED->SimTarget == ENiagaraSimTarget::GPUComputeSim ? TEXT("GPU") : TEXT("CPU"));
+
+		TArray<TSharedPtr<FJsonValue>> ScriptStatsArr;
+		for (UNiagaraScript* S : Scripts)
+		{
+			if (!S) continue;
+			TSharedRef<FJsonObject> SS = MakeShared<FJsonObject>();
+			FString UsageName = StaticEnum<ENiagaraScriptUsage>()->GetDisplayNameTextByValue(static_cast<int64>(S->GetUsage())).ToString();
+			SS->SetStringField(TEXT("script"), UsageName);
+
+			const FNiagaraVMExecutableData& VMData = S->GetVMExecutableData();
+			if (VMData.IsValid())
+			{
+				SS->SetBoolField(TEXT("valid"), true);
+				SS->SetNumberField(TEXT("op_count"), VMData.LastOpCount);
+				SS->SetNumberField(TEXT("register_count"), VMData.NumTempRegisters);
+				// Compile status
+				FString StatusStr;
+				switch (VMData.LastCompileStatus)
+				{
+				case ENiagaraScriptCompileStatus::NCS_Error:            StatusStr = TEXT("Error"); break;
+				case ENiagaraScriptCompileStatus::NCS_UpToDate:         StatusStr = TEXT("UpToDate"); break;
+				case ENiagaraScriptCompileStatus::NCS_Dirty:            StatusStr = TEXT("Dirty"); break;
+				case ENiagaraScriptCompileStatus::NCS_BeingCreated:     StatusStr = TEXT("BeingCreated"); break;
+				case ENiagaraScriptCompileStatus::NCS_UpToDateWithWarnings: StatusStr = TEXT("UpToDateWithWarnings"); break;
+				case ENiagaraScriptCompileStatus::NCS_ComputeUpToDateWithWarnings: StatusStr = TEXT("ComputeUpToDateWithWarnings"); break;
+				default:                                                StatusStr = TEXT("Unknown"); break;
+				}
+				SS->SetStringField(TEXT("compile_status"), StatusStr);
+			}
+			else
+			{
+				SS->SetBoolField(TEXT("valid"), false);
+				SS->SetStringField(TEXT("compile_status"), TEXT("DataMissing"));
+			}
+
+			ScriptStatsArr.Add(MakeShared<FJsonValueObject>(SS));
+		}
+		EStats->SetArrayField(TEXT("scripts"), ScriptStatsArr);
+		EmitterStats.Add(MakeShared<FJsonValueObject>(EStats));
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetNumberField(TEXT("error_count"), Errors.Num());
+	R->SetNumberField(TEXT("warning_count"), Warnings.Num());
+	R->SetArrayField(TEXT("errors"), Errors);
+	R->SetArrayField(TEXT("warnings"), Warnings);
+	R->SetArrayField(TEXT("info"), Info);
+	R->SetArrayField(TEXT("emitter_stats"), EmitterStats);
+	R->SetBoolField(TEXT("has_issues"), Errors.Num() > 0 || Warnings.Num() > 0);
+	return SuccessObj(R);
+}
+
+// ============================================================================
+// list_module_scripts — Search available Niagara module scripts via Asset Registry
+// ============================================================================
+FMonolithActionResult FMonolithNiagaraActions::HandleListModuleScripts(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Search = Params->HasField(TEXT("search")) ? Params->GetStringField(TEXT("search")) : TEXT("");
+	FString UsageFilter = Params->HasField(TEXT("usage")) ? Params->GetStringField(TEXT("usage")).ToLower() : TEXT("");
+	int32 Limit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 50;
+
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UNiagaraScript::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	Filter.bRecursivePaths = true;
+
+	TArray<FAssetData> Assets;
+	AR.GetAssets(Filter, Assets);
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	for (const FAssetData& Asset : Assets)
+	{
+		FString AssetName = Asset.AssetName.ToString();
+		FString PackagePath = Asset.GetSoftObjectPath().ToString();
+
+		// Infer usage from path patterns (asset registry tags for NiagaraScript usage are unreliable)
+		FString InferredUsage = TEXT("unknown");
+		if (PackagePath.Contains(TEXT("/Modules/"))) InferredUsage = TEXT("module");
+		else if (PackagePath.Contains(TEXT("/Functions/"))) InferredUsage = TEXT("function");
+		else if (PackagePath.Contains(TEXT("/DynamicInputs/"))) InferredUsage = TEXT("dynamic_input");
+
+		// Filter by usage if specified
+		if (!UsageFilter.IsEmpty() && UsageFilter != TEXT("all") && InferredUsage != UsageFilter) continue;
+
+		// Filter by search keyword
+		if (!Search.IsEmpty() && !AssetName.Contains(Search, ESearchCase::IgnoreCase)
+			&& !PackagePath.Contains(Search, ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
+
+		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("name"), AssetName);
+		Entry->SetStringField(TEXT("path"), PackagePath);
+		Entry->SetStringField(TEXT("usage"), InferredUsage);
+		Results.Add(MakeShared<FJsonValueObject>(Entry));
+
+		if (Results.Num() >= Limit) break;
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetNumberField(TEXT("count"), Results.Num());
+	R->SetNumberField(TEXT("total_scanned"), Assets.Num());
+	R->SetArrayField(TEXT("scripts"), Results);
+	if (Search.IsEmpty() && Results.Num() >= Limit)
+	{
+		R->SetStringField(TEXT("note"), TEXT("Results truncated. Use 'search' to narrow down, or increase 'limit'."));
+	}
+	return SuccessObj(R);
+}
+
+// ============================================================================
+// list_renderer_properties — List editable properties on a renderer
+// ============================================================================
+FMonolithActionResult FMonolithNiagaraActions::HandleListRendererProperties(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
+	int32 RendererIndex = static_cast<int32>(Params->GetNumberField(TEXT("renderer_index")));
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	int32 EIdx = FindEmitterHandleIndex(System, EmitterHandleId);
+	if (EIdx == INDEX_NONE) return FMonolithActionResult::Error(TEXT("Emitter not found"));
+
+	FVersionedNiagaraEmitterData* ED = System->GetEmitterHandles()[EIdx].GetEmitterData();
+	if (!ED) return FMonolithActionResult::Error(TEXT("No emitter data"));
+
+	const TArray<UNiagaraRendererProperties*>& Renderers = ED->GetRenderers();
+	if (!Renderers.IsValidIndex(RendererIndex))
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Renderer index %d out of range (0-%d)"), RendererIndex, Renderers.Num() - 1));
+
+	UNiagaraRendererProperties* Rend = Renderers[RendererIndex];
+	if (!Rend) return FMonolithActionResult::Error(TEXT("Renderer is null"));
+
+	TArray<TSharedPtr<FJsonValue>> PropArr;
+	for (TFieldIterator<FProperty> It(Rend->GetClass()); It; ++It)
+	{
+		FProperty* Prop = *It;
+		if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue; // Only editable properties
+
+		TSharedRef<FJsonObject> PO = MakeShared<FJsonObject>();
+		PO->SetStringField(TEXT("name"), Prop->GetName());
+		PO->SetStringField(TEXT("type"), Prop->GetCPPType());
+		PO->SetStringField(TEXT("category"), Prop->GetMetaData(TEXT("Category")));
+
+		// Get current value as string
+		FString ValueStr;
+		Prop->ExportTextItem_Direct(ValueStr, Prop->ContainerPtrToValuePtr<void>(Rend), nullptr, Rend, PPF_None);
+		if (ValueStr.Len() <= 200) // Don't include massive values
+		{
+			PO->SetStringField(TEXT("value"), ValueStr);
+		}
+
+		PropArr.Add(MakeShared<FJsonValueObject>(PO));
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetStringField(TEXT("renderer_class"), Rend->GetClass()->GetName());
+	R->SetNumberField(TEXT("property_count"), PropArr.Num());
+	R->SetArrayField(TEXT("properties"), PropArr);
+	return SuccessObj(R);
+}
+
+// ============================================================================
+// Action: set_system_property
+// ============================================================================
+
+// Shared alias map for system property name resolution
+static const TMap<FString, FString> SystemPropertyAliases = {
+	{ TEXT("warmup_time"), TEXT("WarmupTime") },
+	{ TEXT("warmup_tick_count"), TEXT("WarmupTickCount") },
+	{ TEXT("warmup_tick_delta"), TEXT("WarmupTickDelta") },
+	{ TEXT("fixed_tick_delta"), TEXT("bFixedTickDelta") },
+	{ TEXT("fixed_tick_delta_time"), TEXT("FixedTickDeltaTime") },
+	{ TEXT("determinism"), TEXT("bDeterminism") },
+	{ TEXT("random_seed"), TEXT("RandomSeed") },
+	{ TEXT("max_pool_size"), TEXT("MaxPoolSize") },
+	{ TEXT("support_large_world_coordinates"), TEXT("bSupportLargeWorldCoordinates") },
+};
+
+FMonolithActionResult FMonolithNiagaraActions::HandleGetSystemProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	FString PropertyName = Params->GetStringField(TEXT("property"));
+	if (PropertyName.IsEmpty()) PropertyName = Params->GetStringField(TEXT("property_name"));
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	FString ResolvedName = PropertyName;
+	if (const FString* Alias = SystemPropertyAliases.Find(PropertyName))
+		ResolvedName = *Alias;
+
+	// Dedicated getters for known properties
+	if (ResolvedName == TEXT("WarmupTime"))
+	{
+		TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("property"), ResolvedName);
+		R->SetNumberField(TEXT("value"), System->GetWarmupTime());
+		return SuccessObj(R);
+	}
+	if (ResolvedName == TEXT("WarmupTickDelta"))
+	{
+		TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("property"), ResolvedName);
+		R->SetNumberField(TEXT("value"), System->GetWarmupTickDelta());
+		return SuccessObj(R);
+	}
+
+	// Generic reflection readback
+	FProperty* Prop = System->GetClass()->FindPropertyByName(*ResolvedName);
+	if (!Prop)
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Unknown property '%s'. Use snake_case aliases (warmup_time, determinism, random_seed, max_pool_size) or UProperty names."), *PropertyName));
+
+	const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(System);
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetStringField(TEXT("property"), ResolvedName);
+
+	if (FFloatProperty* FP = CastField<FFloatProperty>(Prop))
+		R->SetNumberField(TEXT("value"), FP->GetPropertyValue(ValuePtr));
+	else if (FDoubleProperty* DP = CastField<FDoubleProperty>(Prop))
+		R->SetNumberField(TEXT("value"), DP->GetPropertyValue(ValuePtr));
+	else if (FIntProperty* IP = CastField<FIntProperty>(Prop))
+		R->SetNumberField(TEXT("value"), IP->GetPropertyValue(ValuePtr));
+	else if (FBoolProperty* BP = CastField<FBoolProperty>(Prop))
+		R->SetBoolField(TEXT("value"), BP->GetPropertyValue(ValuePtr));
+	else
+	{
+		FString ExportedValue;
+		Prop->ExportTextItem_Direct(ExportedValue, ValuePtr, nullptr, System, PPF_None);
+		R->SetStringField(TEXT("value"), ExportedValue);
+	}
+
+	return SuccessObj(R);
+}
+
+FMonolithActionResult FMonolithNiagaraActions::HandleSetSystemProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	FString PropertyName = Params->GetStringField(TEXT("property"));
+	if (PropertyName.IsEmpty()) PropertyName = Params->GetStringField(TEXT("property_name"));
+	TSharedPtr<FJsonValue> JV = Params->TryGetField(TEXT("value"));
+	if (!JV.IsValid())
+		return FMonolithActionResult::Error(TEXT("Missing required field: value"));
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetSysProp", "Set System Property"));
+	System->Modify();
+	bool bOk = false;
+
+	FString ResolvedName = PropertyName;
+	if (const FString* Alias = SystemPropertyAliases.Find(PropertyName))
+		ResolvedName = *Alias;
+
+	// Use dedicated setters where available (they handle recompile triggers)
+	if (ResolvedName == TEXT("WarmupTime"))
+	{ System->SetWarmupTime(static_cast<float>(JV->AsNumber())); bOk = true; }
+	else if (ResolvedName == TEXT("WarmupTickDelta"))
+	{ System->SetWarmupTickDelta(static_cast<float>(JV->AsNumber())); bOk = true; }
+	else
+	{
+		// Generic property reflection for everything else
+		FProperty* Prop = System->GetClass()->FindPropertyByName(*ResolvedName);
+		if (Prop)
+		{
+			FString ValStr;
+			if (JV->Type == EJson::Number) ValStr = FString::SanitizeFloat(JV->AsNumber());
+			else if (JV->Type == EJson::Boolean) ValStr = JV->AsBool() ? TEXT("true") : TEXT("false");
+			else ValStr = JV->AsString();
+
+			void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(System);
+			if (Prop->ImportText_Direct(*ValStr, ValuePtr, System, PPF_None))
+			{
+				bOk = true;
+			}
+		}
+	}
+
+	GEditor->EndTransaction();
+	if (bOk)
+	{
+		FPropertyChangedEvent PCE(nullptr);
+		System->PostEditChangeProperty(PCE);
+		System->RequestCompile(false);
+	}
+	return bOk ? SuccessStr(TEXT("System property set")) : FMonolithActionResult::Error(
+		FString::Printf(TEXT("Unknown property '%s'. Supported: WarmupTime, WarmupTickCount, WarmupTickDelta, bFixedTickDelta, FixedTickDeltaTime, bDeterminism, RandomSeed, MaxPoolSize, or any UNiagaraSystem UProperty name."), *PropertyName));
+}
+
+// ============================================================================
+// Action: set_static_switch_value
+// ============================================================================
+
+FMonolithActionResult FMonolithNiagaraActions::HandleSetStaticSwitchValue(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SystemPath = GetAssetPath(Params);
+	FString EmitterHandleId = Params->GetStringField(TEXT("emitter"));
+	FString ModuleNodeGuid = Params->GetStringField(TEXT("module_node"));
+	if (ModuleNodeGuid.IsEmpty()) ModuleNodeGuid = Params->GetStringField(TEXT("module_name"));
+	FString InputName = Params->GetStringField(TEXT("input"));
+	if (InputName.IsEmpty()) InputName = Params->GetStringField(TEXT("input_name"));
+	TSharedPtr<FJsonValue> JV = Params->TryGetField(TEXT("value"));
+	if (!JV.IsValid())
+		return FMonolithActionResult::Error(TEXT("Missing required field: value"));
+
+	UNiagaraSystem* System = LoadSystem(SystemPath);
+	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
+
+	if (!EmitterHandleId.IsEmpty() && FindEmitterHandleIndex(System, EmitterHandleId) == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Emitter '%s' not found"), *EmitterHandleId));
+
+	ENiagaraScriptUsage FoundUsage;
+	UNiagaraNodeFunctionCall* MN = FindModuleNode(System, EmitterHandleId, ModuleNodeGuid, &FoundUsage);
+	if (!MN) return FMonolithActionResult::Error(TEXT("Module node not found"));
+
+	// Enumerate static switch inputs from the module's script graph (NOT GetStackFunctionInputs which only returns data inputs)
+	UNiagaraGraph* CalledGraph = MN->GetCalledGraph();
+	if (!CalledGraph)
+		return FMonolithActionResult::Error(TEXT("Module has no script graph — cannot enumerate static switches"));
+
+	TArray<FNiagaraVariable> SwitchInputs = CalledGraph->FindStaticSwitchInputs();
+
+	FNiagaraTypeDefinition InputType;
+	FName MatchedFullName;
+	bool bInputFound = false;
+	FString InputNameNoSpaces = InputName;
+	InputNameNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+	for (const FNiagaraVariable& In : SwitchInputs)
+	{
+		FString VarName = In.GetName().ToString();
+		bool bMatch = VarName.Equals(InputName, ESearchCase::IgnoreCase);
+		if (!bMatch)
+		{
+			FString VarNameNoSpaces = VarName;
+			VarNameNoSpaces.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+			bMatch = VarNameNoSpaces.Equals(InputNameNoSpaces, ESearchCase::IgnoreCase);
+		}
+		if (bMatch) { InputType = In.GetType(); MatchedFullName = In.GetName(); bInputFound = true; break; }
+	}
+
+	if (!bInputFound)
+	{
+		TArray<FString> ValidNames;
+		for (const FNiagaraVariable& In : SwitchInputs) { ValidNames.Add(In.GetName().ToString()); }
+		if (ValidNames.Num() == 0)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Input '%s' not found — this module has no static switches"), *InputName));
+		}
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Static switch '%s' not found. Valid static switches: [%s]"), *InputName, *FString::Join(ValidNames, TEXT(", "))));
+	}
+
+	// Static switch pins live directly on the FunctionCall node — find by matching variable name
+	UEdGraphPin* SwitchPin = nullptr;
+	for (UEdGraphPin* Pin : MN->Pins)
+	{
+		if (Pin->Direction == EGPD_Input && Pin->GetFName() == MatchedFullName)
+		{
+			SwitchPin = Pin;
+			break;
+		}
+	}
+	if (!SwitchPin)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Static switch pin '%s' not found on module node. The switch exists in the script but has no corresponding pin."), *InputName));
+	}
+
+	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetStaticSwitch", "Set Static Switch"));
+	System->Modify();
+
+	// Break existing links
+	if (SwitchPin->LinkedTo.Num() > 0)
+	{
+		SwitchPin->BreakAllPinLinks();
+	}
+
+	// Set the value
+	FString ValStr;
+	if (JV->Type == EJson::Number) ValStr = FString::SanitizeFloat(JV->AsNumber());
+	else if (JV->Type == EJson::Boolean) ValStr = JV->AsBool() ? TEXT("true") : TEXT("false");
+	else ValStr = JV->AsString();
+
+	SwitchPin->DefaultValue = ValStr;
+
+	GEditor->EndTransaction();
+	System->RequestCompile(false);
+
+	return SuccessStr(FString::Printf(TEXT("Static switch '%s' set to '%s'"), *InputName, *ValStr));
 }

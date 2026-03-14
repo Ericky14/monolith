@@ -94,6 +94,8 @@ monolith_discover({ namespace: "blueprint" })
 
 **add_node node_type values:** `CallFunction` (+ `function_name`, `target_class`?), `VariableGet`/`VariableSet` (+ `variable_name`), `CustomEvent` (+ `event_name`), `Branch`, `Sequence`, `MacroInstance` (+ `macro_name`), `SpawnActorFromClass` (+ `actor_class`)
 
+**add_node aliases:** `"function"`/`"call"` → CallFunction, `"get"` → VariableGet, `"set"` → VariableSet, `"event"` → CustomEvent, `"macro"` → MacroInstance, `"branch"` → Branch, `"sequence"` → Sequence, `"spawn"` → SpawnActorFromClass. CallFunction auto-tries K2_ prefix (e.g. `GetActorLocation` → `K2_GetActorLocation`) and U prefix on class names (e.g. `PrimitiveComponent` → `UPrimitiveComponent`).
+
 ### Compile & Create (5)
 
 | Action | Key Params | Purpose |

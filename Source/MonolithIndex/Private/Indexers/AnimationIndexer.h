@@ -18,19 +18,16 @@ public:
 	virtual bool IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId) override;
 	virtual FString GetName() const override { return TEXT("AnimationIndexer"); }
 
+	// Public wrappers for SEH-safe dispatch (called from free function via void* context)
+	void IndexAnimSequencePublic(class UAnimSequence* A, FMonolithIndexDatabase& DB, int64 Id) { IndexAnimSequence(A, DB, Id); }
+	void IndexAnimMontagePublic(class UAnimMontage* A, FMonolithIndexDatabase& DB, int64 Id) { IndexAnimMontage(A, DB, Id); }
+	void IndexBlendSpacePublic(class UBlendSpace* A, FMonolithIndexDatabase& DB, int64 Id) { IndexBlendSpace(A, DB, Id); }
+	void IndexPoseAssetPublic(class UPoseAsset* A, FMonolithIndexDatabase& DB, int64 Id) { IndexPoseAsset(A, DB, Id); }
+
 private:
-	/** Index a single UAnimSequence */
 	void IndexAnimSequence(class UAnimSequence* AnimSeq, FMonolithIndexDatabase& DB, int64 AssetId);
-
-	/** Index a single UAnimMontage */
 	void IndexAnimMontage(class UAnimMontage* Montage, FMonolithIndexDatabase& DB, int64 AssetId);
-
-	/** Index a single UBlendSpace */
 	void IndexBlendSpace(class UBlendSpace* BlendSpace, FMonolithIndexDatabase& DB, int64 AssetId);
-
-	/** Index a single UPoseAsset */
 	void IndexPoseAsset(class UPoseAsset* PoseAsset, FMonolithIndexDatabase& DB, int64 AssetId);
-
-	/** Serialize anim notifies to a JSON array string */
 	static FString NotifiesToJson(const TArray<struct FAnimNotifyEvent>& Notifies);
 };

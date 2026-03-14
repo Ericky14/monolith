@@ -22,7 +22,7 @@ struct FNiagaraParameterStore;
 class FMonolithNiagaraActions
 {
 public:
-	/** Register all 41 niagara actions with the tool registry */
+	/** Register all 42 niagara actions with the tool registry */
 	static void RegisterActions(FMonolithToolRegistry& Registry);
 
 	// --- System (8) ---
@@ -71,6 +71,8 @@ public:
 	// --- Read (2) ---
 	static FMonolithActionResult HandleListEmitters(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleListRenderers(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListModuleScripts(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListRendererProperties(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Batch (2) ---
 	static FMonolithActionResult HandleBatchExecute(const TSharedPtr<FJsonObject>& Params);
@@ -81,6 +83,16 @@ public:
 
 	// --- HLSL (1) ---
 	static FMonolithActionResult HandleGetCompiledGPUHLSL(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Diagnostics (1) ---
+	static FMonolithActionResult HandleGetSystemDiagnostics(const TSharedPtr<FJsonObject>& Params);
+
+	// --- System Property (2) ---
+	static FMonolithActionResult HandleGetSystemProperty(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetSystemProperty(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Static Switch (1) ---
+	static FMonolithActionResult HandleSetStaticSwitchValue(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Helpers (public for use by free functions) ---
 	static FString SerializeParameterValue(const FNiagaraVariable& Variable, const FNiagaraParameterStore& Store);

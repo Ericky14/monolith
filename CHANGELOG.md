@@ -4,6 +4,103 @@ All notable changes to Monolith will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.7.3] - 2026-03-15
+
+Blueprint module fully realized (6 → 46 actions). Niagara HLSL module creation implemented. Major Niagara, Material, and MCP reliability fixes across all modules. 217 → 218 actions total.
+
+### Added
+
+**Blueprint — Write Actions (40 new)**
+
+- **Blueprint — Variable CRUD (7):** `add_variable`, `remove_variable`, `set_variable_default`, `set_variable_type`, `set_variable_flags` (exposed, editable, replicated, transient), `rename_variable`, `get_variable_details`
+- **Blueprint — Component CRUD (6):** `add_component`, `remove_component`, `set_component_property`, `get_components`, `get_component_details`, `reparent_component`
+- **Blueprint — Graph Management (9):** `add_function_graph`, `remove_function_graph`, `add_macro_graph`, `remove_macro_graph`, `add_event_graph`, `remove_event_graph`, `get_functions`, `get_event_dispatchers`, `get_construction_script`
+- **Blueprint — Node & Pin Operations (6):** `add_node`, `remove_node`, `connect_pins`, `disconnect_pins`, `get_pin_info`, `find_nodes_by_class`
+- **Blueprint — Compile & Create (5):** `compile_blueprint`, `create_blueprint`, `reparent_blueprint`, `add_interface`, `remove_interface`
+- **Blueprint — Read Actions expanded (4 new):** `get_parent_class`, `get_interfaces`, `get_construction_script` (graph data), `get_component_details`
+
+**Blueprint — `add_node` usability:**
+- Common node class aliases (`CallFunction`, `VariableGet`, `VariableSet`, `Branch`, `Sequence`, `ForEach`) resolve without full K2Node_ prefix
+- Automatic `K2_` prefix fallback when a bare function name doesn't resolve
+
+**Niagara — HLSL module authoring (2 new):**
+
+- **Niagara** — `create_module_from_hlsl`: creates a standalone `UNiagaraScript` asset (module usage) with a CustomHlsl node, typed ParameterMap I/O pins, and user-defined input/output pin declarations. Supports CPU and GPU sim targets. Inputs are exposed as overridable parameters on the FunctionCall — `get_module_inputs` and `set_module_input_value` work on the result.
+- **Niagara** — `create_function_from_hlsl`: same as above in function usage context — for reusable HLSL logic called from other modules. Direct typed pin wiring (no ParameterMap wrapper).
+- **Niagara** — Dot validation for I/O pin names: dotted names (e.g. `Module.Color`) are now rejected with a clear error at creation time, with usage-specific guidance (modules: write via ParameterMap in HLSL body; functions: use bare names). Prevents cryptic HLSL compiler errors downstream.
+
+**Niagara — System controls (2 new):**
+
+- **Niagara** — `set_system_property`: sets a system-level property (e.g. `WarmupTime`, `bDeterminism`) via UE reflection. No hardcoded property list — any `UPROPERTY` on `UNiagaraSystem` is settable.
+- **Niagara** — `set_static_switch_value`: sets a static switch input value on a Niagara module. Static switches control compile-time code paths in the Niagara module stack.
+
+**Niagara — Discovery (2 new):**
+
+- **Niagara** — `list_module_scripts`: searches available Niagara module scripts by keyword. Returns matching asset paths — useful for finding engine modules to add via `add_module`.
+- **Niagara** — `list_renderer_properties`: lists editable UPROPERTY fields on a renderer via reflection. Params: `asset_path`, `emitter`, `renderer`. Returns property names, types, and current values.
+
+**Niagara — Diagnostics (1 new):**
+
+- **Niagara** — `get_system_diagnostics`: returns compile errors, warnings, renderer/SimTarget incompatibility flags, GPU + dynamic bounds warnings, and per-script stats (op count, register count, compile status). Also exposed `CalculateBoundsMode` in `set_emitter_property`.
+
+**MCP — Client usability:**
+
+- **MCP** — `tools/list` now embeds per-action param schemas for all actions at session start. AI clients see full param documentation (names, types, required/optional) without calling `monolith_discover()` first.
+- **MCP** — Registry-level required param validation: missing required params return a clear error listing which params were provided vs which are required, before the handler is even called.
+
+**Offline CLI:**
+
+- **Core** — `Saved/monolith_offline.py`: pure Python (stdlib, zero deps) read-only CLI that queries `EngineSource.db` and `ProjectIndex.db` directly when the editor is not running. 14 actions across 2 namespaces: `source` (9 actions, mirrors `source_query`) and `project` (5 actions, mirrors `project_query`). Fallback for when MCP/editor is unavailable.
+
+### Fixed
+
+**Niagara — Emitter lifecycle:**
+
+- **Niagara** — `create_system` + `add_emitter`: emitters added via `add_emitter` did not persist in the saved asset. Fixed by replacing raw `System->AddEmitterHandle()` with `FNiagaraEditorUtilities::AddEmitterToSystem()`, which calls `RebuildEmitterNodes()` + `SynchronizeOverviewGraphWithSystem()`. `SavePackage` now called in both `HandleCreateSystem` and `HandleAddEmitter`.
+- **Niagara** — `create_system_from_spec`: was failing with `failed_steps:1` on any spec with modules. Fixed by adding synchronous `RequestCompile(true)` + `WaitForCompilationComplete()` after each emitter add in the spec flow, before module operations begin. Failed sub-operations now report in an `"errors"` array instead of silently incrementing a counter.
+- **Niagara** — `set_emitter_property` SimTarget change caused "Data missing please force a recompile" in the editor. Raw field assignment on `SimTarget` bypassed `MarkNotSynchronized`, so `RequestCompile(false)` saw an unchanged hash and skipped compilation. Fixed: now calls `PostEditChangeVersionedProperty` + `RebuildEmitterNodes` + `SynchronizeOverviewGraphWithSystem` after `SimTarget`, `bLocalSpace`, and `bDeterminism` changes.
+- **Niagara** — `list_emitters` was missing the emitter GUID in its output. Added `"id": Handle.GetId().ToString()` — provides a stable round-trip token for subsequent operations.
+
+**Niagara — Parameter namespace correctness:**
+
+- **Niagara** — `set_module_input_value` and `set_module_input_binding` were passing the stripped short name to `FNiagaraParameterHandle::CreateAliasedModuleParameterHandle` instead of the full `Module.`-prefixed name from `In.GetName()`. This caused namespace warnings on every subsequent Niagara compile. Both actions now use the full name.
+- **Niagara** — `FindEmitterHandleIndex` accepted numeric string indices (`"0"`, `"1"`) as a last-resort fallback. `list_emitters` returns `"index"` for each emitter — this lets you pass that index directly instead of having to remember the emitter name.
+
+**Niagara — Module input coverage:**
+
+- **Niagara** — `get_module_inputs` and `set_module_input_value` now work with CustomHlsl modules. When `GetStackFunctionInputs` returns empty (no `Module.`-prefixed map entries, as is the case for CustomHlsl scripts), both actions fall back to reading typed pins directly from the FunctionCall node.
+- **Niagara** — `get_module_inputs` now returns actual `FRichCurve` key data for DataInterface curve inputs, instead of just the DI class name.
+- **Niagara** — `get_module_inputs` now correctly deserializes `LinearColor` and vector default values from their string-serialized JSON fallback. Previously returned zeroed values for these types.
+- **Niagara** — `set_module_input_di` and `get_di_functions` now auto-resolve DI class names — both `NiagaraDataInterfaceCurve` and `UNiagaraDataInterfaceCurve` are accepted (U prefix stripped/added as needed).
+
+**Niagara — Renderer:**
+
+- **Niagara** — `list_renderers` now returns the short renderer class name in the `type` field (e.g. `SpriteRenderer`) instead of the full UClass path.
+
+**Material — Editor integration:**
+
+- **Material** — `set_expression_property` was calling `PostEditChange()` with no arguments, which didn't trigger `MaterialGraph->RebuildGraph()`. Now calls `PostEditChangeProperty(FPropertyChangedEvent(Prop))` with the actual property — changes reflect in the editor display without a manual recompile.
+- **Material** — `build_material_graph` now auto-recompiles on success. Response includes `"recompiled": true`.
+- **Material** — `delete_expression`, `connect_expressions`, and `disconnect_expression` now wrap operations in `PreEditChange`/`PostEditChange` for correct undo history and editor update.
+- **Material** — `set_material_property`, `create_material`, `delete_expression`, and `connect_expressions` now call `Mat->PreEditChange(nullptr)` + `Mat->PostEditChange()` to push changes through the material graph system.
+- **Material** — `disconnect_expression`: added optional `input_name`/`output_name` params for targeted disconnection. Previously always disconnected all connections on the expression — now supports disconnecting a specific pin pair while leaving others intact.
+
+**Blueprint:**
+
+- **Blueprint** — `add_node` now resolves common node class aliases (`CallFunction`, `VariableGet`, `VariableSet`, `Branch`, `Sequence`, `ForEach`) and automatically tries the `K2_` prefix for function call nodes when the bare name doesn't resolve. Previously failed with a class-not-found error on all common node types.
+
+**Core — Asset loading:**
+
+- **Core** — `LoadAssetByPath` now queries `IAssetRegistry::GetAssetByObjectPath()` + `FAssetData::GetAsset()` first, falling back to `StaticLoadObject` only if the Asset Registry has no record. Prevents stale `RF_Standalone` ghost objects from shadowing assets that were deleted and recreated in the same editor session.
+
+### Changed
+
+- **Blueprint** — Action count 6 → 46. Module refactored from one file into six focused source files: Actions (core read), Variables, Components, Graph, Nodes, Compile.
+- **Niagara** — Action count 41 → 47. Added `set_system_property`, `set_static_switch_value`, `list_module_scripts`, `list_renderer_properties`, `get_system_diagnostics`, `create_module_from_hlsl`, `create_function_from_hlsl`. Param aliases added (`module_node`/`module_name`/`module`, `input`/`input_name`, `property`/`property_name`, `class`/`renderer_class`/`renderer_type`).
+- **Total** — Action count 177 → 218
+
 ## [0.7.2] - 2026-03-13
 
 ### Fixed

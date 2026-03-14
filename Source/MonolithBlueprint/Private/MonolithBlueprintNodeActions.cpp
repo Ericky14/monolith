@@ -24,7 +24,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 		FMonolithActionHandler::CreateStatic(&HandleAddNode),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"),       TEXT("string"),  TEXT("Blueprint asset path"))
-			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass"))
+			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn')"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
 			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"))
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
@@ -110,6 +110,34 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		return FMonolithActionResult::Error(TEXT("Missing required parameter: node_type"));
 	}
 
+	// Normalize common aliases to canonical node type names
+	{
+		static const TMap<FString, FString> Aliases = {
+			{TEXT("function"),       TEXT("CallFunction")},
+			{TEXT("call_function"),  TEXT("CallFunction")},
+			{TEXT("call"),           TEXT("CallFunction")},
+			{TEXT("func"),           TEXT("CallFunction")},
+			{TEXT("get"),            TEXT("VariableGet")},
+			{TEXT("variable_get"),   TEXT("VariableGet")},
+			{TEXT("set"),            TEXT("VariableSet")},
+			{TEXT("variable_set"),   TEXT("VariableSet")},
+			{TEXT("event"),          TEXT("CustomEvent")},
+			{TEXT("custom_event"),   TEXT("CustomEvent")},
+			{TEXT("branch"),         TEXT("Branch")},
+			{TEXT("if"),             TEXT("Branch")},
+			{TEXT("sequence"),       TEXT("Sequence")},
+			{TEXT("macro"),          TEXT("MacroInstance")},
+			{TEXT("macro_instance"), TEXT("MacroInstance")},
+			{TEXT("spawn_actor"),    TEXT("SpawnActorFromClass")},
+			{TEXT("spawn"),          TEXT("SpawnActorFromClass")},
+		};
+		FString Lower = NodeType.ToLower();
+		if (const FString* Canonical = Aliases.Find(Lower))
+		{
+			NodeType = *Canonical;
+		}
+	}
+
 	FString GraphName = Params->GetStringField(TEXT("graph_name"));
 	UEdGraph* Graph = MonolithBlueprintInternal::FindGraphByName(BP, GraphName);
 	if (!Graph)
@@ -143,31 +171,55 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 
 		UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(Graph);
 
+		// Build list of function name variants to try:
+		// Blueprint-callable wrappers use K2_ prefix (e.g. GetActorLocation → K2_GetActorLocation)
+		TArray<FName> FuncNameCandidates;
+		FuncNameCandidates.Add(FName(*FuncName));
+		if (!FuncName.StartsWith(TEXT("K2_")))
+		{
+			FuncNameCandidates.Add(FName(*FString::Printf(TEXT("K2_%s"), *FuncName)));
+		}
+
 		UFunction* Func = nullptr;
 		if (!TargetClassName.IsEmpty())
 		{
+			// Resolve class name — try as-is, with U prefix, and without U prefix
 			UClass* TargetClass = FindFirstObject<UClass>(*TargetClassName, EFindFirstObjectOptions::NativeFirst);
+			if (!TargetClass && !TargetClassName.StartsWith(TEXT("U")))
+				TargetClass = FindFirstObject<UClass>(*FString::Printf(TEXT("U%s"), *TargetClassName), EFindFirstObjectOptions::NativeFirst);
+			if (!TargetClass && TargetClassName.StartsWith(TEXT("U")))
+				TargetClass = FindFirstObject<UClass>(*TargetClassName.Mid(1), EFindFirstObjectOptions::NativeFirst);
+
 			if (TargetClass)
 			{
-				Func = TargetClass->FindFunctionByName(FName(*FuncName));
+				// FindFunctionByName searches the full inheritance chain by default
+				for (const FName& Candidate : FuncNameCandidates)
+				{
+					Func = TargetClass->FindFunctionByName(Candidate);
+					if (Func) break;
+				}
 			}
 			if (!Func)
 			{
 				return FMonolithActionResult::Error(FString::Printf(
-					TEXT("Function '%s' not found on class '%s'"), *FuncName, *TargetClassName));
+					TEXT("Function '%s' not found on class '%s' (also tried K2_ prefix). Ensure the function is BlueprintCallable."),
+					*FuncName, *TargetClassName));
 			}
 		}
 		else
 		{
-			for (TObjectIterator<UClass> It; It; ++It)
+			for (TObjectIterator<UClass> It; It && !Func; ++It)
 			{
-				Func = It->FindFunctionByName(FName(*FuncName));
-				if (Func) break;
+				for (const FName& Candidate : FuncNameCandidates)
+				{
+					Func = It->FindFunctionByName(Candidate);
+					if (Func) break;
+				}
 			}
 			if (!Func)
 			{
 				return FMonolithActionResult::Error(FString::Printf(
-					TEXT("Function '%s' not found in any loaded class"), *FuncName));
+					TEXT("Function '%s' not found in any loaded class (also tried K2_ prefix)"), *FuncName));
 			}
 		}
 

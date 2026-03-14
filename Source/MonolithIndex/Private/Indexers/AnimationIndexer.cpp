@@ -10,99 +10,118 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <excpt.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+
+// Isolated SEH wrapper — can't use __try in functions with C++ objects
+static bool SafeCallWithSEH(void(*Func)(void*), void* Context)
+{
+	__try
+	{
+		Func(Context);
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return false;
+	}
+}
+#endif
+
+/** Context struct for SEH-safe load+index calls */
+struct FAnimIndexCallContext
+{
+	FAnimationIndexer* Self;
+	FMonolithIndexDatabase* DB;
+	int64 AssetId;
+	FSoftObjectPath ObjectPath;  // Load happens inside SEH guard
+	bool bSuccess;               // Set to true if load+index succeeded
+	enum EType { Sequence, Montage, BlendSp, Pose } Type;
+};
+
+static void LoadAndIndexAnimAsset(void* Ctx)
+{
+	auto* C = static_cast<FAnimIndexCallContext*>(Ctx);
+	C->bSuccess = false;
+
+	// TryLoad inside SEH guard — this is where the crash was happening
+	UObject* Loaded = C->ObjectPath.TryLoad();
+	if (!Loaded) return;
+
+	switch (C->Type)
+	{
+	case FAnimIndexCallContext::Sequence:
+		if (UAnimSequence* A = Cast<UAnimSequence>(Loaded))
+		{ C->Self->IndexAnimSequencePublic(A, *C->DB, C->AssetId); C->bSuccess = true; }
+		break;
+	case FAnimIndexCallContext::Montage:
+		if (UAnimMontage* A = Cast<UAnimMontage>(Loaded))
+		{ C->Self->IndexAnimMontagePublic(A, *C->DB, C->AssetId); C->bSuccess = true; }
+		break;
+	case FAnimIndexCallContext::BlendSp:
+		if (UBlendSpace* A = Cast<UBlendSpace>(Loaded))
+		{ C->Self->IndexBlendSpacePublic(A, *C->DB, C->AssetId); C->bSuccess = true; }
+		break;
+	case FAnimIndexCallContext::Pose:
+		if (UPoseAsset* A = Cast<UPoseAsset>(Loaded))
+		{ C->Self->IndexPoseAssetPublic(A, *C->DB, C->AssetId); C->bSuccess = true; }
+		break;
+	}
+}
+
 bool FAnimationIndexer::IndexAsset(const FAssetData& AssetData, UObject* LoadedAsset, FMonolithIndexDatabase& DB, int64 AssetId)
 {
 	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
 	int32 TotalIndexed = 0;
 
-	// --- AnimSequence ---
+	// Helper lambda: scan registry for type T, safely load and index each asset
+	auto IndexAllOfType = [&](UClass* Class, FAnimIndexCallContext::EType Type) -> int32
 	{
 		TArray<FAssetData> Assets;
 		FARFilter Filter;
 		Filter.PackagePaths.Add(FName(TEXT("/Game")));
 		Filter.bRecursivePaths = true;
-		Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+		Filter.ClassPaths.Add(Class->GetClassPathName());
 		Registry.GetAssets(Filter, Assets);
 
+		int32 Count = 0;
 		for (const FAssetData& AD : Assets)
 		{
-			int64 SeqAssetId = DB.GetAssetId(AD.PackageName.ToString());
-			if (SeqAssetId < 0) continue;
+			int64 AId = DB.GetAssetId(AD.PackageName.ToString());
+			if (AId < 0) continue;
 
-			UAnimSequence* AnimSeq = Cast<UAnimSequence>(AD.GetAsset());
-			if (!AnimSeq) continue;
+			FAnimIndexCallContext Ctx;
+			Ctx.Self = this;
+			Ctx.DB = &DB;
+			Ctx.AssetId = AId;
+			Ctx.ObjectPath = AD.GetSoftObjectPath();
+			Ctx.bSuccess = false;
+			Ctx.Type = Type;
 
-			IndexAnimSequence(AnimSeq, DB, SeqAssetId);
-			TotalIndexed++;
+#if PLATFORM_WINDOWS
+			if (SafeCallWithSEH(&LoadAndIndexAnimAsset, &Ctx))
+			{
+				if (Ctx.bSuccess) Count++;
+			}
+			else
+			{
+				UE_LOG(LogMonolithIndex, Warning, TEXT("AnimationIndexer: crashed loading/indexing '%s' - skipping"), *AD.GetSoftObjectPath().ToString());
+			}
+#else
+			LoadAndIndexAnimAsset(&Ctx);
+			if (Ctx.bSuccess) Count++;
+#endif
 		}
-	}
+		return Count;
+	};
 
-	// --- AnimMontage ---
-	{
-		TArray<FAssetData> Assets;
-		FARFilter Filter;
-		Filter.PackagePaths.Add(FName(TEXT("/Game")));
-		Filter.bRecursivePaths = true;
-		Filter.ClassPaths.Add(UAnimMontage::StaticClass()->GetClassPathName());
-		Registry.GetAssets(Filter, Assets);
-
-		for (const FAssetData& AD : Assets)
-		{
-			int64 MontageAssetId = DB.GetAssetId(AD.PackageName.ToString());
-			if (MontageAssetId < 0) continue;
-
-			UAnimMontage* Montage = Cast<UAnimMontage>(AD.GetAsset());
-			if (!Montage) continue;
-
-			IndexAnimMontage(Montage, DB, MontageAssetId);
-			TotalIndexed++;
-		}
-	}
-
-	// --- BlendSpace ---
-	{
-		TArray<FAssetData> Assets;
-		FARFilter Filter;
-		Filter.PackagePaths.Add(FName(TEXT("/Game")));
-		Filter.bRecursivePaths = true;
-		Filter.ClassPaths.Add(UBlendSpace::StaticClass()->GetClassPathName());
-		Registry.GetAssets(Filter, Assets);
-
-		for (const FAssetData& AD : Assets)
-		{
-			int64 BSAssetId = DB.GetAssetId(AD.PackageName.ToString());
-			if (BSAssetId < 0) continue;
-
-			UBlendSpace* BS = Cast<UBlendSpace>(AD.GetAsset());
-			if (!BS) continue;
-
-			IndexBlendSpace(BS, DB, BSAssetId);
-			TotalIndexed++;
-		}
-	}
-
-	// --- PoseAsset ---
-	{
-		TArray<FAssetData> Assets;
-		FARFilter Filter;
-		Filter.PackagePaths.Add(FName(TEXT("/Game")));
-		Filter.bRecursivePaths = true;
-		Filter.ClassPaths.Add(UPoseAsset::StaticClass()->GetClassPathName());
-		Registry.GetAssets(Filter, Assets);
-
-		for (const FAssetData& AD : Assets)
-		{
-			int64 PoseAssetId = DB.GetAssetId(AD.PackageName.ToString());
-			if (PoseAssetId < 0) continue;
-
-			UPoseAsset* PA = Cast<UPoseAsset>(AD.GetAsset());
-			if (!PA) continue;
-
-			IndexPoseAsset(PA, DB, PoseAssetId);
-			TotalIndexed++;
-		}
-	}
+	TotalIndexed += IndexAllOfType(UAnimSequence::StaticClass(), FAnimIndexCallContext::Sequence);
+	TotalIndexed += IndexAllOfType(UAnimMontage::StaticClass(), FAnimIndexCallContext::Montage);
+	TotalIndexed += IndexAllOfType(UBlendSpace::StaticClass(), FAnimIndexCallContext::BlendSp);
+	TotalIndexed += IndexAllOfType(UPoseAsset::StaticClass(), FAnimIndexCallContext::Pose);
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("AnimationIndexer: indexed %d animation assets"), TotalIndexed);
 	return true;

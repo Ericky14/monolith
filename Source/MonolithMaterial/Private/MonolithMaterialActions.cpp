@@ -36,6 +36,7 @@
 #include "HAL/PlatformFileManager.h"
 #include "ObjectTools.h"
 #include "ImageUtils.h"
+#include "UObject/SavePackage.h"
 
 // ============================================================================
 // Registration
@@ -73,6 +74,8 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("expression_name"), TEXT("string"), TEXT("Name of the expression to disconnect"))
 			.Optional(TEXT("input_name"), TEXT("string"), TEXT("Specific input to disconnect"))
 			.Optional(TEXT("disconnect_outputs"), TEXT("bool"), TEXT("Also disconnect outputs"), TEXT("false"))
+			.Optional(TEXT("target_expression"), TEXT("string"), TEXT("Only disconnect from this specific downstream expression (requires disconnect_outputs=true)"))
+			.Optional(TEXT("output_index"), TEXT("integer"), TEXT("Only disconnect connections using this output index"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("material"), TEXT("build_material_graph"),
@@ -283,12 +286,27 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 UMaterial* FMonolithMaterialActions::LoadBaseMaterial(const FString& AssetPath)
 {
+	// Try UEditorAssetLibrary first (loads from disk)
 	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!LoadedAsset)
+	if (LoadedAsset)
 	{
-		return nullptr;
+		return Cast<UMaterial>(LoadedAsset);
 	}
-	return Cast<UMaterial>(LoadedAsset);
+
+	// Fallback: check in-memory objects (e.g. freshly created, not yet saved)
+	FString FullObjectPath = AssetPath;
+	if (!FullObjectPath.Contains(TEXT(".")))
+	{
+		// Convert "/Game/Path/Name" to "/Game/Path/Name.Name"
+		int32 LastSlash;
+		if (FullObjectPath.FindLastChar('/', LastSlash))
+		{
+			FString ObjName = FullObjectPath.Mid(LastSlash + 1);
+			FullObjectPath = FString::Printf(TEXT("%s.%s"), *AssetPath, *ObjName);
+		}
+	}
+	UObject* Found = FindFirstObject<UMaterial>(*FullObjectPath, EFindFirstObjectOptions::NativeFirst);
+	return Cast<UMaterial>(Found);
 }
 
 TSharedPtr<FJsonObject> FMonolithMaterialActions::SerializeExpression(const UMaterialExpression* Expression)
@@ -663,7 +681,10 @@ FMonolithActionResult FMonolithMaterialActions::GetFullConnectionGraph(const TSh
 
 // ============================================================================
 // Action: disconnect_expression
-// Params: { "asset_path": "...", "expression_name": "...", "input_name": "", "disconnect_outputs": false }
+// Params: { "asset_path": "...", "expression_name": "...", "input_name": "", "disconnect_outputs": false, "target_expression": "", "output_index": -1 }
+// When disconnect_outputs=true: disconnects other expressions/material outputs that reference expression_name
+//   target_expression: filter to only disconnect from this downstream expression or material property name (e.g. "BaseColor")
+//   output_index: filter to only disconnect connections using this output index
 // ============================================================================
 
 FMonolithActionResult FMonolithMaterialActions::DisconnectExpression(const TSharedPtr<FJsonObject>& Params)
@@ -672,6 +693,10 @@ FMonolithActionResult FMonolithMaterialActions::DisconnectExpression(const TShar
 	FString ExpressionName = Params->GetStringField(TEXT("expression_name"));
 	FString InputName = Params->HasField(TEXT("input_name")) ? Params->GetStringField(TEXT("input_name")) : TEXT("");
 	bool bDisconnectOutputs = Params->HasField(TEXT("disconnect_outputs")) ? Params->GetBoolField(TEXT("disconnect_outputs")) : false;
+	// Optional filter: only disconnect from a specific downstream expression (when disconnect_outputs=true)
+	FString TargetDownstream = Params->HasField(TEXT("target_expression")) ? Params->GetStringField(TEXT("target_expression")) : TEXT("");
+	// Optional filter: only disconnect a specific output index
+	int32 TargetOutputIndex = Params->HasField(TEXT("output_index")) ? static_cast<int32>(Params->GetNumberField(TEXT("output_index"))) : -1;
 
 	UMaterial* Mat = LoadBaseMaterial(AssetPath);
 	if (!Mat)
@@ -695,6 +720,7 @@ FMonolithActionResult FMonolithMaterialActions::DisconnectExpression(const TShar
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Expression '%s' not found in material '%s'"), *ExpressionName, *AssetPath));
 	}
 
+	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "DisconnectExpr", "Disconnect Expression"));
 	Mat->Modify();
 
 	TArray<TSharedPtr<FJsonValue>> DisconnectedArray;
@@ -744,9 +770,15 @@ FMonolithActionResult FMonolithMaterialActions::DisconnectExpression(const TShar
 				}
 				if (Input->Expression == TargetExpr)
 				{
+					// Filter by target downstream expression name if specified
+					if (!TargetDownstream.IsEmpty() && Expr->GetName() != TargetDownstream) continue;
+					// Filter by output index if specified
+					if (TargetOutputIndex >= 0 && Input->OutputIndex != TargetOutputIndex) continue;
+
 					auto DisconnJson = MakeShared<FJsonObject>();
 					DisconnJson->SetStringField(TEXT("expression"), Expr->GetName());
 					DisconnJson->SetStringField(TEXT("pin"), Expr->GetInputName(i).ToString());
+					DisconnJson->SetNumberField(TEXT("output_index"), Input->OutputIndex);
 					DisconnectedArray.Add(MakeShared<FJsonValueObject>(DisconnJson));
 
 					Input->Expression = nullptr;
@@ -760,18 +792,27 @@ FMonolithActionResult FMonolithMaterialActions::DisconnectExpression(const TShar
 		for (const FMaterialOutputEntry& Entry : MaterialOutputEntries)
 		{
 			FExpressionInput* MatInput = Mat->GetExpressionInputForProperty(Entry.Property);
-			if (MatInput && MatInput->Expression == TargetExpr)
-			{
-				auto DisconnJson = MakeShared<FJsonObject>();
-				DisconnJson->SetStringField(TEXT("material_property"), Entry.Name);
-				DisconnectedArray.Add(MakeShared<FJsonValueObject>(DisconnJson));
+			if (!MatInput || MatInput->Expression != TargetExpr) continue;
 
-				MatInput->Expression = nullptr;
-				MatInput->OutputIndex = 0;
-				DisconnectCount++;
-			}
+			// Filter by target downstream: match against material property name (e.g. "BaseColor", "EmissiveColor")
+			if (!TargetDownstream.IsEmpty() && TargetDownstream != Entry.Name) continue;
+			// Filter by output index if specified
+			if (TargetOutputIndex >= 0 && MatInput->OutputIndex != TargetOutputIndex) continue;
+
+			auto DisconnJson = MakeShared<FJsonObject>();
+			DisconnJson->SetStringField(TEXT("material_property"), Entry.Name);
+			DisconnJson->SetNumberField(TEXT("output_index"), MatInput->OutputIndex);
+			DisconnectedArray.Add(MakeShared<FJsonValueObject>(DisconnJson));
+
+			MatInput->Expression = nullptr;
+			MatInput->OutputIndex = 0;
+			DisconnectCount++;
 		}
 	}
+
+	Mat->PreEditChange(nullptr);
+	Mat->PostEditChange();
+	GEditor->EndTransaction();
 
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
@@ -854,12 +895,49 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 	GEditor->BeginTransaction(FText::FromString(TEXT("BuildMaterialGraph")));
 	Mat->Modify();
 
+	// Bug fix: save material-level properties before clear — DeleteAllMaterialExpressions
+	// triggers PostEditChange which can reset BlendMode and other scalar properties
+	const EBlendMode SavedBlendMode = Mat->BlendMode;
+	const EMaterialShadingModel SavedShadingModel = Mat->GetShadingModels().GetFirstShadingModel();
+	const bool bSavedTwoSided = Mat->TwoSided;
+	const float SavedOpacityMaskClipValue = Mat->OpacityMaskClipValue;
+
 	if (bClearExisting)
 	{
-		UMaterialEditingLibrary::DeleteAllMaterialExpressions(Mat);
+		// Bug fix: DeleteAllMaterialExpressions uses a range-for over TConstArrayView
+		// while Remove() mutates the backing TArray — iterator invalidation skips ~half.
+		// Copy to a local array first.
+		TArray<UMaterialExpression*> ToDelete;
+		for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+		{
+			if (Expr)
+			{
+				ToDelete.Add(Expr);
+			}
+		}
+		for (UMaterialExpression* Expr : ToDelete)
+		{
+			UMaterialEditingLibrary::DeleteMaterialExpression(Mat, Expr);
+		}
 	}
 
+	// Restore material-level properties that may have been reset by PostEditChange
+	Mat->BlendMode = SavedBlendMode;
+	Mat->SetShadingModel(SavedShadingModel);
+	Mat->TwoSided = bSavedTwoSided;
+	Mat->OpacityMaskClipValue = SavedOpacityMaskClipValue;
+
 	TMap<FString, UMaterialExpression*> IdToExpr;
+
+	// Bug fix: seed remap table with pre-existing expressions so connections
+	// can reference nodes that survived a partial clear or were already present
+	for (const TObjectPtr<UMaterialExpression>& Expr : Mat->GetExpressions())
+	{
+		if (Expr)
+		{
+			IdToExpr.Add(Expr->GetName(), Expr.Get());
+		}
+	}
 
 	// Phase 1 — Standard nodes
 	const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
@@ -1003,6 +1081,10 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 			}
 
 			CustomExpr->Code = CustomObj->GetStringField(TEXT("code"));
+			// Bug fix: when graph_spec arrives as a pre-serialized JSON string, newlines
+			// get double-encoded as literal \\n text. Unescape them.
+			CustomExpr->Code.ReplaceInline(TEXT("\\n"), TEXT("\n"), ESearchCase::CaseSensitive);
+			CustomExpr->Code.ReplaceInline(TEXT("\\t"), TEXT("\t"), ESearchCase::CaseSensitive);
 			if (CustomObj->HasField(TEXT("description")))
 			{
 				CustomExpr->Description = CustomObj->GetStringField(TEXT("description"));
@@ -1144,6 +1226,25 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 				continue;
 			}
 
+			// Blend mode validation warnings
+			{
+				EBlendMode BM = Mat->BlendMode;
+				if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked))
+				{
+					auto WJ = MakeShared<FJsonObject>();
+					WJ->SetStringField(TEXT("output"), ToProp);
+					WJ->SetStringField(TEXT("warning"), TEXT("Opacity has no effect on Opaque/Masked materials"));
+					ErrorsArray.Add(MakeShared<FJsonValueObject>(WJ));
+				}
+				if (MatProp == MP_OpacityMask && BM != BLEND_Masked)
+				{
+					auto WJ = MakeShared<FJsonObject>();
+					WJ->SetStringField(TEXT("output"), ToProp);
+					WJ->SetStringField(TEXT("warning"), TEXT("OpacityMask only affects Masked blend mode"));
+					ErrorsArray.Add(MakeShared<FJsonValueObject>(WJ));
+				}
+			}
+
 			bool bConnected = UMaterialEditingLibrary::ConnectMaterialProperty(*FromPtr, FromPin, MatProp);
 			if (bConnected)
 			{
@@ -1159,13 +1260,25 @@ FMonolithActionResult FMonolithMaterialActions::BuildMaterialGraph(const TShared
 		}
 	}
 
+	// Auto-recompile so the material is immediately usable
+	UMaterialEditingLibrary::RecompileMaterial(Mat);
+
 	GEditor->EndTransaction();
 
 	auto ResultJson = MakeShared<FJsonObject>();
-	ResultJson->SetBoolField(TEXT("has_errors"), ErrorsArray.Num() > 0);
+	// Separate actual errors from warnings (blend mode warnings are not errors)
+	int32 ErrorCount = 0, WarningCount = 0;
+	for (const TSharedPtr<FJsonValue>& Entry : ErrorsArray)
+	{
+		if (Entry->AsObject()->HasField(TEXT("warning"))) WarningCount++;
+		else ErrorCount++;
+	}
+	ResultJson->SetBoolField(TEXT("has_errors"), ErrorCount > 0);
+	ResultJson->SetBoolField(TEXT("has_warnings"), WarningCount > 0);
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetNumberField(TEXT("nodes_created"), NodesCreated);
 	ResultJson->SetNumberField(TEXT("connections_made"), ConnectionsMade);
+	ResultJson->SetBoolField(TEXT("recompiled"), true);
 
 	auto IdMapJson = MakeShared<FJsonObject>();
 	for (const auto& Pair : IdToExpr)
@@ -2108,6 +2221,12 @@ FMonolithActionResult FMonolithMaterialActions::CreateMaterial(const TSharedPtr<
 	NewMat->PreEditChange(nullptr);
 	NewMat->PostEditChange();
 
+	// Save to disk so LoadAsset can find it later
+	FString PackageFilename = FPackageName::LongPackageNameToFilename(AssetPath, FPackageName::GetAssetPackageExtension());
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	UPackage::SavePackage(Pkg, NewMat, *PackageFilename, SaveArgs);
+
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), NewMat->GetPathName());
 	ResultJson->SetStringField(TEXT("asset_name"), AssetName);
@@ -2342,6 +2461,10 @@ FMonolithActionResult FMonolithMaterialActions::SetMaterialProperty(const TShare
 	Mat->PostEditChange();
 	GEditor->EndTransaction();
 
+	// Bug fix: flush property changes to disk so subsequent LoadAsset calls
+	// (e.g. get_compilation_stats) don't read stale on-disk values after GC
+	UEditorAssetLibrary::SaveAsset(AssetPath, false);
+
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetNumberField(TEXT("changes"), ChangeCount);
@@ -2388,6 +2511,8 @@ FMonolithActionResult FMonolithMaterialActions::DeleteExpression(const TSharedPt
 	FString ClassName = TargetExpr->GetClass()->GetName();
 	UMaterialEditingLibrary::DeleteMaterialExpression(Mat, TargetExpr);
 
+	Mat->PreEditChange(nullptr);
+	Mat->PostEditChange();
 	GEditor->EndTransaction();
 
 	auto ResultJson = MakeShared<FJsonObject>();
@@ -2710,6 +2835,18 @@ FMonolithActionResult FMonolithMaterialActions::GetCompilationStats(const TShare
 		ResultJson->SetStringField(TEXT("note"), TEXT("Material resource not available - try recompile_material first"));
 	}
 
+	// Instruction counts via UMaterialEditingLibrary::GetStatistics (uses FMaterialStatsUtils internally)
+	FMaterialStatistics Stats = UMaterialEditingLibrary::GetStatistics(MatInterface);
+	ResultJson->SetNumberField(TEXT("num_vertex_shader_instructions"), Stats.NumVertexShaderInstructions);
+	ResultJson->SetNumberField(TEXT("num_pixel_shader_instructions"), Stats.NumPixelShaderInstructions);
+
+	// Override is_compiled if we got valid instruction counts — shader map may not be loaded in memory
+	// but stats are cached from a previous compilation. Without this, is_compiled=false is misleading.
+	if (!ResultJson->GetBoolField(TEXT("is_compiled")) && (Stats.NumVertexShaderInstructions > 0 || Stats.NumPixelShaderInstructions > 0))
+	{
+		ResultJson->SetBoolField(TEXT("is_compiled"), true);
+	}
+
 	// Material properties (always available from the base material)
 	ResultJson->SetStringField(TEXT("blend_mode"),
 		BaseMat->BlendMode == BLEND_Opaque ? TEXT("Opaque") :
@@ -2813,9 +2950,11 @@ FMonolithActionResult FMonolithMaterialActions::SetExpressionProperty(const TSha
 
 	if (bSuccess)
 	{
-		// Notify material that expression changed
-		Mat->PreEditChange(nullptr);
-		Mat->PostEditChange();
+		// Pass the actual property so PostEditChangePropertyInternal calls
+		// MaterialGraph->RebuildGraph() and the editor display updates correctly.
+		FPropertyChangedEvent ChangeEvent(Prop);
+		Mat->PreEditChange(Prop);
+		Mat->PostEditChangeProperty(ChangeEvent);
 	}
 
 	GEditor->EndTransaction();
@@ -2882,10 +3021,24 @@ FMonolithActionResult FMonolithMaterialActions::ConnectExpressions(const TShared
 	bool bConnected = false;
 	FString ConnectionDesc;
 
+	TArray<FString> Warnings;
+
 	if (!ToProperty.IsEmpty())
 	{
-		// Connect to material output property
+		// Blend mode validation: warn about irrelevant material output connections
 		EMaterialProperty MatProp = ParseMaterialProperty(ToProperty);
+		if (MatProp != MP_MAX)
+		{
+			EBlendMode BM = Mat->BlendMode;
+			if (MatProp == MP_Opacity && (BM == BLEND_Opaque || BM == BLEND_Masked))
+				Warnings.Add(TEXT("Opacity has no effect on Opaque/Masked materials. Set blend mode to Translucent/Additive first."));
+			if (MatProp == MP_OpacityMask && BM != BLEND_Masked)
+				Warnings.Add(TEXT("OpacityMask only affects Masked blend mode."));
+			if (MatProp == MP_Refraction && BM == BLEND_Opaque)
+				Warnings.Add(TEXT("Refraction has no effect on Opaque materials."));
+		}
+
+		// Connect to material output property
 		bConnected = UMaterialEditingLibrary::ConnectMaterialProperty(FromExpr, FromOutput, MatProp);
 		ConnectionDesc = FString::Printf(TEXT("%s -> %s"), *FromExprName, *ToProperty);
 	}
@@ -2901,6 +3054,8 @@ FMonolithActionResult FMonolithMaterialActions::ConnectExpressions(const TShared
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Target expression '%s' not found"), *ToExprName));
 	}
 
+	Mat->PreEditChange(nullptr);
+	Mat->PostEditChange();
 	GEditor->EndTransaction();
 
 	if (!bConnected)
@@ -2912,6 +3067,12 @@ FMonolithActionResult FMonolithMaterialActions::ConnectExpressions(const TShared
 	ResultJson->SetStringField(TEXT("asset_path"), AssetPath);
 	ResultJson->SetStringField(TEXT("connection"), ConnectionDesc);
 	ResultJson->SetBoolField(TEXT("connected"), true);
+	if (Warnings.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> WarnArr;
+		for (const FString& W : Warnings) WarnArr.Add(MakeShared<FJsonValueString>(W));
+		ResultJson->SetArrayField(TEXT("warnings"), WarnArr);
+	}
 
 	return FMonolithActionResult::Success(ResultJson);
 }

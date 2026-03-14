@@ -1,6 +1,6 @@
 # Monolith — TODO
 
-Last updated: 2026-03-13
+Last updated: 2026-03-15
 
 ---
 
@@ -12,14 +12,44 @@ None! All critical bugs resolved.
 
 ### Moderate
 
-None! All moderate bugs resolved.
+None!
+
+### Recently Fixed (2026-03-15)
+
+- [x] **Niagara emitter lookup — numeric index fallback** — FIXED (2026-03-15). `FindEmitterHandleIndex` already supported display names, GUIDs, and instance names. Added numeric index strings ("0", "1") as last-resort fallback.
+
+- [x] **Niagara `create_module_from_hlsl` — inputs now exposed as overridable parameters** — FIXED (2026-03-15). Two-part fix: (1) Added standalone `UNiagaraNodeInput` per typed input to the script graph — `FindInputNodes` picks them up, `AllocateDefaultPins` creates FunctionCall pins. (2) Added CustomHlsl fallback in `get_module_inputs` and `set_module_input_value` — when `GetStackFunctionInputs` returns empty (no Module.-prefixed map entries), reads FunctionCall typed pins directly.
+
+- [x] **Niagara `create_module_from_hlsl` — dot validation for I/O names** — FIXED (2026-03-15). Validates input/output names for dots before graph creation. Returns clear error with usage-specific guidance (modules: use ParameterMap writes, functions: use bare names).
+
+### Recently Fixed (2026-03-14)
+
+- [x] **NEW: Niagara `set_system_property`** — ADDED (2026-03-14). Sets a system-level property (WarmupTime, bDeterminism, etc.) via reflection.
+- [x] **NEW: Niagara `set_static_switch_value`** — ADDED (2026-03-14). Sets a static switch value on a module.
+- [x] **NEW: Niagara `list_module_scripts`** — ADDED (2026-03-14). Searches available Niagara module scripts by keyword. Returns matching script asset paths.
+- [x] **NEW: Niagara `list_renderer_properties`** — ADDED (2026-03-14). Lists editable properties on a renderer via reflection. Params: `asset_path`, `emitter`, `renderer`.
+- [x] **Niagara DI class name auto-prefix** — FIXED (2026-03-14). `set_module_input_di` and `get_di_functions` now auto-resolve DI class names: both `NiagaraDataInterfaceCurve` and `UNiagaraDataInterfaceCurve` are accepted (U prefix stripped/added as needed).
+- [x] **Niagara `get_module_inputs` returns DI curve data** — FIXED (2026-03-14). Now returns actual FRichCurve key data for DataInterface curve inputs, not just the DI class name.
+- [x] **LinearColor/vector defaults deserialization** — FIXED (2026-03-14). `get_module_inputs` correctly deserializes LinearColor and vector default values from string-serialized JSON fallback, no longer returns zeroed values.
+- [x] **Material `disconnect_expression` targeted disconnection** — FIXED (2026-03-14). Now supports disconnecting a specific connection via optional `input_name`/`output_name` params, instead of always disconnecting all connections on the expression.
+- [x] **Blueprint `add_node` aliases and K2_ prefix fallback** — FIXED (2026-03-14). `add_node` now resolves common node class aliases (e.g. `CallFunction`, `VariableGet`) and automatically tries the `K2_` prefix for function call nodes when the bare name doesn't resolve.
+- [x] **Niagara `list_renderers` returns `type` short name** — FIXED (2026-03-14). The `type` field now returns the short renderer class name (e.g. `SpriteRenderer`) instead of the full UClass path.
 
 ### Recently Fixed
+
+- [x] **Niagara `set_emitter_property` SimTarget — "Data missing please force a recompile"** — FIXED (2026-03-13). Raw field assignment on `SimTarget` skipped `PostEditChangeVersionedProperty`, so `MarkNotSynchronized` was never called and `RequestCompile(false)` saw unchanged hash → skipped compilation. Fix: call `PostEditChangeVersionedProperty` + `RebuildEmitterNodes` + `SynchronizeOverviewGraphWithSystem` after SimTarget change. Same pattern applied to `bLocalSpace` and `bDeterminism`.
+- [x] **Niagara `list_emitters` missing emitter GUID** — FIXED (2026-03-13). Added `"id": Handle.GetId().ToString()` to the emitter listing. Users now have a stable round-trip token.
+- [x] **Niagara `get_system_diagnostics` — NEW ACTION** — Added (2026-03-13). Returns compile errors, warnings, renderer/SimTarget incompatibility, GPU+dynamic bounds warnings, and per-script stats (op count, registers, compile status). Also added `CalculateBoundsMode` to `set_emitter_property`.
 
 - [x] **Niagara `create_system` + `add_emitter` — emitters don't persist** — FIXED (2026-03-13). Replaced raw `System->AddEmitterHandle()` with `FNiagaraEditorUtilities::AddEmitterToSystem()` which calls `RebuildEmitterNodes` + `SynchronizeOverviewGraphWithSystem` after adding the handle. Also added `SavePackage` call in both `HandleCreateSystem` and `HandleAddEmitter`. Custom emitter names applied post-add via `SetName()`.
 - [x] **Niagara `create_system_from_spec` — fails with `failed_steps:1`** — FIXED (2026-03-13). Added synchronous `RequestCompile(true)` + `WaitForCompilationComplete()` after each emitter add in the spec flow, before modules are added. Removed redundant async `RequestCompile(false)` from `HandleAddEmitter`. Also added error message capture — failed sub-operations now report in an `"errors"` array instead of silent `FailCount++`.
 - [x] **All MCP tools return stale in-memory objects after asset recreate** — FIXED (2026-03-13). `LoadAssetByPath` now queries `IAssetRegistry::GetAssetByObjectPath()` + `FAssetData::GetAsset()` first (reflects editor ground truth), falling back to `StaticLoadObject` only if the Asset Registry has no record. Prevents stale `RF_Standalone` ghosts from shadowing recreated assets.
 - [x] **Niagara `set_module_input_value` — namespace warnings on compile** — FIXED (2026-03-13). `MatchedFullName` was assigned the stripped short name instead of the full `Module.`-prefixed name from `In.GetName()`. Same fix applied to `HandleSetModuleInputBinding`. Both now pass the full name to `FNiagaraParameterHandle::CreateAliasedModuleParameterHandle`.
+- [x] **Registry-level required param validation** — ADDED (2026-03-13). `FMonolithToolRegistry::Execute()` now validates required params from schema before dispatching to the handler. Checks all schema keys marked `required: true`, skips `asset_path` (handled by `GetAssetPath()` with aliases). Returns error listing missing + provided keys.
+- [x] **Niagara param name aliases** — ADDED (2026-03-13). All module write actions (`set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value`, `remove_module`, `move_module`, `set_module_enabled`, `get_module_inputs`, `get_module_graph`) now accept `module_name` and `module` as aliases for the canonical `module_node` param. `input_name` accepted as alias for `input`.
+- [x] **`set_expression_property` PostEditChange fix** — FIXED (2026-03-13). Was calling `PostEditChange()` (no args), which didn't rebuild the material graph. Now calls `PostEditChangeProperty(FPropertyChangedEvent(Prop))` with the actual property so `MaterialGraph->RebuildGraph()` fires and the editor display updates correctly.
+- [x] **Auto-recompile + PostEditChange on 4 material write actions** — FIXED (2026-03-13). `set_material_property`, `create_material`, `delete_expression`, and `connect_expressions` now all call `Mat->PreEditChange(nullptr)` + `Mat->PostEditChange()` to trigger recompile and push changes through the material graph system.
+- [x] **`tools/list` embeds per-action param schemas** — IMPLEMENTED (2026-03-13). `FMonolithHttpServer::HandleToolsList()` now builds the `params` property description with per-action param documentation in `*name(type)` format (`*` = required). AI clients can see all param names and types from the MCP tool list without calling `monolith_discover` first.
 
 ### Minor
 
@@ -30,10 +60,9 @@ None! All moderate bugs resolved.
 
 ## Unimplemented Features (stubs in code)
 
-- [ ] **Niagara `create_module_from_hlsl`** — BLOCKED (Epic APIs). Returns error: "HLSL script creation requires Python bridge (NiagaraEditor internal APIs not exported)." Would need either Epic to export APIs or a Python subprocess workaround.
-  - **File:** `Source/MonolithNiagara/Private/MonolithNiagaraActions.cpp`
+- [x] **Niagara `create_module_from_hlsl`** — DONE (2026-03-15). Creates standalone NiagaraScript with CustomHlsl node, typed I/O pins, ParameterMap flow. Bypasses unexported APIs via UPROPERTY reflection + Signature-driven pin creation.
 
-- [ ] **Niagara `create_function_from_hlsl`** — BLOCKED (Epic APIs). Same as above. Both delegate to `CreateScriptFromHLSL` which always returns error.
+- [x] **Niagara `create_function_from_hlsl`** — DONE (2026-03-15). Same path as module, `ENiagaraScriptUsage::Function` with direct typed pin wiring.
 
 - [ ] **SSE streaming** — DEFERRED. `MonolithHttpServer.cpp` SSE endpoint returns a single event and closes. Comment: "Full SSE streaming will be implemented when we need server-initiated notifications."
   - **File:** `Source/MonolithCore/Private/MonolithHttpServer.cpp` (~line 232)
@@ -49,6 +78,11 @@ None! All moderate bugs resolved.
 ### Platform
 
 - [ ] **Mac/Linux support** — DEFERRED (Windows-only project). All build-related actions are `#if PLATFORM_WINDOWS` guarded. Live Coding is Windows-only. Update system is Windows-only.
+
+### Niagara Module — Improvements
+
+- [ ] **`FindEmitterHandleIndex` should accept numeric index** — `list_emitters` returns `"index"` for each emitter. Allow passing `"0"`, `"1"` etc. as emitter identifier for convenient fallback.
+  - **File:** `Source/MonolithNiagara/Private/MonolithNiagaraActions.cpp` (~line 292)
 
 ### Animation Module — Wishlist
 

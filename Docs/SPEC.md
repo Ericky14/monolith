@@ -12,7 +12,7 @@
 
 ## 1. Overview
 
-Monolith is a unified Unreal Engine editor plugin that consolidates 9 separate MCP (Model Context Protocol) servers and 4 C++ plugins into a single plugin with an embedded HTTP MCP server. It reduces ~219 individual tools down to 12 MCP tools (217 total actions), cutting AI assistant context consumption by ~95%.
+Monolith is a unified Unreal Engine editor plugin that consolidates 9 separate MCP (Model Context Protocol) servers and 4 C++ plugins into a single plugin with an embedded HTTP MCP server. It reduces ~219 individual tools down to 12 MCP tools (218 total actions), cutting AI assistant context consumption by ~95%.
 
 ### What It Replaces
 
@@ -38,7 +38,7 @@ Monolith.uplugin
   MonolithBlueprint     — Blueprint inspection, variable/component/graph CRUD, node operations, compile (46 actions)
   MonolithMaterial      — Material inspection + graph editing + CRUD (25 actions)
   MonolithAnimation     — Animation sequences, montages, ABPs, curves, notifies, skeletons, PoseSearch (62 actions)
-  MonolithNiagara       — Niagara particle systems (41 actions)
+  MonolithNiagara       — Niagara particle systems, HLSL module/function creation (47 actions)
   MonolithEditor        — Build triggers, live compile, log capture, compile output, crash context (13 actions)
   MonolithConfig        — Config/INI resolution and search (6 actions)
   MonolithIndex         — SQLite FTS5 deep project indexer, 14 internal indexers (5 MCP actions)
@@ -84,8 +84,8 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 | Class | Responsibility |
 |-------|---------------|
 | `FMonolithCoreModule` | IModuleInterface. Starts HTTP server, registers core tools, owns `TUniquePtr<FMonolithHttpServer>` |
-| `FMonolithHttpServer` | Embedded MCP HTTP server. JSON-RPC 2.0 dispatch over HTTP. Fully stateless (no session tracking) |
-| `FMonolithToolRegistry` | Central singleton action registry. `TMap<FString, FRegisteredAction>` keyed by "namespace.action". Thread-safe — releases lock before executing handlers |
+| `FMonolithHttpServer` | Embedded MCP HTTP server. JSON-RPC 2.0 dispatch over HTTP. Fully stateless (no session tracking). `tools/list` response embeds per-action param schemas in the `params` property description (`*name(type)` format, `*` = required) so AI clients see param names without calling `monolith_discover` first |
+| `FMonolithToolRegistry` | Central singleton action registry. `TMap<FString, FRegisteredAction>` keyed by "namespace.action". Thread-safe — releases lock before executing handlers. Validates required params from schema before dispatch (skips `asset_path` — `GetAssetPath()` handles aliases itself). Returns descriptive error listing missing + provided keys |
 | `FMonolithJsonUtils` | Static JSON-RPC 2.0 helpers. Standard error codes (-32700 through -32603). Declares `LogMonolith` category |
 | `FMonolithAssetUtils` | Asset loading with 4-tier fallback: StaticLoadObject(resolved) -> PackageName.ObjectName -> FindObject+_C suffix -> ForEachObjectWithPackage |
 | `UMonolithSettings` | UDeveloperSettings (config=Monolith). ServerPort, bAutoUpdateEnabled, DatabasePathOverride, EngineSourceDBPathOverride, EngineSourcePath, 8 module enable toggles (functional — checked at registration time), LogVerbosity. Settings UI customized via `FMonolithSettingsCustomization` (IDetailCustomization) with re-index buttons for project and source databases |
@@ -171,7 +171,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 **Node & Pin Operations (6)**
 | Action | Params | Description |
 |--------|--------|-------------|
-| `add_node` | `asset_path`, `graph_name`, `node_class`, `position` | Add a node to a graph |
+| `add_node` | `asset_path`, `graph_name`, `node_class`, `position` | Add a node to a graph. Accepts common aliases (e.g. `CallFunction`, `VariableGet`) and tries `K2_` prefix fallback for function calls |
 | `remove_node` | `asset_path`, `graph_name`, `node_id` | Remove a node by ID |
 | `connect_pins` | `asset_path`, `graph_name`, `source_node`, `source_pin`, `target_node`, `target_pin` | Connect two pins |
 | `disconnect_pins` | `asset_path`, `graph_name`, `source_node`, `source_pin`, `target_node`, `target_pin` | Disconnect two pins |
@@ -202,7 +202,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 
 #### Actions (25 — namespace: "material")
 
-**Read Actions (14)**
+**Read Actions (10)**
 | Action | Description |
 |--------|-------------|
 | `get_all_expressions` | Get all expression nodes in a base material |
@@ -214,20 +214,20 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 | `get_thumbnail` | Return thumbnail as base64 PNG or save to file |
 | `get_layer_info` | Material Layer / Material Layer Blend info |
 | `get_material_parameters` | List all parameter types (scalar, vector, texture, static switch) with values. Works on UMaterial and UMaterialInstanceConstant |
-| `get_compilation_stats` | Sampler count, texture estimates, UV scalars, blend mode, expression count |
+| `get_compilation_stats` | Sampler count, texture estimates, UV scalars, blend mode, expression count, vertex/pixel shader instruction counts (`num_vertex_shader_instructions`, `num_pixel_shader_instructions` via `UMaterialEditingLibrary::GetStatistics`) |
 
-**Write Actions (11)**
+**Write Actions (15)**
 | Action | Description |
 |--------|-------------|
 | `create_material` | Create new UMaterial at path with configurable defaults (blend mode, shading model, material domain) |
 | `create_material_instance` | Create UMaterialInstanceConstant from parent material with optional parameter overrides |
 | `set_material_property` | Set material properties (blend_mode, shading_model, two_sided, etc.) via UMaterialEditingLibrary |
-| `build_material_graph` | Build entire graph from JSON spec in single undo transaction (4 phases: standard nodes, Custom HLSL, wires, output properties) |
-| `disconnect_expression` | Disconnect inputs or outputs on a named expression (supports expr→expr and expr→material property) |
+| `build_material_graph` | Build entire graph from JSON spec in single undo transaction (4 phases: standard nodes, Custom HLSL, wires, output properties). The spec must be passed as `{ "graph_spec": { "nodes": [...], "connections": [...], ... } }` — not as a bare object |
+| `disconnect_expression` | Disconnect inputs or outputs on a named expression (supports expr→expr and expr→material property; supports targeted single-connection disconnection via optional `input_name`/`output_name` params) |
 | `delete_expression` | Delete expression node by name from material graph |
 | `create_custom_hlsl_node` | Create Custom HLSL expression with inputs, outputs, and code |
-| `set_expression_property` | Set properties on expression nodes (e.g., DefaultValue on scalar param) |
-| `connect_expressions` | Wire expression outputs to expression inputs or material property inputs |
+| `set_expression_property` | Set properties on expression nodes (e.g., DefaultValue on scalar param). Calls `PostEditChangeProperty` with the actual `FProperty*` so `MaterialGraph->RebuildGraph()` fires and the editor display updates correctly |
+| `connect_expressions` | Wire expression outputs to expression inputs or material property inputs. Returns blend mode validation warnings (e.g. Opacity on Opaque/Masked, OpacityMask on non-Masked) |
 | `set_instance_parameter` | Set scalar/vector/texture/static switch parameters on material instances |
 | `duplicate_material` | Duplicate material asset to new path |
 | `recompile_material` | Force material recompile |
@@ -374,7 +374,7 @@ All domain modules register actions with `FMonolithToolRegistry` (central single
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithNiagaraModule` | Registers 41 Niagara actions |
+| `FMonolithNiagaraModule` | Registers 47 Niagara actions |
 | `FMonolithNiagaraActions` | Static handlers + extensive private helpers |
 | `MonolithNiagaraHelpers` | 6 reimplemented NiagaraEditor functions (non-exported APIs) |
 
@@ -389,15 +389,17 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 5. `GetParametersForContext` — System user store params
 6. `GetStackFunctionInputs` — Full input enumeration via engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs` with `FCompileConstantResolver`. Returns all input types (floats, vectors, colors, data interfaces, enums, bools) — not just static switch pins
 
-#### Actions (41 — namespace: "niagara")
+#### Actions (47 — namespace: "niagara")
 
 > **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
 >
-> **Input name conventions:** `get_module_inputs` returns short names (no `Module.` prefix). All write actions that accept input names (`set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value`) accept both short names and `Module.`-prefixed names.
+> **Input name conventions:** `get_module_inputs` returns short names (no `Module.` prefix). All write actions that accept input names (`set_module_input_value`, `set_module_input_binding`, `set_module_input_di`, `set_curve_value`) accept both short names and `Module.`-prefixed names. For CustomHlsl modules, `get_module_inputs` and `set_module_input_value` fall back to reading/writing the FunctionCall node's typed input pins directly (CustomHlsl inputs don't appear in the ParameterMap history).
 >
-> **Emitter name matching:** `FindEmitterHandleIndex` does NOT auto-select a single emitter when a specific non-matching name is passed. If a name is provided it must match exactly (case-insensitive).
+> **Param name aliases:** The canonical param names registered in schemas are `module_node` and `input`. All module write actions also accept these aliases: `module_node` → `module_name`, `module`; `input` → `input_name`. Use the canonical names when possible — aliases exist for backward compatibility.
+>
+> **Emitter name matching:** `FindEmitterHandleIndex` does NOT auto-select a single emitter when a specific non-matching name is passed. If a name is provided it must match exactly (case-insensitive). Numeric index strings (`"0"`, `"1"`, etc.) are also accepted as a fallback.
 
-**System (10)**
+**System (14)**
 | Action | Description |
 |--------|-------------|
 | `add_emitter` | Add an emitter (UE 5.7: takes FGuid VersionGuid) |
@@ -405,17 +407,21 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `duplicate_emitter` | Duplicate an emitter within a system. Accepts `emitter` as alias for `source_emitter` |
 | `set_emitter_enabled` | Enable/disable an emitter |
 | `reorder_emitters` | Reorder emitters (direct handle assignment + PostEditChange + MarkPackageDirty for proper change notifications) |
-| `set_emitter_property` | Set property: SimTarget, bLocalSpace, bDeterminism, RandomSeed, AllocationMode, PreAllocationCount, bRequiresPersistentIDs, MaxGPUParticlesSpawnPerFrame |
-| `request_compile` | Request system compilation |
+| `set_emitter_property` | Set property: SimTarget, bLocalSpace, bDeterminism, RandomSeed, AllocationMode, PreAllocationCount, bRequiresPersistentIDs, MaxGPUParticlesSpawnPerFrame, CalculateBoundsMode |
+| `set_system_property` | Set a system-level property (WarmupTime, bDeterminism, etc.) |
+| `request_compile` | Request system compilation. Params: `force` (bool), synchronous (bool) |
 | `create_system` | Create new system (blank or from template via DuplicateAsset) |
-| `list_emitters` | List all emitters with name, index, enabled, sim_target, renderer_count |
-| `list_renderers` | List all renderers across emitters with class, index, enabled, material |
+| `list_emitters` | List all emitters with name, index, enabled, sim_target, renderer_count, GUID |
+| `list_renderers` | List all renderers across emitters with class (short `type` name), index, enabled, material |
+| `list_module_scripts` | Search available Niagara module scripts by keyword. Returns matching script asset paths |
+| `list_renderer_properties` | List editable properties on a renderer. Params: `asset_path`, `emitter`, `renderer` |
+| `get_system_diagnostics` | Compile errors, warnings, renderer/SimTarget incompatibility, GPU+dynamic bounds warnings, per-script stats (op count, registers, compile status). Added 2026-03-13 |
 
-**Module (12)**
+**Module (13)**
 | Action | Description |
 |--------|-------------|
 | `get_ordered_modules` | Get ordered modules in a script stage |
-| `get_module_inputs` | Get all inputs (floats, vectors, colors, data interfaces, enums, bools) with override values and linked params. Uses engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs`. Returns short names (no `Module.` prefix) |
+| `get_module_inputs` | Get all inputs (floats, vectors, colors, data interfaces, enums, bools) with override values, linked params, and actual DI curve data. Uses engine's `FNiagaraStackGraphUtilities::GetStackFunctionInputs`. Returns short names (no `Module.` prefix). LinearColor/vector defaults deserialized from JSON string if needed |
 | `get_module_graph` | Node graph of a module script |
 | `add_module` | Add module to script stage (uses FNiagaraStackGraphUtilities) |
 | `remove_module` | Remove module from stack |
@@ -423,9 +429,10 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `set_module_enabled` | Enable/disable a module |
 | `set_module_input_value` | Set input value (float, int, bool, vec2/3/4, color, string) |
 | `set_module_input_binding` | Bind input to a parameter |
-| `set_module_input_di` | Set data interface on input. Validates input exists and is DataInterface type. `config` param accepts a JSON object. Accepts both short names and `Module.`-prefixed names |
-| `create_module_from_hlsl` | **STUB — returns error** (NiagaraEditor APIs not exported) |
-| `create_function_from_hlsl` | **STUB — returns error** |
+| `set_module_input_di` | Set data interface on input. Required: `di_class` (class name — `U` prefix optional, e.g. `NiagaraDataInterfaceCurve` or `UNiagaraDataInterfaceCurve`), optional `config` object (supports FRichCurve keys for curve DIs). Validates input exists and is DataInterface type. Accepts both short names and `Module.`-prefixed names |
+| `set_static_switch_value` | Set a static switch value on a module |
+| `create_module_from_hlsl` | Create a Niagara module script from custom HLSL. Params: `name`, `save_path`, `hlsl` (body), optional `inputs[]`/`outputs[]` (`{name, type}` objects), `description`. **HLSL body rules:** use bare input/output names (no `Module.` prefix — compiler adds `In_`/`Out_` automatically). Write particle attributes via `Particles.X` ParameterMap tokens directly in the body. No swizzle via dot on map variables. |
+| `create_function_from_hlsl` | Create a Niagara function script from custom HLSL. Same params as `create_module_from_hlsl`. Script usage is set to `Function` instead of `Module`. |
 
 **Parameter (9)**
 | Action | Description |
@@ -438,7 +445,7 @@ These exist because Epic's `FNiagaraStackGraphUtilities` functions lack `NIAGARA
 | `add_user_parameter` | Add user parameter with optional default |
 | `remove_user_parameter` | Remove a user parameter |
 | `set_parameter_default` | Set parameter default value |
-| `set_curve_value` | Set curve keys on a module input |
+| `set_curve_value` | Set curve keys on a module input. Params: `emitter`, `module_node`, `input`, `keys` (array of `{time, value}` objects) |
 
 **Renderer (6)**
 | Action | Description |
@@ -712,7 +719,7 @@ python Saved/monolith_offline.py <namespace> <action> [args...]
 | unreal-cpp | C++, header, include, UCLASS, Build.cs, linker error | `source_query()` + `config_query()` | 10+6 |
 | unreal-debugging | build error, crash, log, debug, stack trace | `editor_query()` | 13 |
 | unreal-materials | material, shader, PBR, texture, material graph | `material_query()` | 25 |
-| unreal-niagara | Niagara, particle, VFX, emitter | `niagara_query()` | 41 |
+| unreal-niagara | Niagara, particle, VFX, emitter | `niagara_query()` | 46 |
 | unreal-performance | performance, optimization, FPS, frame time | Cross-domain | config + material + niagara |
 | unreal-project-search | find asset, search project, dependencies | `project_query()` | 5 |
 
@@ -857,9 +864,10 @@ This folder is both the working copy and the git repo (`git@github.com:tumourlov
 
 See `TODO.md` for the full list. Key architectural constraints:
 
-- **Niagara HLSL creation stubs** — NiagaraEditor APIs not exported by Epic
-- **6 reimplemented NiagaraEditor helpers** — Same non-export issue
+- **6 reimplemented NiagaraEditor helpers** — NiagaraEditor APIs not exported by Epic; Monolith reimplements them locally
 - **SSE is stub-only** — GET endpoint returns single event and close, not full streaming
+- **MaterialExpressionNoise fails on Lumen card passes** — Compiles for base pass but errors on Lumen card capture shaders ("function signature unavailable"). Engine limitation, not a Monolith bug. Workaround: use custom HLSL noise or pre-baked noise textures instead.
+- **MaterialExpressionRadialGradientExponential does not exist** — Despite appearing in some community references, this expression class is not in UE 5.7. Use a Custom HLSL node with `pow(1.0 - saturate(length(UV - 0.5) * 2.0), Exponent)` instead.
 
 ---
 
@@ -871,11 +879,11 @@ See `TODO.md` for the full list. Key architectural constraints:
 | MonolithBlueprint | blueprint | 46 |
 | MonolithMaterial | material | 25 |
 | MonolithAnimation | animation | 62 |
-| MonolithNiagara | niagara | 41 |
+| MonolithNiagara | niagara | 46 |
 | MonolithEditor | editor | 13 |
 | MonolithConfig | config | 6 |
 | MonolithIndex | project | 5 |
 | MonolithSource | source | 10 |
 | **Total** | | **217** |
 
-**Note:** All skill files now correctly reflect the C++ action counts (217 total). The original Python server had higher counts (~231 tools) due to fragmented action design.
+**Note:** All skill files now correctly reflect the C++ action counts (217 total). The original Python server had higher counts (~231 tools) due to fragmented action design. Note: PoseSearch's 5 actions are included in Animation's 62 — they are not additive.

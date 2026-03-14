@@ -77,6 +77,39 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		);
 	}
 
+	// Validate required params from schema before dispatching.
+	// Skip asset_path — GetAssetPath() accepts both asset_path and system_path aliases
+	// and produces a clear error message itself.
+	const FMonolithActionInfo& ActionInfo = RegAction->Info;
+	if (ActionInfo.ParamSchema.IsValid() && Params.IsValid())
+	{
+		TArray<FString> Missing;
+		for (const auto& Pair : ActionInfo.ParamSchema->Values)
+		{
+			if (Pair.Key == TEXT("asset_path")) continue;
+
+			const TSharedPtr<FJsonObject>* ParamDef = nullptr;
+			if (Pair.Value->TryGetObject(ParamDef) && ParamDef)
+			{
+				bool bRequired = false;
+				(*ParamDef)->TryGetBoolField(TEXT("required"), bRequired);
+				if (bRequired && !Params->HasField(Pair.Key))
+				{
+					Missing.Add(Pair.Key);
+				}
+			}
+		}
+		if (Missing.Num() > 0)
+		{
+			TArray<FString> Provided;
+			for (const auto& P : Params->Values) Provided.Add(P.Key);
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s]"),
+					*FString::Join(Missing, TEXT(", ")),
+					*FString::Join(Provided, TEXT(", "))));
+		}
+	}
+
 	// Release lock before executing handler (handlers may take time)
 	FMonolithActionHandler HandlerCopy = RegAction->Handler;
 	Lock.Unlock();

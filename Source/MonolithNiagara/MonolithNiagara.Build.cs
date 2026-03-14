@@ -20,6 +20,7 @@ public class MonolithNiagara : ModuleRules
 			"Niagara",
 			"NiagaraCore",
 			"NiagaraEditor",
+			"NiagaraShader",
 			"Json",
 			"JsonUtilities",
 			"AssetTools",

@@ -1,6 +1,6 @@
 # Monolith API Reference
 
-**Total Actions: 212** across 9 namespaces
+**Total Actions: 218** across 9 namespaces
 
 > Auto-generated from action registration code. Each action is called via HTTP POST to `http://localhost:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`.
 
@@ -14,7 +14,7 @@
 | [blueprint](#blueprint) | 46 | Blueprint read/write, variable/component/graph CRUD, node operations, compile |
 | [material](#material) | 25 | Material graph editing, inspection, and CRUD |
 | [animation](#animation) | 62 | Animation curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch |
-| [niagara](#niagara) | 41 | Niagara VFX system editing (emitters, modules, params, renderers) |
+| [niagara](#niagara) | 47 | Niagara VFX system editing (emitters, modules, params, renderers, HLSL) |
 | [editor](#editor) | 13 | Live Coding builds, compile output capture, and editor log capture |
 | [config](#config) | 6 | INI config file inspection and search |
 | [project](#project) | 5 | Project-wide asset index (SQLite + FTS5) |
@@ -30,7 +30,7 @@ Core server management and introspection tools.
 
 List available tool namespaces and their actions. Pass namespace to filter.
 
-> **New in Wave 2:** `discover` now returns per-action param schemas for all 212 actions, so callers can see required/optional params without consulting docs.
+> `discover` returns per-action param schemas for all 218 actions. AI clients also receive these schemas in `tools/list` at session start, so full param documentation is available without calling `discover` first.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -46,7 +46,7 @@ Get Monolith server health: version, uptime, port, registered action count, modu
 
 ---
 
-### `monolith.update`
+### `monolith_update`
 
 Check for or install Monolith updates from GitHub Releases.
 
@@ -713,19 +713,23 @@ Disconnect inputs or outputs on a named expression.
 | `asset_path` | string | **required** | Package path of the material asset |
 | `expression_name` | string | **required** | Name of the expression node |
 | `input_name` | string | optional | Specific input to disconnect |
+| `target_expression` | string | optional | Disconnect only links from this source expression |
+| `output_index` | number | optional | Disconnect only this output index on the source expression |
 | `disconnect_outputs` | bool | optional | Also disconnect outputs. Default: `false` |
 
 ---
 
 ### `material.build_material_graph`
 
-Build entire material graph from JSON spec in a single undo transaction.
+Build entire material graph from JSON spec in a single undo transaction. Automatically recompiles the material on success.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the material asset |
 | `graph_spec` | object/string | **required** | JSON spec with `nodes`, `custom_hlsl_nodes`, `connections`, `outputs` arrays |
 | `clear_existing` | bool | optional | Clear existing graph before building. Default: `false` |
+
+**Returns:** Build result including `"recompiled": true` when compilation succeeded. Emits blend mode validation warnings (e.g. Opacity on Opaque, OpacityMask on non-Masked).
 
 ---
 
@@ -926,7 +930,7 @@ Duplicate a material asset to a new path.
 
 ### `material.get_compilation_stats`
 
-Get material compilation statistics: sampler count, texture estimates, UV scalars, blend mode, expression count.
+Get material compilation statistics: vertex shader instruction count, pixel shader instruction count, sampler count, texture estimates, UV scalars, blend mode, expression count.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -936,20 +940,20 @@ Get material compilation statistics: sampler count, texture estimates, UV scalar
 
 ### `material.set_expression_property`
 
-Set a property on an expression node (e.g., DefaultValue on a scalar parameter).
+Set a property on an expression node (e.g., DefaultValue on a scalar parameter). Also accepts `property_name` as an alias for the `property` param.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `asset_path` | string | **required** | Package path of the material asset |
 | `expression_name` | string | **required** | Name of the expression node |
-| `property` | string | **required** | Property name to set |
+| `property` | string | **required** | Property name to set (alias: `property_name`) |
 | `value` | any | **required** | Value to set |
 
 ---
 
 ### `material.connect_expressions`
 
-Wire an expression output to another expression input or a material property input.
+Wire an expression output to another expression input or a material property input. Emits blend mode validation warnings when connecting to Opacity/OpacityMask outputs on mismatched blend modes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1735,6 +1739,12 @@ Get PoseSearch database statistics.
 Niagara VFX system editing -- emitters, modules, parameters, renderers, and batch operations.
 
 > **Note:** All Niagara actions accept `asset_path` (preferred) or `system_path` (backward compatible) for the system asset path parameter.
+>
+> **Param aliases:** Several params accept multiple names for convenience:
+> - Module identifier: `module`, `module_name`, `module_node` (all interchangeable)
+> - Input name: `input`, `input_name` (interchangeable)
+> - Property name: `property`, `property_name` (interchangeable)
+> - Renderer class: `class`, `renderer_class`, `renderer_type` (interchangeable)
 
 ### Emitter Actions
 
@@ -1809,6 +1819,20 @@ Set an emitter property.
 
 ---
 
+#### `niagara.set_system_property`
+
+Set a system-level property via snake_case alias or reflection fallback.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Niagara system |
+| `property` | string | **required** | Property name (snake_case alias or reflected property name) |
+| `value` | any | **required** | Property value |
+
+Supported aliases: `warmup_time`, `b_determinism`, `b_fixed_tick_delta`, `random_seed`, `max_pool_size`, etc.
+
+---
+
 #### `niagara.request_compile`
 
 Request compilation of a Niagara system.
@@ -1851,7 +1875,33 @@ List all renderers across emitters in a Niagara system.
 | `asset_path` | string | **required** | Package path of the Niagara system |
 | `emitter` | string | optional | Filter to a specific emitter |
 
-**Returns:** Array of renderers with emitter, renderer class, index, enabled, and material.
+**Returns:** Array of renderers with emitter, `type` (short class name), index, enabled, and material.
+
+---
+
+#### `niagara.list_module_scripts`
+
+Search available Niagara module scripts by keyword.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | **required** | Keyword to search for in module script asset names and paths |
+
+**Returns:** Array of matching module script asset paths.
+
+---
+
+#### `niagara.list_renderer_properties`
+
+List editable properties on a renderer.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Niagara system |
+| `emitter` | string | **required** | Emitter handle ID |
+| `renderer` | string | **required** | Renderer index or class name |
+
+**Returns:** Array of property names and their current values.
 
 ---
 
@@ -1981,24 +2031,79 @@ Set a data interface on a module input.
 | `emitter` | string | **required** | Emitter handle ID |
 | `module_node` | string | **required** | Module node GUID |
 | `input` | string | **required** | Input parameter name |
-| `di_class` | string | **required** | Data interface class name |
+| `di_class` | string | **required** | Data interface class name (auto-resolves UNiagara/UNiagaraDataInterface prefix) |
 | `config` | string | optional | JSON configuration for DI properties |
+
+---
+
+#### `niagara.set_static_switch_value`
+
+Set a static switch value on a module input.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Package path of the Niagara system |
+| `emitter` | string | **required** | Emitter handle ID |
+| `module_node` | string | **required** | Module node GUID |
+| `input` | string | **required** | Static switch input name |
+| `value` | any | **required** | Switch value: bool (`true`/`false`), enum value name (string), or int |
 
 ---
 
 #### `niagara.create_module_from_hlsl`
 
-Create a Niagara module from HLSL.
+Create a standalone `UNiagaraScript` asset (module usage) with a CustomHlsl node and typed ParameterMap I/O pins. Supports CPU and GPU sim targets.
 
-*Delegates to Python bridge.*
+Input/output pin names must be bare identifiers — no dots. Dotted names like `Module.Color` are rejected; use `Color`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Destination package path for the new script asset (e.g. `/Game/VFX/Modules/MyModule`) |
+| `hlsl` | string | **required** | HLSL body. ParameterMap is handled automatically — write only the logic inside the function body |
+| `inputs` | array | optional | Input pin declarations. Each entry: `{ "name": "InValue", "type": "float" }` |
+| `outputs` | array | optional | Output pin declarations. Each entry: `{ "name": "OutResult", "type": "float" }` |
+| `sim_target` | string | optional | `"cpu"` (default) or `"gpu"` |
+
+**Example:**
+```json
+{
+  "asset_path": "/Game/VFX/Modules/ScaleByAge",
+  "hlsl": "float Age = Particles.NormalizedAge;\nParticles.Scale = float3(1,1,1) * (1.0 - Age);",
+  "sim_target": "cpu"
+}
+```
 
 ---
 
 #### `niagara.create_function_from_hlsl`
 
-Create a Niagara function from HLSL.
+Create a standalone `UNiagaraScript` asset (function usage) with a CustomHlsl node. Same as `create_module_from_hlsl` but with function usage context — for reusable HLSL logic called from other modules.
 
-*Delegates to Python bridge.*
+Input/output pin names must be bare identifiers — no dots.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `asset_path` | string | **required** | Destination package path for the new script asset |
+| `hlsl` | string | **required** | HLSL function body |
+| `inputs` | array | optional | Input pin declarations. Each entry: `{ "name": "InValue", "type": "float" }` |
+| `outputs` | array | optional | Output pin declarations. Each entry: `{ "name": "OutResult", "type": "float" }` |
+| `sim_target` | string | optional | `"cpu"` (default) or `"gpu"` |
+
+**Example:**
+```json
+{
+  "asset_path": "/Game/VFX/Functions/Remap01",
+  "hlsl": "OutValue = saturate((InValue - InMin) / (InMax - InMin));",
+  "inputs": [
+    { "name": "InValue", "type": "float" },
+    { "name": "InMin",   "type": "float" },
+    { "name": "InMax",   "type": "float" }
+  ],
+  "outputs": [
+    { "name": "OutValue", "type": "float" }
+  ]
+}
+```
 
 ---
 

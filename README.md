@@ -18,7 +18,7 @@ It works with **Claude Code**, **Cursor**, or any MCP-compatible client. If your
 
 ## Why Monolith?
 
-Most MCP integrations register every action as a separate tool, which floods the AI's context window with tool descriptions. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists what's available. This keeps the tool list small (12 tools) while still exposing 212 actions across nine domains.
+Most MCP integrations register every action as a separate tool, which floods the AI's context window with tool descriptions. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists what's available. This keeps the tool list small (12 tools) while still exposing 218 actions across nine domains.
 
 ## Features
 
@@ -184,14 +184,14 @@ Monolith.uplugin
   MonolithBlueprint     — Blueprint read/write, variable/component/graph CRUD, node operations, compile (46 actions)
   MonolithMaterial      — Material inspection + graph editing + CRUD (25 actions)
   MonolithAnimation     — Animation sequences, montages, ABPs, PoseSearch (62 actions)
-  MonolithNiagara       — Niagara particle systems (41 actions)
+  MonolithNiagara       — Niagara particle systems (47 actions)
   MonolithEditor        — Build triggers, log capture, compile output, crash context (13 actions)
   MonolithConfig        — Config/INI resolution and search (6 actions)
   MonolithIndex         — SQLite FTS5 deep project indexer (5 actions)
   MonolithSource        — Engine source + API lookup (10 actions)
 ```
 
-**212 actions total across 9 modules, exposed through 12 MCP tools.**
+**218 actions total across 9 modules, exposed through 12 MCP tools.**
 
 ### Tool Reference
 
@@ -204,7 +204,7 @@ Monolith.uplugin
 | `blueprint` | `blueprint_query` | 46 | Full Blueprint CRUD — read/write graphs, variables, components, functions, nodes, compile |
 | `material` | `material_query` | 25 | Inspection, editing, graph building, previews, validation, CRUD |
 | `animation` | `animation_query` | 62 | Montages, blend spaces, ABPs, skeletons, bone tracks, PoseSearch |
-| `niagara` | `niagara_query` | 41 | Systems, emitters, modules, parameters, renderers, HLSL |
+| `niagara` | `niagara_query` | 47 | Systems, emitters, modules, parameters, renderers, HLSL |
 | `editor` | `editor_query` | 13 | Build triggers, error logs, compile output, crash context |
 | `config` | `config_query` | 6 | INI resolution, explain, diff, search |
 | `project` | `project_query` | 5 | Deep project search — FTS5 across all indexed assets |
