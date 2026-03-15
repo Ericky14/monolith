@@ -100,8 +100,13 @@ void FMonolithSourceActions::RegisterAll()
 			.Build());
 
 	Registry.RegisterAction(TEXT("source"), TEXT("trigger_reindex"),
-		TEXT("Trigger Python indexer to rebuild the engine source DB"),
+		TEXT("Trigger C++ indexer to rebuild the engine source DB (full clean build: engine + shaders + project)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleTriggerReindex),
+		MakeShared<FJsonObject>());
+
+	Registry.RegisterAction(TEXT("source"), TEXT("trigger_project_reindex"),
+		TEXT("Trigger incremental project-only C++ source indexing (loads existing engine symbols, indexes project Source/ and Plugins/)"),
+		FMonolithActionHandler::CreateStatic(&FMonolithSourceActions::HandleTriggerProjectReindex),
 		MakeShared<FJsonObject>());
 }
 
@@ -1082,7 +1087,41 @@ FMonolithActionResult FMonolithSourceActions::HandleTriggerReindex(const TShared
 	TArray<TSharedPtr<FJsonValue>> ContentArr;
 	auto ContentItem = MakeShared<FJsonObject>();
 	ContentItem->SetStringField(TEXT("type"), TEXT("text"));
-	ContentItem->SetStringField(TEXT("text"), TEXT("Engine source indexing started. This runs in the background — check editor log for progress."));
+	ContentItem->SetStringField(TEXT("text"), TEXT("Full source indexing started (engine + project). This runs in the background — check editor log for progress."));
+	ContentArr.Add(MakeShared<FJsonValueObject>(ContentItem));
+	ResultObj->SetArrayField(TEXT("content"), ContentArr);
+	return FMonolithActionResult::Success(ResultObj);
+}
+
+// ============================================================================
+// trigger_project_reindex
+// ============================================================================
+
+FMonolithActionResult FMonolithSourceActions::HandleTriggerProjectReindex(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("Editor not available."));
+	}
+
+	UMonolithSourceSubsystem* Subsystem = Cast<UMonolithSourceSubsystem>(GEditor->GetEditorSubsystemBase(UMonolithSourceSubsystem::StaticClass()));
+	if (!Subsystem)
+	{
+		return FMonolithActionResult::Error(TEXT("MonolithSourceSubsystem not available."));
+	}
+
+	if (Subsystem->IsIndexing())
+	{
+		return FMonolithActionResult::Error(TEXT("Indexing already in progress."));
+	}
+
+	Subsystem->TriggerProjectReindex();
+
+	auto ResultObj = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentArr;
+	auto ContentItem = MakeShared<FJsonObject>();
+	ContentItem->SetStringField(TEXT("type"), TEXT("text"));
+	ContentItem->SetStringField(TEXT("text"), TEXT("Project source indexing started (incremental). This runs in the background — check editor log for progress."));
 	ContentArr.Add(MakeShared<FJsonValueObject>(ContentItem));
 	ResultObj->SetArrayField(TEXT("content"), ContentArr);
 	return FMonolithActionResult::Success(ResultObj);

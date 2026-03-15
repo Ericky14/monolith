@@ -1,9 +1,15 @@
 #include "MonolithSourceSubsystem.h"
+#include "MonolithSourceIndexer.h"
 #include "MonolithSettings.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"
-#include "HAL/PlatformProcess.h"
 #include "Async/Async.h"
+
+UMonolithSourceSubsystem::~UMonolithSourceSubsystem()
+{
+	delete Indexer;
+	Indexer = nullptr;
+}
 
 void UMonolithSourceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -28,12 +34,24 @@ void UMonolithSourceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UMonolithSourceSubsystem::Deinitialize()
 {
+	// Stop any running indexer
+	if (Indexer)
+	{
+		Indexer->RequestStop();
+		delete Indexer;
+		Indexer = nullptr;
+	}
+
 	if (Database.IsValid())
 	{
 		Database->Close();
 	}
 	Super::Deinitialize();
 }
+
+// ============================================================
+// Full reindex: engine + shaders + project (clean build)
+// ============================================================
 
 void UMonolithSourceSubsystem::TriggerReindex()
 {
@@ -43,17 +61,7 @@ void UMonolithSourceSubsystem::TriggerReindex()
 		return;
 	}
 
-	FString PythonExe = FindPython();
-	if (PythonExe.IsEmpty())
-	{
-		UE_LOG(LogMonolithSource, Error, TEXT("Could not find python/python3 in PATH"));
-		return;
-	}
-
-	FString ScriptsDir = FPaths::ProjectPluginsDir() / TEXT("Monolith") / TEXT("Scripts");
 	FString DbPath = GetDatabasePath();
-	FString SourcePath = GetEngineSourcePath();
-	FString ShaderPath = GetEngineShaderPath();
 
 	// Ensure Saved dir exists
 	FString SavedDir = FPaths::GetPath(DbPath);
@@ -71,68 +79,97 @@ void UMonolithSourceSubsystem::TriggerReindex()
 
 	bIsIndexing = true;
 
-	FString Args = FString::Printf(
-		TEXT("-m source_indexer --source \"%s\" --db \"%s\""),
-		*SourcePath, *DbPath
-	);
-	if (!ShaderPath.IsEmpty())
+		delete Indexer;
+	Indexer = new FMonolithSourceIndexer();
+	Indexer->SetSourcePath(GetEngineSourcePath());
+	Indexer->SetShaderPath(GetEngineShaderPath());
+	Indexer->SetProjectPath(GetProjectPath());
+	Indexer->SetDatabasePath(DbPath);
+	Indexer->SetCleanBuild(true);
+	Indexer->SetIndexProjectSource(true);
+
+	Indexer->OnComplete.AddLambda([this, DbPath](int32 Files, int32 Symbols, int32 Errors)
 	{
-		Args += FString::Printf(TEXT(" --shaders \"%s\""), *ShaderPath);
-	}
-
-	UE_LOG(LogMonolithSource, Log, TEXT("Starting engine source indexing: %s %s"), *PythonExe, *Args);
-
-	// Run in background thread
-	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, PythonExe, Args, ScriptsDir, DbPath]()
-	{
-		FString StdOut, StdErr;
-		int32 ReturnCode = -1;
-
-		// Run from Scripts dir so "python -m source_indexer" works
-		FPlatformProcess::ExecProcess(
-			*PythonExe,
-			*Args,
-			&ReturnCode,
-			&StdOut,
-			&StdErr,
-			*ScriptsDir
-		);
-
-		AsyncTask(ENamedThreads::GameThread, [this, ReturnCode, StdOut, StdErr, DbPath]()
+		AsyncTask(ENamedThreads::GameThread, [this, DbPath, Files, Symbols, Errors]()
 		{
 			bIsIndexing = false;
-
-			if (ReturnCode == 0)
-			{
-				UE_LOG(LogMonolithSource, Log, TEXT("Engine source indexing complete: %s"), *StdOut);
-			}
-			else
-			{
-				IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
-				if (PF.FileExists(*DbPath))
-				{
-					UE_LOG(LogMonolithSource, Warning, TEXT("Engine source indexing exited with code %d (DB exists, built externally): %s"), ReturnCode, *StdErr);
-				}
-				else
-				{
-					UE_LOG(LogMonolithSource, Error, TEXT("Engine source indexing failed with code %d and no DB was produced: %s"), ReturnCode, *StdErr);
-				}
-			}
-
-			// Always reopen the DB — it may have been built/updated externally (e.g. index_project.py)
-			if (Database.IsValid())
-			{
-				IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-				if (PlatformFile.FileExists(*DbPath))
-				{
-					if (Database->Open(DbPath))
-					{
-						UE_LOG(LogMonolithSource, Log, TEXT("Engine source DB reopened: %s"), *DbPath);
-					}
-				}
-			}
+			UE_LOG(LogMonolithSource, Log, TEXT("C++ source indexing complete: %d files, %d symbols, %d errors"), Files, Symbols, Errors);
+			ReopenDatabase(DbPath);
 		});
 	});
+
+	UE_LOG(LogMonolithSource, Log, TEXT("Starting full source indexing (engine + project) via C++ indexer"));
+	Indexer->StartAsync();
+}
+
+// ============================================================
+// Incremental project-only reindex
+// ============================================================
+
+void UMonolithSourceSubsystem::TriggerProjectReindex()
+{
+	if (bIsIndexing)
+	{
+		UE_LOG(LogMonolithSource, Warning, TEXT("Indexing already in progress"));
+		return;
+	}
+
+	FString DbPath = GetDatabasePath();
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.FileExists(*DbPath))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("EngineSource.db not found at %s — run full TriggerReindex() first"), *DbPath);
+		return;
+	}
+
+	// Close DB during reindex
+	if (Database.IsValid() && Database->IsOpen())
+	{
+		Database->Close();
+	}
+
+	bIsIndexing = true;
+
+		delete Indexer;
+	Indexer = new FMonolithSourceIndexer();
+	// No engine source path — project only
+	Indexer->SetProjectPath(GetProjectPath());
+	Indexer->SetDatabasePath(DbPath);
+	Indexer->SetCleanBuild(false);   // Incremental — keep existing engine symbols
+	Indexer->SetIndexProjectSource(true);
+
+	Indexer->OnComplete.AddLambda([this, DbPath](int32 Files, int32 Symbols, int32 Errors)
+	{
+		AsyncTask(ENamedThreads::GameThread, [this, DbPath, Files, Symbols, Errors]()
+		{
+			bIsIndexing = false;
+			UE_LOG(LogMonolithSource, Log, TEXT("Project source indexing complete: %d files, %d symbols, %d errors"), Files, Symbols, Errors);
+			ReopenDatabase(DbPath);
+		});
+	});
+
+	UE_LOG(LogMonolithSource, Log, TEXT("Starting project source indexing (incremental) via C++ indexer"));
+	Indexer->StartAsync();
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+void UMonolithSourceSubsystem::ReopenDatabase(const FString& DbPath)
+{
+	if (Database.IsValid())
+	{
+		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+		if (PlatformFile.FileExists(*DbPath))
+		{
+			if (Database->Open(DbPath))
+			{
+				UE_LOG(LogMonolithSource, Log, TEXT("Engine source DB reopened: %s"), *DbPath);
+			}
+		}
+	}
 }
 
 FString UMonolithSourceSubsystem::GetDatabasePath() const
@@ -160,20 +197,7 @@ FString UMonolithSourceSubsystem::GetEngineShaderPath() const
 	return FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Shaders"));
 }
 
-FString UMonolithSourceSubsystem::FindPython() const
+FString UMonolithSourceSubsystem::GetProjectPath() const
 {
-	// Try python3 first, then python — just use the name directly,
-	// FPlatformProcess::ExecProcess resolves from PATH
-	TArray<FString> Candidates = { TEXT("python3"), TEXT("python") };
-	for (const FString& Candidate : Candidates)
-	{
-		FString StdOut, StdErr;
-		int32 ReturnCode = -1;
-		FPlatformProcess::ExecProcess(*Candidate, TEXT("--version"), &ReturnCode, &StdOut, &StdErr);
-		if (ReturnCode == 0)
-		{
-			return Candidate;
-		}
-	}
-	return TEXT("python");
+	return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 }

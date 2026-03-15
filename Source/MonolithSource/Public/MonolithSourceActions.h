@@ -26,6 +26,7 @@ private:
 	static FMonolithActionResult HandleGetSymbolContext(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleReadFile(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleTriggerReindex(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleTriggerProjectReindex(const TSharedPtr<FJsonObject>& Params);
 
 	// Helpers
 	static FMonolithSourceDatabase* GetDB();

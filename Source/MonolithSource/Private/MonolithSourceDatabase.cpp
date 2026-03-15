@@ -1,4 +1,5 @@
 #include "MonolithSourceDatabase.h"
+#include "MonolithSourceSchema.h"
 #include "SQLiteDatabase.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"
@@ -654,4 +655,476 @@ TArray<FMonolithSourceSymbol> FMonolithSourceDatabase::SearchSymbolsFTSFiltered(
 		Result.Add(ReadSymbolFromStatement(Stmt));
 	}
 	return Result;
+}
+
+// ============================================================
+// Write API — OpenForWriting
+// ============================================================
+
+bool FMonolithSourceDatabase::OpenForWriting(const FString& DbPath)
+{
+	FScopeLock Lock(&DbLock);
+
+	if (Database)
+	{
+		Database->Close();
+		delete Database;
+		Database = nullptr;
+	}
+
+	CachedDbPath = DbPath;
+
+	Database = new FSQLiteDatabase();
+	if (!Database->Open(*DbPath, ESQLiteDatabaseOpenMode::ReadWriteCreate))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("OpenForWriting: failed to open/create DB: %s"), *DbPath);
+		delete Database;
+		Database = nullptr;
+		return false;
+	}
+
+	// Belt-and-suspenders: force DELETE journal mode (WAL breaks ReadOnly on Windows, per lesson learned)
+	Database->Execute(TEXT("PRAGMA journal_mode=DELETE;"));
+	Database->Execute(TEXT("PRAGMA synchronous=NORMAL;"));
+	Database->Execute(TEXT("PRAGMA cache_size=-64000;"));   // 64 MB page cache
+
+	UE_LOG(LogMonolithSource, Log, TEXT("Engine source DB opened for writing: %s"), *DbPath);
+	return true;
+}
+
+// ============================================================
+// Schema management
+// ============================================================
+
+bool FMonolithSourceDatabase::CreateTablesIfNeeded()
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid())
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("CreateTablesIfNeeded: DB not open"));
+		return false;
+	}
+
+	if (!Database->Execute(MonolithSourceSchema::DDL_Tables))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("CreateTablesIfNeeded: DDL_Tables failed — %s"), *Database->GetLastError());
+		return false;
+	}
+	if (!Database->Execute(MonolithSourceSchema::DDL_FTS))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("CreateTablesIfNeeded: DDL_FTS failed — %s"), *Database->GetLastError());
+		return false;
+	}
+	if (!Database->Execute(MonolithSourceSchema::DDL_Triggers))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("CreateTablesIfNeeded: DDL_Triggers failed — %s"), *Database->GetLastError());
+		return false;
+	}
+
+	// Stamp the schema version into meta
+	FSQLitePreparedStatement MetaStmt;
+	MetaStmt.Create(*Database, TEXT("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);"));
+	MetaStmt.SetBindingValueByIndex(1, FString(TEXT("schema_version")));
+	MetaStmt.SetBindingValueByIndex(2, FString::FromInt(MonolithSourceSchema::SchemaVersion));
+	MetaStmt.Step();
+
+	UE_LOG(LogMonolithSource, Log, TEXT("Schema created/verified (version %d)"), MonolithSourceSchema::SchemaVersion);
+	return true;
+}
+
+bool FMonolithSourceDatabase::ResetDatabase()
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid())
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("ResetDatabase: DB not open"));
+		return false;
+	}
+
+	if (!Database->Execute(MonolithSourceSchema::DDL_Drop))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("ResetDatabase: drop failed — %s"), *Database->GetLastError());
+		return false;
+	}
+
+	UE_LOG(LogMonolithSource, Log, TEXT("ResetDatabase: all tables dropped, recreating schema"));
+
+	// Execute DDL inline (we're already holding DbLock, can't call CreateTablesIfNeeded)
+	if (!Database->Execute(MonolithSourceSchema::DDL_Tables))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("ResetDatabase: DDL_Tables failed — %s"), *Database->GetLastError());
+		return false;
+	}
+	if (!Database->Execute(MonolithSourceSchema::DDL_FTS))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("ResetDatabase: DDL_FTS failed — %s"), *Database->GetLastError());
+		return false;
+	}
+	if (!Database->Execute(MonolithSourceSchema::DDL_Triggers))
+	{
+		UE_LOG(LogMonolithSource, Error, TEXT("ResetDatabase: DDL_Triggers failed — %s"), *Database->GetLastError());
+		return false;
+	}
+
+	FSQLitePreparedStatement MetaStmt;
+	MetaStmt.Create(*Database, TEXT("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);"));
+	MetaStmt.SetBindingValueByIndex(1, FString(TEXT("schema_version")));
+	MetaStmt.SetBindingValueByIndex(2, FString::FromInt(MonolithSourceSchema::SchemaVersion));
+	MetaStmt.Step();
+
+	UE_LOG(LogMonolithSource, Log, TEXT("ResetDatabase: schema recreated successfully"));
+	return true;
+}
+
+// ============================================================
+// Transaction control
+// ============================================================
+
+bool FMonolithSourceDatabase::BeginTransaction()
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return false;
+	return Database->Execute(TEXT("BEGIN;"));
+}
+
+bool FMonolithSourceDatabase::CommitTransaction()
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return false;
+	return Database->Execute(TEXT("COMMIT;"));
+}
+
+bool FMonolithSourceDatabase::RollbackTransaction()
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return false;
+	return Database->Execute(TEXT("ROLLBACK;"));
+}
+
+// ============================================================
+// Insert helpers
+// ============================================================
+
+int64 FMonolithSourceDatabase::InsertModule(const FString& Name, const FString& Path, const FString& ModuleType, const FString& BuildCsPath)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return 0;
+
+	// INSERT OR IGNORE — if UNIQUE(name,path) already exists, this is a no-op
+	FSQLitePreparedStatement InsStmt;
+	InsStmt.Create(*Database, TEXT("INSERT OR IGNORE INTO modules (name, path, module_type, build_cs_path) VALUES (?, ?, ?, ?);"));
+	InsStmt.SetBindingValueByIndex(1, Name);
+	InsStmt.SetBindingValueByIndex(2, Path);
+	InsStmt.SetBindingValueByIndex(3, ModuleType);
+	InsStmt.SetBindingValueByIndex(4, BuildCsPath);
+	InsStmt.Step();
+
+	int64 RowId = Database->GetLastInsertRowId();
+	if (RowId != 0)
+	{
+		return RowId;
+	}
+
+	// Already existed — fetch its id
+	FSQLitePreparedStatement SelStmt;
+	SelStmt.Create(*Database, TEXT("SELECT id FROM modules WHERE name = ? AND path = ?;"));
+	SelStmt.SetBindingValueByIndex(1, Name);
+	SelStmt.SetBindingValueByIndex(2, Path);
+	if (SelStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		int64 ExistingId = 0;
+		SelStmt.GetColumnValueByIndex(0, ExistingId);
+		return ExistingId;
+	}
+
+	UE_LOG(LogMonolithSource, Warning, TEXT("InsertModule: could not retrieve id for '%s'"), *Name);
+	return 0;
+}
+
+int64 FMonolithSourceDatabase::InsertFile(const FString& FilePath, int64 ModuleId, const FString& FileType, int32 LineCount, double LastModified)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return 0;
+
+	FSQLitePreparedStatement InsStmt;
+	InsStmt.Create(*Database, TEXT("INSERT OR IGNORE INTO files (path, module_id, file_type, line_count, last_modified) VALUES (?, ?, ?, ?, ?);"));
+	InsStmt.SetBindingValueByIndex(1, FilePath);
+	InsStmt.SetBindingValueByIndex(2, ModuleId);
+	InsStmt.SetBindingValueByIndex(3, FileType);
+	InsStmt.SetBindingValueByIndex(4, static_cast<int64>(LineCount));
+	InsStmt.SetBindingValueByIndex(5, LastModified);
+	InsStmt.Step();
+
+	int64 RowId = Database->GetLastInsertRowId();
+	if (RowId != 0)
+	{
+		return RowId;
+	}
+
+	// Already existed — fetch its id
+	FSQLitePreparedStatement SelStmt;
+	SelStmt.Create(*Database, TEXT("SELECT id FROM files WHERE path = ?;"));
+	SelStmt.SetBindingValueByIndex(1, FilePath);
+	if (SelStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		int64 ExistingId = 0;
+		SelStmt.GetColumnValueByIndex(0, ExistingId);
+		return ExistingId;
+	}
+
+	UE_LOG(LogMonolithSource, Warning, TEXT("InsertFile: could not retrieve id for '%s'"), *FilePath);
+	return 0;
+}
+
+int64 FMonolithSourceDatabase::InsertSymbol(
+	const FString& Name, const FString& QualifiedName, const FString& Kind,
+	int64 FileId, int32 LineStart, int32 LineEnd,
+	int64 ParentSymbolId,
+	const FString& Access, const FString& Signature, const FString& Docstring,
+	bool bIsUEMacro)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return 0;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database,
+		TEXT("INSERT INTO symbols (name, qualified_name, kind, file_id, line_start, line_end, parent_symbol_id, access, signature, docstring, is_ue_macro) ")
+		TEXT("VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"));
+
+	Stmt.SetBindingValueByIndex(1, Name);
+	Stmt.SetBindingValueByIndex(2, QualifiedName);
+	Stmt.SetBindingValueByIndex(3, Kind);
+
+	// file_id — bind NULL if 0
+	if (FileId != 0)
+	{
+		Stmt.SetBindingValueByIndex(4, FileId);
+	}
+	// else: leave unbound — SQLite defaults to NULL
+
+	Stmt.SetBindingValueByIndex(5, static_cast<int64>(LineStart));
+	Stmt.SetBindingValueByIndex(6, static_cast<int64>(LineEnd));
+
+	// parent_symbol_id — bind NULL if 0
+	if (ParentSymbolId != 0)
+	{
+		Stmt.SetBindingValueByIndex(7, ParentSymbolId);
+	}
+	// else: leave unbound — SQLite defaults to NULL
+
+	Stmt.SetBindingValueByIndex(8, Access);
+	Stmt.SetBindingValueByIndex(9, Signature);
+	Stmt.SetBindingValueByIndex(10, Docstring);
+	Stmt.SetBindingValueByIndex(11, static_cast<int64>(bIsUEMacro ? 1 : 0));
+
+	Stmt.Step();
+
+	return Database->GetLastInsertRowId();
+}
+
+void FMonolithSourceDatabase::InsertInheritance(int64 ChildId, int64 ParentId)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return;
+
+	// OR IGNORE — silent on unique constraint violation, mirrors Python IntegrityError catch
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT OR IGNORE INTO inheritance (child_id, parent_id) VALUES (?, ?);"));
+	Stmt.SetBindingValueByIndex(1, ChildId);
+	Stmt.SetBindingValueByIndex(2, ParentId);
+	Stmt.Step();
+}
+
+void FMonolithSourceDatabase::InsertReference(int64 FromSymbolId, int64 ToSymbolId, const FString& RefKind, int64 FileId, int32 Line)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database,
+		TEXT("INSERT INTO \"references\" (from_symbol_id, to_symbol_id, ref_kind, file_id, line) ")
+		TEXT("VALUES (?, ?, ?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, FromSymbolId);
+	Stmt.SetBindingValueByIndex(2, ToSymbolId);
+	Stmt.SetBindingValueByIndex(3, RefKind);
+
+	if (FileId != 0)
+	{
+		Stmt.SetBindingValueByIndex(4, FileId);
+	}
+
+	Stmt.SetBindingValueByIndex(5, static_cast<int64>(Line));
+	Stmt.Step();
+}
+
+void FMonolithSourceDatabase::InsertInclude(int64 FileId, const FString& IncludedPath, int32 Line)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO includes (file_id, included_path, line) VALUES (?, ?, ?);"));
+	Stmt.SetBindingValueByIndex(1, FileId);
+	Stmt.SetBindingValueByIndex(2, IncludedPath);
+	Stmt.SetBindingValueByIndex(3, static_cast<int64>(Line));
+	Stmt.Step();
+}
+
+void FMonolithSourceDatabase::InsertSourceChunks(int64 FileId, const TArray<FString>& Lines)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return;
+	if (Lines.Num() == 0) return;
+
+	// Batch lines in groups of 10, matching Python _insert_source_lines()
+	// Chunk's line_number is the 1-based index of the first line in that batch.
+	static const int32 ChunkSize = 10;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT INTO source_fts (file_id, line_number, text) VALUES (?, ?, ?);"));
+
+	for (int32 BatchStart = 0; BatchStart < Lines.Num(); BatchStart += ChunkSize)
+	{
+		const int32 BatchEnd = FMath::Min(BatchStart + ChunkSize, Lines.Num());
+
+		FString JoinedText;
+		for (int32 i = BatchStart; i < BatchEnd; ++i)
+		{
+			if (i > BatchStart)
+			{
+				JoinedText += TEXT("\n");
+			}
+			JoinedText += Lines[i];
+		}
+
+		// 1-based line number of the first line in this batch
+		const int64 ChunkLineNumber = static_cast<int64>(BatchStart + 1);
+
+		Stmt.Reset();
+		Stmt.SetBindingValueByIndex(1, FileId);
+		Stmt.SetBindingValueByIndex(2, ChunkLineNumber);
+		Stmt.SetBindingValueByIndex(3, JoinedText);
+		Stmt.Step();
+	}
+}
+
+// ============================================================
+// Meta key/value
+// ============================================================
+
+void FMonolithSourceDatabase::SetMeta(const FString& Key, const FString& Value)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);"));
+	Stmt.SetBindingValueByIndex(1, Key);
+	Stmt.SetBindingValueByIndex(2, Value);
+	Stmt.Step();
+}
+
+FString FMonolithSourceDatabase::GetMeta(const FString& Key)
+{
+	FScopeLock Lock(&DbLock);
+	if (!Database || !Database->IsValid()) return TEXT("");
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("SELECT value FROM meta WHERE key = ?;"));
+	Stmt.SetBindingValueByIndex(1, Key);
+
+	if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FString Value;
+		Stmt.GetColumnValueByIndex(0, Value);
+		return Value;
+	}
+	return TEXT("");
+}
+
+// ============================================================
+// Incremental indexing support
+// ============================================================
+
+int32 FMonolithSourceDatabase::LoadExistingSymbols(
+	TMap<FString, int64>& OutSymbolNameToId,
+	TMap<FString, int64>& OutClassNameToId,
+	TMap<FString, TPair<int32,int32>>& OutSymbolSpans,
+	TMap<FString, TPair<int32,int32>>& OutClassSpans)
+{
+	FScopeLock Lock(&DbLock);
+	OutSymbolNameToId.Empty();
+	OutClassNameToId.Empty();
+	OutSymbolSpans.Empty();
+	OutClassSpans.Empty();
+
+	if (!Database || !Database->IsValid()) return 0;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database,
+		TEXT("SELECT id, name, qualified_name, kind, line_start, line_end FROM symbols;"));
+
+	int32 Count = 0;
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		int64 Id = 0;
+		FString Name, QualifiedName, Kind;
+		int32 LineStart = 0, LineEnd = 0;
+
+		Stmt.GetColumnValueByIndex(0, Id);
+		Stmt.GetColumnValueByIndex(1, Name);
+		Stmt.GetColumnValueByIndex(2, QualifiedName);
+		Stmt.GetColumnValueByIndex(3, Kind);
+		Stmt.GetColumnValueByIndex(4, LineStart);
+		Stmt.GetColumnValueByIndex(5, LineEnd);
+
+		// Populate name->id maps (name and qualified_name both point to same id)
+		OutSymbolNameToId.Add(Name, Id);
+		if (QualifiedName != Name && !QualifiedName.IsEmpty())
+		{
+			OutSymbolNameToId.Add(QualifiedName, Id);
+		}
+
+		// Span tracking — prefer definitions (line_end > line_start) over forward decls
+		const bool bIsDefinition = (LineEnd > LineStart);
+		const TPair<int32,int32> NewSpan(LineStart, LineEnd);
+
+		if (!OutSymbolSpans.Contains(Name))
+		{
+			OutSymbolSpans.Add(Name, NewSpan);
+		}
+		else if (bIsDefinition && OutSymbolSpans[Name].Value <= OutSymbolSpans[Name].Key)
+		{
+			// Overwrite forward decl (line_end <= line_start) with definition
+			OutSymbolSpans[Name] = NewSpan;
+		}
+
+		// Class/struct maps
+		const bool bIsClassOrStruct = (Kind == TEXT("class") || Kind == TEXT("struct"));
+		if (bIsClassOrStruct)
+		{
+			OutClassNameToId.Add(Name, Id);
+			if (QualifiedName != Name && !QualifiedName.IsEmpty())
+			{
+				OutClassNameToId.Add(QualifiedName, Id);
+			}
+
+			if (!OutClassSpans.Contains(Name))
+			{
+				OutClassSpans.Add(Name, NewSpan);
+			}
+			else if (bIsDefinition && OutClassSpans[Name].Value <= OutClassSpans[Name].Key)
+			{
+				// Overwrite forward decl with definition
+				OutClassSpans[Name] = NewSpan;
+			}
+		}
+
+		++Count;
+	}
+
+	UE_LOG(LogMonolithSource, Log, TEXT("LoadExistingSymbols: loaded %d symbols (%d classes/structs)"),
+		Count, OutClassNameToId.Num());
+
+	return Count;
 }

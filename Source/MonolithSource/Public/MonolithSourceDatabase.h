@@ -72,8 +72,9 @@ struct FMonolithSourceFile
 };
 
 /**
- * Read-only C++ wrapper around the engine source SQLite DB.
- * All writes happen through the bundled Python indexer.
+ * C++ wrapper around the engine source SQLite DB.
+ * Supports both read-only access (Open) and read-write access (OpenForWriting)
+ * for use by both query handlers and the C++ source indexer.
  */
 class MONOLITHSOURCE_API FMonolithSourceDatabase
 {
@@ -114,6 +115,30 @@ public:
 
 	// --- FTS helper ---
 	static FString EscapeFTS(const FString& Query);
+
+	// --- Write methods (for C++ indexer) ---
+	bool OpenForWriting(const FString& DbPath);
+	bool CreateTablesIfNeeded();
+	bool ResetDatabase();
+
+	bool BeginTransaction();
+	bool CommitTransaction();
+	bool RollbackTransaction();
+
+	int64 InsertModule(const FString& Name, const FString& Path, const FString& ModuleType, const FString& BuildCsPath = TEXT(""));
+	int64 InsertFile(const FString& FilePath, int64 ModuleId, const FString& FileType, int32 LineCount, double LastModified);
+	int64 InsertSymbol(const FString& Name, const FString& QualifiedName, const FString& Kind, int64 FileId, int32 LineStart, int32 LineEnd, int64 ParentSymbolId, const FString& Access, const FString& Signature, const FString& Docstring, bool bIsUEMacro);
+	void InsertInheritance(int64 ChildId, int64 ParentId);
+	void InsertReference(int64 FromSymbolId, int64 ToSymbolId, const FString& RefKind, int64 FileId, int32 Line);
+	void InsertInclude(int64 FileId, const FString& IncludedPath, int32 Line);
+	void InsertSourceChunks(int64 FileId, const TArray<FString>& Lines);
+
+	void SetMeta(const FString& Key, const FString& Value);
+	FString GetMeta(const FString& Key);
+
+	// --- Incremental indexing support ---
+	int32 LoadExistingSymbols(TMap<FString, int64>& OutSymbolNameToId, TMap<FString, int64>& OutClassNameToId,
+		TMap<FString, TPair<int32,int32>>& OutSymbolSpans, TMap<FString, TPair<int32,int32>>& OutClassSpans);
 
 private:
 	FMonolithSourceSymbol ReadSymbolFromStatement(FSQLitePreparedStatement& Stmt);
