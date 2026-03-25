@@ -109,17 +109,11 @@ namespace
 				{"op": "add_variable", "name": "MaxHealth", "type": "float", "default_value": "${max_health}", "category": "Health", "instance_editable": true},
 				{"op": "add_variable", "name": "Health", "type": "float", "default_value": "${max_health}", "category": "Health"},
 				{"op": "add_node", "node_type": "CustomEvent", "event_name": "TakeDamage", "graph_name": "EventGraph", "position": [0, 0]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "Subtract_FloatFloat", "target_class": "KismetMathLibrary", "graph_name": "EventGraph", "position": [400, 0]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "FClamp", "target_class": "KismetMathLibrary", "graph_name": "EventGraph", "position": [700, 0]},
-				{"op": "add_node", "node_type": "VariableSet", "variable_name": "Health", "graph_name": "EventGraph", "position": [1000, 0]},
 				{"op": "add_node", "node_type": "VariableGet", "variable_name": "Health", "graph_name": "EventGraph", "position": [100, 150]},
-				{"op": "add_node", "node_type": "VariableGet", "variable_name": "MaxHealth", "graph_name": "EventGraph", "position": [400, 200]},
+				{"op": "add_node", "node_type": "VariableSet", "variable_name": "Health", "graph_name": "EventGraph", "position": [600, 0]},
 				{"op": "add_node", "node_type": "CustomEvent", "event_name": "Heal", "graph_name": "EventGraph", "position": [0, 400]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "Add_FloatFloat", "target_class": "KismetMathLibrary", "graph_name": "EventGraph", "position": [400, 400]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "FClamp", "target_class": "KismetMathLibrary", "graph_name": "EventGraph", "position": [700, 400]},
-				{"op": "add_node", "node_type": "VariableSet", "variable_name": "Health", "graph_name": "EventGraph", "position": [1000, 400]},
 				{"op": "add_node", "node_type": "VariableGet", "variable_name": "Health", "graph_name": "EventGraph", "position": [100, 550]},
-				{"op": "add_node", "node_type": "VariableGet", "variable_name": "MaxHealth", "graph_name": "EventGraph", "position": [400, 600]}
+				{"op": "add_node", "node_type": "VariableSet", "variable_name": "Health", "graph_name": "EventGraph", "position": [600, 400]}
 			])");
 			Templates.Add(MoveTemp(T));
 		}
@@ -134,8 +128,8 @@ namespace
 			T.ParamDescriptions.Add(TPair<FString, FString>(TEXT("delay"), TEXT("Delay duration in seconds (default: 1.0)")));
 			T.OperationsJson = TEXT(R"([
 				{"op": "add_node", "node_type": "CustomEvent", "event_name": "${event_name}", "graph_name": "EventGraph", "position": [0, 0]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "Delay", "target_class": "KismetSystemLibrary", "graph_name": "EventGraph", "position": [300, 0]},
-				{"op": "add_node", "node_type": "CallFunction", "function_name": "CallCustomEvent", "graph_name": "EventGraph", "position": [600, 0]}
+				{"op": "add_node", "node_type": "Delay", "graph_name": "EventGraph", "position": [300, 0]},
+				{"op": "add_node", "node_type": "CallFunction", "function_name": "PrintString", "target_class": "KismetSystemLibrary", "graph_name": "EventGraph", "position": [600, 0]}
 			])");
 			Templates.Add(MoveTemp(T));
 		}
@@ -151,8 +145,7 @@ namespace
 				{"op": "add_variable", "name": "bIsInteractable", "type": "bool", "default_value": "true", "category": "Interaction", "instance_editable": true},
 				{"op": "add_component", "component_class": "SphereComponent", "component_name": "InteractionSphere"},
 				{"op": "set_component_property", "component_name": "InteractionSphere", "property_name": "SphereRadius", "value": "${radius}"},
-				{"op": "set_component_property", "component_name": "InteractionSphere", "property_name": "CollisionProfileName", "value": "OverlapAllDynamic"},
-				{"op": "add_node", "node_type": "ComponentBoundEvent", "component_name": "InteractionSphere", "delegate_name": "OnComponentBeginOverlap", "graph_name": "EventGraph", "position": [0, 0]},
+				{"op": "set_component_property", "component_name": "InteractionSphere", "property_name": "bGenerateOverlapEvents", "value": "true"},
 				{"op": "add_node", "node_type": "VariableGet", "variable_name": "bIsInteractable", "graph_name": "EventGraph", "position": [200, 150]},
 				{"op": "add_node", "node_type": "Branch", "graph_name": "EventGraph", "position": [400, 0]}
 			])");
