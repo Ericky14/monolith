@@ -365,6 +365,27 @@ static UScriptStruct* ResolveScriptStruct(const FString& StructName)
 //  Helper: Serialize a single DataTable row to JSON
 // ============================================================
 
+// Get a user-friendly property name — display name for UDS properties, internal name otherwise
+static FString GetFriendlyPropertyName(FProperty* Prop)
+{
+	FString DisplayName = Prop->GetMetaData(TEXT("DisplayName"));
+	if (!DisplayName.IsEmpty()) return DisplayName;
+	// Fallback: strip GUID suffix from UDS names (e.g., "Name_2_C392053F..." → "Name")
+	FString Name = Prop->GetName();
+	// UDS properties follow pattern: DisplayName_N_GUID
+	int32 FirstUnderscore;
+	if (Name.FindChar(TEXT('_'), FirstUnderscore))
+	{
+		FString Prefix = Name.Left(FirstUnderscore);
+		// Check if next char after underscore is a digit (UDS naming pattern)
+		if (FirstUnderscore + 1 < Name.Len() && FChar::IsDigit(Name[FirstUnderscore + 1]))
+		{
+			return Prefix;
+		}
+	}
+	return Name;
+}
+
 static TSharedPtr<FJsonObject> SerializeRowToJson(const UScriptStruct* RowStruct, const uint8* RowData)
 {
 	TSharedPtr<FJsonObject> ValuesObj = MakeShared<FJsonObject>();
@@ -374,7 +395,7 @@ static TSharedPtr<FJsonObject> SerializeRowToJson(const UScriptStruct* RowStruct
 		const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(RowData);
 		FString ValueStr;
 		Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, nullptr, PPF_None);
-		ValuesObj->SetStringField(Prop->GetName(), ValueStr);
+		ValuesObj->SetStringField(GetFriendlyPropertyName(Prop), ValueStr);
 	}
 	return ValuesObj;
 }
@@ -523,17 +544,38 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleAddDataTableRow(con
 		const FString& FieldName = Pair.Key;
 		const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
 
-		// Find property by name (case-insensitive fallback)
+		// Find property by name — try exact, case-insensitive, then display name
+		// UDS properties have GUID-encoded names (e.g., "Name_2_C392053F...") but
+		// callers use friendly display names ("Name"). Check DisplayName metadata.
 		FProperty* Prop = RowStruct->FindPropertyByName(FName(*FieldName));
 		if (!Prop)
 		{
-			// Case-insensitive search
 			for (TFieldIterator<FProperty> It(RowStruct); It; ++It)
 			{
+				// Case-insensitive internal name match
 				if (It->GetName().Equals(FieldName, ESearchCase::IgnoreCase))
 				{
 					Prop = *It;
 					break;
+				}
+				// Display name match (critical for UserDefinedStructs)
+				FString DisplayName = It->GetMetaData(TEXT("DisplayName"));
+				if (!DisplayName.IsEmpty() && DisplayName.Equals(FieldName, ESearchCase::IgnoreCase))
+				{
+					Prop = *It;
+					break;
+				}
+				// Also try stripping the GUID suffix: "Name_2_GUID" → check if starts with "FieldName_"
+				FString PropName = It->GetName();
+				int32 UnderscoreIdx;
+				if (PropName.FindChar(TEXT('_'), UnderscoreIdx))
+				{
+					FString ShortName = PropName.Left(UnderscoreIdx);
+					if (ShortName.Equals(FieldName, ESearchCase::IgnoreCase))
+					{
+						Prop = *It;
+						break;
+					}
 				}
 			}
 		}
