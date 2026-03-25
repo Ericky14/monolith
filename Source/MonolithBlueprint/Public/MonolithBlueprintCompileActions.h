@@ -12,4 +12,7 @@ public:
 	static FMonolithActionResult HandleCreateBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleDuplicateBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetDependencies(const TSharedPtr<FJsonObject>& Params);
+
+	// Phase 1F — save_asset
+	static FMonolithActionResult HandleSaveAsset(const TSharedPtr<FJsonObject>& Params);
 };

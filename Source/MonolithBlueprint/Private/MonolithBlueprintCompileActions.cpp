@@ -62,6 +62,13 @@ void FMonolithBlueprintCompileActions::RegisterActions(FMonolithToolRegistry& Re
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
 			.Optional(TEXT("direction"),  TEXT("string"), TEXT("depends_on, referenced_by, or both (default: both)"), TEXT("both"))
 			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("save_asset"),
+		TEXT("Save a loaded asset to disk. Works on any asset type, not just Blueprints."),
+		FMonolithActionHandler::CreateStatic(&HandleSaveAsset),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to save"))
+			.Build());
 }
 
 // ============================================================
@@ -80,11 +87,44 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleCompileBlueprint(c
 	FCompilerResultsLog Results;
 	FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::SkipGarbageCollection, &Results);
 
+	// Build a map of compiler messages on nodes (node_id -> {graph_name, error_msg, severity})
+	// This is the proven fallback approach using bHasCompilerMessage
+	TMap<FString, TPair<FString, FString>> NodeErrorMap; // ErrorMsg -> {NodeId, GraphName}
+	{
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (!Graph) continue;
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (!Node || !Node->bHasCompilerMessage) continue;
+				if (!Node->ErrorMsg.IsEmpty())
+				{
+					NodeErrorMap.Add(Node->ErrorMsg, TPair<FString, FString>(Node->GetName(), Graph->GetName()));
+				}
+			}
+		}
+	}
+
 	TArray<TSharedPtr<FJsonValue>> ErrorArr, WarnArr;
 	for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
 	{
 		TSharedPtr<FJsonObject> MsgObj = MakeShared<FJsonObject>();
-		MsgObj->SetStringField(TEXT("message"), Msg->ToText().ToString());
+		FString MsgText = Msg->ToText().ToString();
+		MsgObj->SetStringField(TEXT("message"), MsgText);
+
+		// Try to match this message to a node with compiler errors
+		for (const auto& Pair : NodeErrorMap)
+		{
+			if (MsgText.Contains(Pair.Key) || Pair.Key.Contains(MsgText))
+			{
+				MsgObj->SetStringField(TEXT("node_id"), Pair.Value.Key);
+				MsgObj->SetStringField(TEXT("graph_name"), Pair.Value.Value);
+				break;
+			}
+		}
+
 		if (Msg->GetSeverity() == EMessageSeverity::Error)
 		{
 			ErrorArr.Add(MakeShared<FJsonValueObject>(MsgObj));
@@ -545,5 +585,38 @@ FMonolithActionResult FMonolithBlueprintCompileActions::HandleGetDependencies(co
 	Root->SetArrayField(TEXT("referenced_by"), ReferencedByArr);
 	Root->SetNumberField(TEXT("depends_on_count"), DependsOnArr.Num());
 	Root->SetNumberField(TEXT("referenced_by_count"), ReferencedByArr.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  save_asset
+// ============================================================
+
+FMonolithActionResult FMonolithBlueprintCompileActions::HandleSaveAsset(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	if (AssetPath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: asset_path"));
+	}
+
+	UObject* Asset = FMonolithAssetUtils::LoadAssetByPath(AssetPath);
+	if (!Asset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+	}
+
+	bool bWasDirty = Asset->GetOutermost()->IsDirty();
+	bool bSaved = UEditorAssetLibrary::SaveLoadedAsset(Asset, false);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetBoolField(TEXT("saved"), bSaved);
+	Root->SetBoolField(TEXT("was_dirty"), bWasDirty);
+
+	if (!bSaved)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save asset: %s"), *AssetPath));
+	}
 	return FMonolithActionResult::Success(Root);
 }

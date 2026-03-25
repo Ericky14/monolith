@@ -54,6 +54,23 @@ void FMonolithBlueprintGraphActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Required(TEXT("name"), TEXT("string"), TEXT("Macro name"))
 			.Build());
 
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("remove_macro"),
+		TEXT("Remove a macro graph from a Blueprint by name"),
+		FMonolithActionHandler::CreateStatic(&HandleRemoveMacro),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+			.Required(TEXT("macro_name"), TEXT("string"), TEXT("Macro name to remove"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("rename_macro"),
+		TEXT("Rename an existing macro graph in a Blueprint"),
+		FMonolithActionHandler::CreateStatic(&HandleRenameMacro),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Blueprint asset path"))
+			.Required(TEXT("old_name"), TEXT("string"), TEXT("Current macro name"))
+			.Required(TEXT("new_name"), TEXT("string"), TEXT("New macro name"))
+			.Build());
+
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_event_dispatcher"),
 		TEXT("Add a new event dispatcher (multicast delegate) to a Blueprint"),
 		FMonolithActionHandler::CreateStatic(&HandleAddEventDispatcher),
@@ -353,6 +370,102 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleAddMacro(const TShar
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("graph_name"), NewGraph->GetName());
 	Root->SetNumberField(TEXT("node_count"), NewGraph->Nodes.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- remove_macro ---
+
+FMonolithActionResult FMonolithBlueprintGraphActions::HandleRemoveMacro(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString MacroName = Params->GetStringField(TEXT("macro_name"));
+	if (MacroName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: macro_name"));
+	}
+
+	// Only search macro graphs — not function graphs or event graphs
+	UEdGraph* Graph = nullptr;
+	for (UEdGraph* G : BP->MacroGraphs)
+	{
+		if (G && G->GetName() == MacroName)
+		{
+			Graph = G;
+			break;
+		}
+	}
+
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Macro not found: %s"), *MacroName));
+	}
+
+	FBlueprintEditorUtils::RemoveGraph(BP, Graph, EGraphRemoveFlags::Recompile);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("removed_macro"), MacroName);
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- rename_macro ---
+
+FMonolithActionResult FMonolithBlueprintGraphActions::HandleRenameMacro(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString OldName = Params->GetStringField(TEXT("old_name"));
+	FString NewName = Params->GetStringField(TEXT("new_name"));
+
+	if (OldName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: old_name"));
+	}
+	if (NewName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: new_name"));
+	}
+
+	// Search macro graphs specifically
+	UEdGraph* Graph = nullptr;
+	for (UEdGraph* G : BP->MacroGraphs)
+	{
+		if (G && G->GetName() == OldName)
+		{
+			Graph = G;
+			break;
+		}
+	}
+
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Macro not found: %s"), *OldName));
+	}
+
+	// Check for name collision within macro graphs
+	for (const UEdGraph* Existing : BP->MacroGraphs)
+	{
+		if (Existing && Existing != Graph && Existing->GetName() == NewName)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("A macro named '%s' already exists"), *NewName));
+		}
+	}
+
+	FBlueprintEditorUtils::RenameGraph(Graph, *NewName);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("old_name"), OldName);
+	Root->SetStringField(TEXT("new_name"), Graph->GetName());
 	return FMonolithActionResult::Success(Root);
 }
 

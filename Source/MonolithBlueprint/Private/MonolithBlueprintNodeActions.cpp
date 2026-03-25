@@ -18,6 +18,8 @@
 #include "K2Node_DynamicCast.h"
 #include "K2Node_Timeline.h"
 #include "K2Node_Event.h"
+#include "K2Node_Self.h"
+#include "K2Node_FunctionResult.h"
 #include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/TimelineTemplate.h"
@@ -25,6 +27,87 @@
 #include "Serialization/JsonSerializer.h"
 #include "Editor.h"
 #include "UObject/Package.h"
+
+// ============================================================
+//  Shared Node Alias Map (1G)
+// ============================================================
+
+struct FNodeAlias
+{
+	FString CanonicalType;
+	TMap<FString, FString> DefaultParams; // auto-filled params (e.g., macro_name for ForEachLoop)
+};
+
+static const TMap<FString, FNodeAlias>& GetNodeAliases()
+{
+	static TMap<FString, FNodeAlias> Aliases;
+	if (Aliases.Num() == 0)
+	{
+		// CallFunction aliases
+		Aliases.Add(TEXT("function"),       {TEXT("CallFunction"), {}});
+		Aliases.Add(TEXT("call_function"),  {TEXT("CallFunction"), {}});
+		Aliases.Add(TEXT("call"),           {TEXT("CallFunction"), {}});
+		Aliases.Add(TEXT("func"),           {TEXT("CallFunction"), {}});
+
+		// VariableGet aliases
+		Aliases.Add(TEXT("get"),            {TEXT("VariableGet"), {}});
+		Aliases.Add(TEXT("variable_get"),   {TEXT("VariableGet"), {}});
+
+		// VariableSet aliases
+		Aliases.Add(TEXT("set"),            {TEXT("VariableSet"), {}});
+		Aliases.Add(TEXT("variable_set"),   {TEXT("VariableSet"), {}});
+
+		// CustomEvent aliases
+		Aliases.Add(TEXT("event"),          {TEXT("CustomEvent"), {}});
+		Aliases.Add(TEXT("custom_event"),   {TEXT("CustomEvent"), {}});
+
+		// Branch aliases
+		Aliases.Add(TEXT("branch"),         {TEXT("Branch"), {}});
+		Aliases.Add(TEXT("if"),             {TEXT("Branch"), {}});
+
+		// Sequence aliases
+		Aliases.Add(TEXT("sequence"),       {TEXT("Sequence"), {}});
+
+		// MacroInstance aliases
+		Aliases.Add(TEXT("macro"),          {TEXT("MacroInstance"), {}});
+		Aliases.Add(TEXT("macro_instance"), {TEXT("MacroInstance"), {}});
+
+		// SpawnActorFromClass aliases
+		Aliases.Add(TEXT("spawn_actor"),    {TEXT("SpawnActorFromClass"), {}});
+		Aliases.Add(TEXT("spawn"),          {TEXT("SpawnActorFromClass"), {}});
+
+		// DynamicCast aliases
+		Aliases.Add(TEXT("cast"),           {TEXT("DynamicCast"), {}});
+		Aliases.Add(TEXT("dynamic_cast"),   {TEXT("DynamicCast"), {}});
+
+		// Self aliases (1B)
+		Aliases.Add(TEXT("self"),           {TEXT("Self"), {}});
+
+		// Return aliases (1B)
+		Aliases.Add(TEXT("return"),         {TEXT("Return"), {}});
+		Aliases.Add(TEXT("function_result"), {TEXT("Return"), {}});
+
+		// --- Phase 1A: Macro shorthand aliases ---
+		const FString StandardMacros = TEXT("/Engine/EditorBlueprintResources/StandardMacros");
+
+		Aliases.Add(TEXT("foreachloop"),    {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("ForEachLoop")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("for_each"),       {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("ForEachLoop")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("forloop"),        {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("ForLoop")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("forloopwithbreak"), {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("ForLoopWithBreak")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("doonce"),         {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("DoOnce")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("do_once"),        {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("DoOnce")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("flipflop"),       {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("FlipFlop")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("flip_flop"),      {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("FlipFlop")}, {TEXT("macro_blueprint"), StandardMacros}}});
+		Aliases.Add(TEXT("gate"),           {TEXT("MacroInstance"), {{TEXT("macro_name"), TEXT("Gate")}, {TEXT("macro_blueprint"), StandardMacros}}});
+
+		// --- Phase 1A: CallFunction shorthand aliases ---
+		Aliases.Add(TEXT("isvalid"),        {TEXT("CallFunction"), {{TEXT("function_name"), TEXT("IsValid")}, {TEXT("target_class"), TEXT("KismetSystemLibrary")}}});
+		Aliases.Add(TEXT("is_valid"),       {TEXT("CallFunction"), {{TEXT("function_name"), TEXT("IsValid")}, {TEXT("target_class"), TEXT("KismetSystemLibrary")}}});
+		Aliases.Add(TEXT("delay"),          {TEXT("CallFunction"), {{TEXT("function_name"), TEXT("Delay")}, {TEXT("target_class"), TEXT("KismetSystemLibrary")}}});
+		Aliases.Add(TEXT("retriggerabledelay"), {TEXT("CallFunction"), {{TEXT("function_name"), TEXT("RetriggerableDelay")}, {TEXT("target_class"), TEXT("KismetSystemLibrary")}}});
+	}
+	return Aliases;
+}
 
 // ============================================================
 //  MonolithBlueprintInternal helpers
@@ -56,11 +139,11 @@ bool MonolithBlueprintInternal::HasCustomEventNamed(UBlueprint* BP, FName EventN
 void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_node"),
-		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, and SpawnActorFromClass node types."),
+		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts)."),
 		FMonolithActionHandler::CreateStatic(&HandleAddNode),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"),       TEXT("string"),  TEXT("Blueprint asset path"))
-			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn')"))
+			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
 			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"))
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
@@ -138,7 +221,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("batch_execute"),
-		TEXT("Execute multiple Blueprint write operations on a single asset in one transaction. Each operation is { \"op\": \"action_name\", ...action_params_minus_asset_path }. Supported ops: add_node, remove_node, connect_pins, disconnect_pins, set_pin_default, set_node_position, add_variable, remove_variable, rename_variable, set_variable_type, set_variable_defaults, add_local_variable, remove_local_variable, add_component, remove_component, rename_component, reparent_component, set_component_property, duplicate_component, add_function, remove_function, rename_function, add_macro, add_event_dispatcher, set_function_params, implement_interface, remove_interface, scaffold_interface_implementation, add_timeline, add_event_node, add_comment_node, promote_pin_to_variable, add_replicated_variable."),
+		TEXT("Execute multiple Blueprint write operations on a single asset in one transaction. Each operation is { \"op\": \"action_name\", ...action_params_minus_asset_path }. Supported ops: add_node, remove_node, connect_pins, disconnect_pins, set_pin_default, set_node_position, add_variable, remove_variable, rename_variable, set_variable_type, set_variable_defaults, add_local_variable, remove_local_variable, add_component, remove_component, rename_component, reparent_component, set_component_property, duplicate_component, add_function, remove_function, rename_function, add_macro, remove_macro, rename_macro, add_event_dispatcher, set_function_params, implement_interface, remove_interface, scaffold_interface_implementation, add_timeline, add_event_node, add_comment_node, promote_pin_to_variable, add_replicated_variable, save_asset."),
 		FMonolithActionHandler::CreateStatic(&HandleBatchExecute),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"),         TEXT("string"),  TEXT("Blueprint asset path"))
@@ -251,34 +334,21 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		return FMonolithActionResult::Error(TEXT("Missing required parameter: node_type"));
 	}
 
-	// Normalize common aliases to canonical node type names
+	// Normalize aliases to canonical node type names (shared map from 1G)
 	{
-		static const TMap<FString, FString> Aliases = {
-			{TEXT("function"),       TEXT("CallFunction")},
-			{TEXT("call_function"),  TEXT("CallFunction")},
-			{TEXT("call"),           TEXT("CallFunction")},
-			{TEXT("func"),           TEXT("CallFunction")},
-			{TEXT("get"),            TEXT("VariableGet")},
-			{TEXT("variable_get"),   TEXT("VariableGet")},
-			{TEXT("set"),            TEXT("VariableSet")},
-			{TEXT("variable_set"),   TEXT("VariableSet")},
-			{TEXT("event"),          TEXT("CustomEvent")},
-			{TEXT("custom_event"),   TEXT("CustomEvent")},
-			{TEXT("branch"),         TEXT("Branch")},
-			{TEXT("if"),             TEXT("Branch")},
-			{TEXT("sequence"),       TEXT("Sequence")},
-			{TEXT("macro"),          TEXT("MacroInstance")},
-			{TEXT("macro_instance"), TEXT("MacroInstance")},
-			{TEXT("spawn_actor"),    TEXT("SpawnActorFromClass")},
-			{TEXT("spawn"),          TEXT("SpawnActorFromClass")},
-			// Wave 7 — DynamicCast aliases
-			{TEXT("cast"),           TEXT("DynamicCast")},
-			{TEXT("dynamic_cast"),   TEXT("DynamicCast")},
-		};
 		FString Lower = NodeType.ToLower();
-		if (const FString* Canonical = Aliases.Find(Lower))
+		const auto& Aliases = GetNodeAliases();
+		if (const FNodeAlias* Alias = Aliases.Find(Lower))
 		{
-			NodeType = *Canonical;
+			NodeType = Alias->CanonicalType;
+			// Merge default params — only if the caller didn't already set them (1A)
+			for (const auto& KV : Alias->DefaultParams)
+			{
+				if (!Params->HasField(KV.Key))
+				{
+					Params->SetStringField(KV.Key, KV.Value);
+				}
+			}
 		}
 	}
 
@@ -572,10 +642,44 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		CastNode->AllocateDefaultPins();
 		NewNode = CastNode;
 	}
+	// ---- Self ----
+	else if (NodeType == TEXT("Self"))
+	{
+		UK2Node_Self* SelfNode = NewObject<UK2Node_Self>(Graph);
+		SelfNode->NodePosX = PosX;
+		SelfNode->NodePosY = PosY;
+		Graph->AddNode(SelfNode, true, false);
+		SelfNode->AllocateDefaultPins();
+		NewNode = SelfNode;
+	}
+	// ---- Return (FunctionResult) ----
+	else if (NodeType == TEXT("Return"))
+	{
+		// Return nodes only make sense inside function graphs
+		bool bIsInFunctionGraph = false;
+		for (const auto& FG : BP->FunctionGraphs)
+		{
+			if (FG == Graph)
+			{
+				bIsInFunctionGraph = true;
+				break;
+			}
+		}
+		if (!bIsInFunctionGraph)
+		{
+			return FMonolithActionResult::Error(TEXT("Return nodes can only be added to function graphs, not event graphs"));
+		}
+		UK2Node_FunctionResult* ReturnNode = NewObject<UK2Node_FunctionResult>(Graph);
+		ReturnNode->NodePosX = PosX;
+		ReturnNode->NodePosY = PosY;
+		Graph->AddNode(ReturnNode, true, false);
+		ReturnNode->AllocateDefaultPins();
+		NewNode = ReturnNode;
+	}
 	else
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Unknown node_type: '%s'. Valid types: CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast (or 'cast')"), *NodeType));
+			TEXT("Unknown node_type: '%s'. Valid types: CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return"), *NodeType));
 	}
 
 	if (!NewNode)
@@ -663,18 +767,20 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s"), *TargetNodeId));
 	}
 
-	UEdGraphPin* SrcPin = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName);
+	FString SrcAvailPins;
+	UEdGraphPin* SrcPin = MonolithBlueprintInternal::FindPinOnNode(SrcNode, SourcePinName, EGPD_MAX, &SrcAvailPins);
 	if (!SrcPin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Source pin '%s' not found on node '%s'"), *SourcePinName, *SourceNodeId));
+			TEXT("Source pin '%s' not found on node '%s'. Available pins: %s"), *SourcePinName, *SourceNodeId, *SrcAvailPins));
 	}
 
-	UEdGraphPin* TgtPin = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName);
+	FString TgtAvailPins;
+	UEdGraphPin* TgtPin = MonolithBlueprintInternal::FindPinOnNode(TgtNode, TargetPinName, EGPD_MAX, &TgtAvailPins);
 	if (!TgtPin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Target pin '%s' not found on node '%s'"), *TargetPinName, *TargetNodeId));
+			TEXT("Target pin '%s' not found on node '%s'. Available pins: %s"), *TargetPinName, *TargetNodeId, *TgtAvailPins));
 	}
 
 	const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
@@ -747,11 +853,12 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleDisconnectPins(const 
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
 	}
 
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName);
+	FString AvailPins;
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, &AvailPins);
 	if (!Pin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' not found on node '%s'"), *PinName, *NodeId));
+			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *AvailPins));
 	}
 
 	FString TargetNodeId = Params->GetStringField(TEXT("target_node"));
@@ -775,11 +882,12 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleDisconnectPins(const 
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Target node not found: %s"), *TargetNodeId));
 		}
 
-		UEdGraphPin* TargetPin = MonolithBlueprintInternal::FindPinOnNode(TargetNode, TargetPinName);
+		FString TgtAvailPins2;
+		UEdGraphPin* TargetPin = MonolithBlueprintInternal::FindPinOnNode(TargetNode, TargetPinName, EGPD_MAX, &TgtAvailPins2);
 		if (!TargetPin)
 		{
 			return FMonolithActionResult::Error(FString::Printf(
-				TEXT("Target pin '%s' not found on node '%s'"), *TargetPinName, *TargetNodeId));
+				TEXT("Target pin '%s' not found on node '%s'. Available pins: %s"), *TargetPinName, *TargetNodeId, *TgtAvailPins2));
 		}
 
 		Pin->BreakLinkTo(TargetPin);
@@ -839,11 +947,12 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleSetPinDefault(const T
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
 	}
 
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName);
+	FString SetPinAvailPins;
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, &SetPinAvailPins);
 	if (!Pin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' not found on node '%s'"), *PinName, *NodeId));
+			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *SetPinAvailPins));
 	}
 
 	if (Pin->Direction != EGPD_Input)
@@ -1056,6 +1165,10 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 		// Wave 7 advanced ops
 		else if (OpName == TEXT("promote_pin_to_variable"))    SubResult = HandlePromotePinToVariable(SubParams);
 		else if (OpName == TEXT("add_replicated_variable"))    SubResult = FMonolithBlueprintVariableActions::HandleAddReplicatedVariable(SubParams);
+		// Phase 1 expansion (1E/1F — handlers added by parallel agent)
+		else if (OpName == TEXT("save_asset"))                 SubResult = FMonolithBlueprintCompileActions::HandleSaveAsset(SubParams);
+		else if (OpName == TEXT("remove_macro"))               SubResult = FMonolithBlueprintGraphActions::HandleRemoveMacro(SubParams);
+		else if (OpName == TEXT("rename_macro"))               SubResult = FMonolithBlueprintGraphActions::HandleRenameMacro(SubParams);
 
 		RO->SetBoolField(TEXT("success"), SubResult.bSuccess);
 		if (!SubResult.bSuccess)
@@ -1113,27 +1226,21 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleResolveNode(const TSh
 		return FMonolithActionResult::Error(TEXT("Missing required parameter: node_type"));
 	}
 
-	// Apply same alias normalization as add_node
+	// Apply same alias normalization as add_node (shared map from 1G)
 	{
-		static const TMap<FString, FString> Aliases = {
-			{TEXT("function"),       TEXT("CallFunction")},
-			{TEXT("call_function"),  TEXT("CallFunction")},
-			{TEXT("call"),           TEXT("CallFunction")},
-			{TEXT("func"),           TEXT("CallFunction")},
-			{TEXT("get"),            TEXT("VariableGet")},
-			{TEXT("variable_get"),   TEXT("VariableGet")},
-			{TEXT("set"),            TEXT("VariableSet")},
-			{TEXT("variable_set"),   TEXT("VariableSet")},
-			{TEXT("event"),          TEXT("CustomEvent")},
-			{TEXT("custom_event"),   TEXT("CustomEvent")},
-			{TEXT("branch"),         TEXT("Branch")},
-			{TEXT("if"),             TEXT("Branch")},
-			{TEXT("sequence"),       TEXT("Sequence")},
-		};
 		FString Lower = NodeType.ToLower();
-		if (const FString* Canonical = Aliases.Find(Lower))
+		const auto& Aliases = GetNodeAliases();
+		if (const FNodeAlias* Alias = Aliases.Find(Lower))
 		{
-			NodeType = *Canonical;
+			NodeType = Alias->CanonicalType;
+			// Merge default params for resolve_node too (e.g., function_name for IsValid alias)
+			for (const auto& KV : Alias->DefaultParams)
+			{
+				if (!Params->HasField(KV.Key))
+				{
+					Params->SetStringField(KV.Key, KV.Value);
+				}
+			}
 		}
 	}
 
@@ -2156,11 +2263,12 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandlePromotePinToVariable(
 	}
 
 	// Find the pin
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(SourceNode, PinName);
+	FString PromoteAvailPins;
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(SourceNode, PinName, EGPD_MAX, &PromoteAvailPins);
 	if (!Pin)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' not found on node '%s'"), *PinName, *NodeId));
+			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *PromoteAvailPins));
 	}
 
 	// Validate: not exec

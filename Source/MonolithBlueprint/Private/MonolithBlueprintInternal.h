@@ -370,10 +370,28 @@ namespace MonolithBlueprintInternal
 		return nullptr;
 	}
 
-	// Find a pin on a node by name and optional direction
-	inline UEdGraphPin* FindPinOnNode(UEdGraphNode* Node, const FString& PinName, EEdGraphPinDirection Direction = EGPD_MAX)
+	// Build a comma-separated list of non-hidden pin names on a node (for error messages)
+	inline FString GetAvailablePinNames(UEdGraphNode* Node, EEdGraphPinDirection Direction = EGPD_MAX)
+	{
+		if (!Node) return TEXT("(none)");
+		TArray<FString> Names;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->bHidden) continue;
+			if (Direction != EGPD_MAX && Pin->Direction != Direction) continue;
+			Names.Add(Pin->PinName.ToString());
+		}
+		return Names.Num() > 0 ? FString::Join(Names, TEXT(", ")) : TEXT("(none)");
+	}
+
+	// Find a pin on a node by name and optional direction.
+	// Tries exact match first, then case-insensitive fallback.
+	// If OutAvailablePins is provided, it is populated with available pin names on failure.
+	inline UEdGraphPin* FindPinOnNode(UEdGraphNode* Node, const FString& PinName, EEdGraphPinDirection Direction = EGPD_MAX, FString* OutAvailablePins = nullptr)
 	{
 		if (!Node) return nullptr;
+
+		// Pass 1: exact match
 		for (UEdGraphPin* Pin : Node->Pins)
 		{
 			if (Pin && Pin->PinName.ToString() == PinName)
@@ -381,6 +399,23 @@ namespace MonolithBlueprintInternal
 				if (Direction == EGPD_MAX || Pin->Direction == Direction)
 					return Pin;
 			}
+		}
+
+		// Pass 2: case-insensitive fallback
+		FString PinNameLower = PinName.ToLower();
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin && Pin->PinName.ToString().ToLower() == PinNameLower)
+			{
+				if (Direction == EGPD_MAX || Pin->Direction == Direction)
+					return Pin;
+			}
+		}
+
+		// No match — populate available pins for caller error messages
+		if (OutAvailablePins)
+		{
+			*OutAvailablePins = GetAvailablePinNames(Node, Direction);
 		}
 		return nullptr;
 	}
