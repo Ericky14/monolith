@@ -5,6 +5,10 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "Components/PrimitiveComponent.h"
+#include "CollisionQueryParams.h"
+#include "WorldCollision.h"
+#include "Engine/OverlapResult.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
 
@@ -353,6 +357,178 @@ TSharedPtr<FJsonObject> TransformToJson(const FTransform& Transform)
 bool MatchTag(const FName& A, const FName& B)
 {
 	return A.IsEqual(B, ENameCase::IgnoreCase);
+}
+
+// ============================================================================
+// Collision Validation Utilities
+// ============================================================================
+
+FPropPlacementResult ValidatePropPlacement(
+	UWorld* World,
+	const FVector& CandidateLocation,
+	const FQuat& CandidateRotation,
+	const FVector& PropHalfExtent,
+	const TArray<AActor*>& IgnoreActors,
+	bool bAllowPushOut,
+	float MaxPushOutDistance)
+{
+	FPropPlacementResult Result;
+	Result.FinalLocation = CandidateLocation;
+
+	if (!World)
+	{
+		Result.RejectReason = TEXT("No world available");
+		return Result;
+	}
+
+	// Validate extent is reasonable
+	if (PropHalfExtent.IsNearlyZero())
+	{
+		Result.RejectReason = TEXT("PropHalfExtent is zero or near-zero");
+		return Result;
+	}
+
+	FCollisionShape PropShape = FCollisionShape::MakeBox(PropHalfExtent);
+
+	// Build query params with ignored actors
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(PropPlacement), /*bTraceComplex=*/false);
+	QueryParams.AddIgnoredActors(IgnoreActors);
+
+	// Phase 1: Overlap check at candidate position
+	TArray<FOverlapResult> Overlaps;
+	bool bHasOverlaps = World->OverlapMultiByChannel(
+		Overlaps, CandidateLocation, CandidateRotation,
+		ECC_WorldStatic, PropShape, QueryParams);
+
+	if (!bHasOverlaps)
+	{
+		// Clean placement -- no overlaps at all
+		Result.bValid = true;
+		return Result;
+	}
+
+	// We have overlaps
+	if (!bAllowPushOut)
+	{
+		Result.RejectReason = FString::Printf(
+			TEXT("Overlapping %d component(s) at candidate location, push-out disabled"),
+			Overlaps.Num());
+		return Result;
+	}
+
+	// Phase 2: Attempt push-out
+	FVector AdjustedLocation = CandidateLocation;
+	bool bPushSuccess = TryPushOutProp(
+		World, AdjustedLocation, CandidateRotation, PropHalfExtent,
+		QueryParams, MaxPushOutDistance, /*MaxIterations=*/3);
+
+	if (bPushSuccess)
+	{
+		float PushDistance = FVector::Dist(CandidateLocation, AdjustedLocation);
+		Result.bValid = true;
+		Result.FinalLocation = AdjustedLocation;
+		if (PushDistance > UE_KINDA_SMALL_NUMBER)
+		{
+			Result.Warnings.Add(FString::Printf(
+				TEXT("Pushed %.1fcm from original position to clear overlaps"), PushDistance));
+		}
+	}
+	else
+	{
+		Result.RejectReason = FString::Printf(
+			TEXT("Could not push clear of %d overlap(s) within %.0fcm budget"),
+			Overlaps.Num(), MaxPushOutDistance);
+	}
+
+	return Result;
+}
+
+bool TryPushOutProp(
+	UWorld* World,
+	FVector& InOutLocation,
+	const FQuat& Rotation,
+	const FVector& PropHalfExtent,
+	const FCollisionQueryParams& QueryParams,
+	float MaxPushDistance,
+	int32 MaxIterations)
+{
+	FCollisionShape PropShape = FCollisionShape::MakeBox(PropHalfExtent);
+	float RemainingBudget = MaxPushDistance;
+	FVector OriginalLocation = InOutLocation;
+
+	for (int32 Iter = 0; Iter < MaxIterations; ++Iter)
+	{
+		TArray<FOverlapResult> Overlaps;
+		if (!World->OverlapMultiByChannel(Overlaps, InOutLocation, Rotation,
+			ECC_WorldStatic, PropShape, QueryParams))
+		{
+			return true; // No overlaps -- success
+		}
+
+		// Find the largest penetration across all overlapping components
+		FVector BestDirection = FVector::ZeroVector;
+		float BestDistance = 0.0f;
+		bool bAnyMTDComputed = false;
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			UPrimitiveComponent* Comp = Overlap.GetComponent();
+			if (!Comp)
+			{
+				continue;
+			}
+
+			FMTDResult MTD;
+			if (Comp->ComputePenetration(MTD, PropShape, InOutLocation, Rotation))
+			{
+				bAnyMTDComputed = true;
+				if (MTD.Distance > BestDistance)
+				{
+					BestDirection = MTD.Direction;
+					BestDistance = MTD.Distance;
+				}
+			}
+			// ComputePenetration can return false for components without physics bodies
+			// (e.g., some brush geometry). That's fine -- we skip those.
+		}
+
+		if (!bAnyMTDComputed || BestDistance <= UE_KINDA_SMALL_NUMBER)
+		{
+			// Can't compute any MTD -- overlapping components may lack physics bodies
+			return false;
+		}
+
+		// Apply push-out with a small epsilon to clear the surface
+		FVector Adjustment = BestDirection * (BestDistance + 0.25f);
+		float AdjustmentSize = Adjustment.Size();
+
+		if (AdjustmentSize > RemainingBudget)
+		{
+			// Would exceed the total push budget -- reject
+			return false;
+		}
+
+		InOutLocation += Adjustment;
+		RemainingBudget -= AdjustmentSize;
+	}
+
+	// Ran out of iterations -- do a final overlap check
+	TArray<FOverlapResult> FinalOverlaps;
+	return !World->OverlapMultiByChannel(FinalOverlaps, InOutLocation, Rotation,
+		ECC_WorldStatic, PropShape, QueryParams);
+}
+
+FCollisionShape MakeCollisionShapeFromMesh(UStaticMesh* Mesh, const FVector& Scale)
+{
+	if (!Mesh)
+	{
+		return FCollisionShape::MakeBox(FVector(10.0f)); // Fallback: 20cm cube
+	}
+
+	FVector Extent = Mesh->GetBounds().BoxExtent * Scale * 0.9f; // 0.9 shrink factor
+	// Clamp to a minimum extent to avoid degenerate zero-size shapes
+	Extent = Extent.ComponentMax(FVector(1.0f));
+	return FCollisionShape::MakeBox(Extent);
 }
 
 } // namespace MonolithMeshUtils
