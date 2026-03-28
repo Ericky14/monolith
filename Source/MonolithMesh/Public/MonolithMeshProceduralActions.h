@@ -77,7 +77,7 @@ private:
 	static bool SaveMeshToAsset(UDynamicMesh* Mesh, const FString& SavePath, bool bOverwrite, FString& OutError);
 
 	/** Optionally place a StaticMesh actor in the scene */
-	static AActor* PlaceMeshInScene(const FString& AssetPath, const FVector& Location, const FRotator& Rotation, const FString& Label, bool bSnapToFloor = true);
+	static AActor* PlaceMeshInScene(const FString& AssetPath, const FVector& Location, const FRotator& Rotation, const FString& Label, bool bSnapToFloor = true, const FString& Folder = TEXT(""));
 
 	/** Apply final cleanup: SelfUnion (additive-only) or ComputeSplitNormals (post-boolean) */
 	static void CleanupMesh(UDynamicMesh* Mesh, bool bHadBooleans);

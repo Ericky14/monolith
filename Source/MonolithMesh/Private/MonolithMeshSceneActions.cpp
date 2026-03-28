@@ -394,10 +394,14 @@ FMonolithActionResult FMonolithMeshSceneActions::SpawnActor(const TSharedPtr<FJs
 		SpawnedActor->SetActorLabel(OptionalName);
 	}
 
-	// Set folder
+	// Set folder — default to /Spawned if none specified
 	if (!Folder.IsEmpty())
 	{
 		SpawnedActor->SetFolderPath(FName(*Folder));
+	}
+	else
+	{
+		SpawnedActor->SetFolderPath(FName(TEXT("Spawned")));
 	}
 
 	auto Result = MakeShared<FJsonObject>();

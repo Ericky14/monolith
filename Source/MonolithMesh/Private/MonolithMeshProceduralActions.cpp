@@ -326,7 +326,7 @@ bool FMonolithMeshProceduralActions::SaveMeshToAsset(UDynamicMesh* Mesh, const F
 	return true;
 }
 
-AActor* FMonolithMeshProceduralActions::PlaceMeshInScene(const FString& AssetPath, const FVector& Location, const FRotator& Rotation, const FString& Label, bool bSnapToFloor /*= true*/)
+AActor* FMonolithMeshProceduralActions::PlaceMeshInScene(const FString& AssetPath, const FVector& Location, const FRotator& Rotation, const FString& Label, bool bSnapToFloor /*= true*/, const FString& Folder /*= TEXT("")*/)
 {
 	UWorld* World = MonolithMeshUtils::GetEditorWorld();
 	if (!World) return nullptr;
@@ -364,6 +364,12 @@ AActor* FMonolithMeshProceduralActions::PlaceMeshInScene(const FString& AssetPat
 	if (!Label.IsEmpty())
 	{
 		Actor->SetActorLabel(Label);
+	}
+
+	// Set outliner folder — use explicit folder, or derive from label/asset name
+	if (!Folder.IsEmpty())
+	{
+		Actor->SetFolderPath(FName(*Folder));
 	}
 
 	return Actor;
@@ -1540,7 +1546,15 @@ FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mes
 				Params->TryGetStringField(TEXT("label"), Label);
 				bool bSnapToFloor = !Params->HasField(TEXT("snap_to_floor")) || Params->GetBoolField(TEXT("snap_to_floor"));
 
-				AActor* Actor = PlaceMeshInScene(CachedPath, Location, Rotation, Label, bSnapToFloor);
+				// Build default folder from Category (e.g., "Procedural/Parametric")
+				FString Folder;
+				Params->TryGetStringField(TEXT("folder"), Folder);
+				if (Folder.IsEmpty() && !Category.IsEmpty())
+				{
+					Folder = FString::Printf(TEXT("Procedural/%s"), *Category);
+				}
+
+				AActor* Actor = PlaceMeshInScene(CachedPath, Location, Rotation, Label, bSnapToFloor, Folder);
 				if (Actor)
 				{
 					Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
@@ -1640,7 +1654,15 @@ FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mes
 			Params->TryGetStringField(TEXT("label"), Label);
 			bool bSnapToFloor = !Params->HasField(TEXT("snap_to_floor")) || Params->GetBoolField(TEXT("snap_to_floor"));
 
-			AActor* Actor = PlaceMeshInScene(SavePath, Location, Rotation, Label, bSnapToFloor);
+			// Build default folder from Category
+			FString Folder;
+			Params->TryGetStringField(TEXT("folder"), Folder);
+			if (Folder.IsEmpty() && !Category.IsEmpty())
+			{
+				Folder = FString::Printf(TEXT("Procedural/%s"), *Category);
+			}
+
+			AActor* Actor = PlaceMeshInScene(SavePath, Location, Rotation, Label, bSnapToFloor, Folder);
 			if (Actor)
 			{
 				Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());

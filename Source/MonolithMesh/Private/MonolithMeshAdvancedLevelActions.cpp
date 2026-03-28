@@ -529,6 +529,10 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::PlaceBlueprintActor(con
 	{
 		NewActor->SetFolderPath(FName(*Folder));
 	}
+	else
+	{
+		NewActor->SetFolderPath(FName(TEXT("Prefabs")));
+	}
 
 	// Set properties via reflection
 	TArray<FString> PropertiesSet;

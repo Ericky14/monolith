@@ -335,10 +335,14 @@ FMonolithActionResult FMonolithMeshVolumeActions::SpawnVolume(const TSharedPtr<F
 		Volume->SetActorLabel(OptionalName);
 	}
 
-	// Set folder
+	// Set folder — default to /Volumes
 	if (!Folder.IsEmpty())
 	{
 		Volume->SetFolderPath(FName(*Folder));
+	}
+	else
+	{
+		Volume->SetFolderPath(FName(TEXT("Volumes")));
 	}
 
 	// Apply type-specific properties

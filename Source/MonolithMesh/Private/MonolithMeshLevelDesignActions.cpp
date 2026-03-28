@@ -525,9 +525,14 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 	}
 
 	FString Folder;
-	if (Params->TryGetStringField(TEXT("folder"), Folder) && !Folder.IsEmpty())
+	Params->TryGetStringField(TEXT("folder"), Folder);
+	if (!Folder.IsEmpty())
 	{
 		SpawnedActor->SetFolderPath(FName(*Folder));
+	}
+	else
+	{
+		SpawnedActor->SetFolderPath(FName(TEXT("Lights")));
 	}
 
 	auto Result = MakeShared<FJsonObject>();
