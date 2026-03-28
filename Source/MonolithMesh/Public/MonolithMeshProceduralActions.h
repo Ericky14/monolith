@@ -101,9 +101,20 @@ private:
 	/** Inset a 2D polygon by a fixed distance (simple per-edge inward offset) */
 	static TArray<FVector2D> InsetPolygon2D(const TArray<FVector2D>& Polygon, float InsetDist);
 
-	/** Common save/place/handle logic used by all procedural actions. Mutates Result JSON. Returns error or empty. */
+	/** Common save/place/handle logic used by all procedural actions. Mutates Result JSON. Returns error or empty.
+	 *  ActionName/Category are used for cache hash computation and auto-save path generation.
+	 *  If MeshPtr is null on entry but Params has use_cache=true, checks cache and may skip generation. */
 	static FString FinalizeProceduralMesh(UDynamicMesh* Mesh, const TSharedPtr<FJsonObject>& Params,
-		const TSharedPtr<FJsonObject>& Result, const FString& HandleCategory);
+		const TSharedPtr<FJsonObject>& Result, const FString& HandleCategory,
+		const FString& ActionName = TEXT(""), const FString& Category = TEXT(""));
+
+	// ---- Cache management actions ----
+	static FMonolithActionResult ListCachedMeshes(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult ClearCacheAction(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult ValidateCacheAction(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult GetCacheStatsAction(const TSharedPtr<FJsonObject>& Params);
+
+	static void RegisterCacheActions(FMonolithToolRegistry& Registry);
 
 	// ---- Maze algorithms (pure logic, return wall segment list) ----
 	struct FMazeWall { int32 X0, Y0, X1, Y1; }; // Grid coords of cells on either side

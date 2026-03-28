@@ -1,6 +1,7 @@
 #if WITH_GEOMETRYSCRIPT
 
 #include "MonolithMeshProceduralActions.h"
+#include "MonolithMeshProceduralCache.h"
 #include "MonolithMeshHandlePool.h"
 #include "MonolithMeshUtils.h"
 #include "MonolithToolRegistry.h"
@@ -61,6 +62,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z] for scene placement"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll] for scene placement"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label when placing in scene"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("create_horror_prop"),
@@ -78,6 +81,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z] for scene placement"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll] for scene placement"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label when placing in scene"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	// ---- Phase 19B: Structures + Mazes ----
@@ -103,6 +108,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll]"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("create_building_shell"),
@@ -122,6 +129,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll]"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("create_maze"),
@@ -143,6 +152,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll]"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	// ---- Phase 19C: Pipes + Fragments ----
@@ -165,6 +176,8 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll]"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("create_fragments"),
@@ -202,7 +215,12 @@ void FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Optional(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
 			.Optional(TEXT("rotation"), TEXT("array"), TEXT("World rotation [pitch, yaw, roll]"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Actor label"))
+			.Optional(TEXT("use_cache"), TEXT("boolean"), TEXT("Check cache before generating"), TEXT("true"))
+			.Optional(TEXT("auto_save"), TEXT("boolean"), TEXT("Auto-save to /Game/Generated/ even without explicit save_path"), TEXT("true"))
 			.Build());
+
+	// ---- Cache management actions ----
+	RegisterCacheActions(Registry);
 }
 
 // ============================================================================
@@ -531,54 +549,11 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateParametricMesh(const
 	Result->SetNumberField(TEXT("triangle_count"), TriCount);
 	Result->SetBoolField(TEXT("had_booleans"), bHadBooleans);
 
-	// Handle pool storage
-	FString HandleName;
-	if (Params->TryGetStringField(TEXT("handle"), HandleName) && !HandleName.IsEmpty())
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, FString::Printf(TEXT("parametric:%s"), *Type),
+		TEXT("create_parametric_mesh"), TEXT("Parametric"));
+	if (!FinalErr.IsEmpty())
 	{
-		FString CreateErr;
-		if (!Pool->CreateHandle(HandleName, FString::Printf(TEXT("internal:parametric:%s"), *Type), CreateErr))
-		{
-			return FMonolithActionResult::Error(CreateErr);
-		}
-		UDynamicMesh* HandleMesh = Pool->GetHandle(HandleName, CreateErr);
-		if (HandleMesh)
-		{
-			HandleMesh->SetMesh(Mesh->GetMeshRef());
-		}
-		Result->SetStringField(TEXT("handle"), HandleName);
-	}
-
-	// Save to asset
-	FString SavePath;
-	if (Params->TryGetStringField(TEXT("save_path"), SavePath) && !SavePath.IsEmpty())
-	{
-		bool bOverwrite = Params->HasField(TEXT("overwrite")) ? Params->GetBoolField(TEXT("overwrite")) : false;
-		FString SaveErr;
-		if (!SaveMeshToAsset(Mesh, SavePath, bOverwrite, SaveErr))
-		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Mesh generated (%d tris) but save failed: %s"), TriCount, *SaveErr));
-		}
-		Result->SetStringField(TEXT("save_path"), SavePath);
-
-		// Place in scene if requested
-		bool bPlace = Params->HasField(TEXT("place_in_scene")) ? Params->GetBoolField(TEXT("place_in_scene")) : false;
-		if (bPlace)
-		{
-			FVector Location = FVector::ZeroVector;
-			MonolithMeshUtils::ParseVector(Params, TEXT("location"), Location);
-			FRotator Rotation = FRotator::ZeroRotator;
-			MonolithMeshUtils::ParseRotator(Params, TEXT("rotation"), Rotation);
-			FString Label;
-			Params->TryGetStringField(TEXT("label"), Label);
-			bool bSnapToFloor = !Params->HasField(TEXT("snap_to_floor")) || Params->GetBoolField(TEXT("snap_to_floor"));
-
-			AActor* Actor = PlaceMeshInScene(SavePath, Location, Rotation, Label, bSnapToFloor);
-			if (Actor)
-			{
-				Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
-				Result->SetBoolField(TEXT("snapped_to_floor"), bSnapToFloor);
-			}
-		}
+		return FMonolithActionResult::Error(FinalErr);
 	}
 
 	return FMonolithActionResult::Success(Result);
@@ -691,53 +666,11 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateHorrorProp(const TSh
 	Result->SetNumberField(TEXT("seed"), Seed);
 	Result->SetBoolField(TEXT("had_booleans"), bHadBooleans);
 
-	// Handle pool storage
-	FString HandleName;
-	if (Params->TryGetStringField(TEXT("handle"), HandleName) && !HandleName.IsEmpty())
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, FString::Printf(TEXT("horror:%s"), *Type),
+		TEXT("create_horror_prop"), TEXT("Horror"));
+	if (!FinalErr.IsEmpty())
 	{
-		FString CreateErr;
-		if (!Pool->CreateHandle(HandleName, FString::Printf(TEXT("internal:horror:%s"), *Type), CreateErr))
-		{
-			return FMonolithActionResult::Error(CreateErr);
-		}
-		UDynamicMesh* HandleMesh = Pool->GetHandle(HandleName, CreateErr);
-		if (HandleMesh)
-		{
-			HandleMesh->SetMesh(Mesh->GetMeshRef());
-		}
-		Result->SetStringField(TEXT("handle"), HandleName);
-	}
-
-	// Save to asset
-	FString SavePath;
-	if (Params->TryGetStringField(TEXT("save_path"), SavePath) && !SavePath.IsEmpty())
-	{
-		bool bOverwrite = Params->HasField(TEXT("overwrite")) ? Params->GetBoolField(TEXT("overwrite")) : false;
-		FString SaveErr;
-		if (!SaveMeshToAsset(Mesh, SavePath, bOverwrite, SaveErr))
-		{
-			return FMonolithActionResult::Error(FString::Printf(TEXT("Mesh generated (%d tris) but save failed: %s"), TriCount, *SaveErr));
-		}
-		Result->SetStringField(TEXT("save_path"), SavePath);
-
-		bool bPlace = Params->HasField(TEXT("place_in_scene")) ? Params->GetBoolField(TEXT("place_in_scene")) : false;
-		if (bPlace)
-		{
-			FVector Location = FVector::ZeroVector;
-			MonolithMeshUtils::ParseVector(Params, TEXT("location"), Location);
-			FRotator Rotation = FRotator::ZeroRotator;
-			MonolithMeshUtils::ParseRotator(Params, TEXT("rotation"), Rotation);
-			FString Label;
-			Params->TryGetStringField(TEXT("label"), Label);
-			bool bSnapToFloor = !Params->HasField(TEXT("snap_to_floor")) || Params->GetBoolField(TEXT("snap_to_floor"));
-
-			AActor* Actor = PlaceMeshInScene(SavePath, Location, Rotation, Label, bSnapToFloor);
-			if (Actor)
-			{
-				Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
-				Result->SetBoolField(TEXT("snapped_to_floor"), bSnapToFloor);
-			}
-		}
+		return FMonolithActionResult::Error(FinalErr);
 	}
 
 	return FMonolithActionResult::Success(Result);
@@ -1560,9 +1493,66 @@ TArray<FVector2D> FMonolithMeshProceduralActions::InsetPolygon2D(const TArray<FV
 }
 
 FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mesh, const TSharedPtr<FJsonObject>& Params,
-	const TSharedPtr<FJsonObject>& Result, const FString& HandleCategory)
+	const TSharedPtr<FJsonObject>& Result, const FString& HandleCategory,
+	const FString& ActionName, const FString& Category)
 {
-	// Handle pool storage
+	// ---- Cache check (before any generation work is consumed) ----
+	bool bUseCache = !ActionName.IsEmpty() && (!Params->HasField(TEXT("use_cache")) || Params->GetBoolField(TEXT("use_cache")));
+	bool bAutoSave = !Params->HasField(TEXT("auto_save")) || Params->GetBoolField(TEXT("auto_save"));
+	FString Hash;
+
+	if (bUseCache)
+	{
+		Hash = FMonolithMeshProceduralCache::Get().ComputeHash(ActionName, Params);
+		FString CachedPath;
+		if (FMonolithMeshProceduralCache::Get().TryGetCached(Hash, CachedPath))
+		{
+			// Cache hit — skip save, reuse existing asset
+			Result->SetBoolField(TEXT("cache_hit"), true);
+			Result->SetStringField(TEXT("save_path"), CachedPath);
+			Result->SetStringField(TEXT("hash"), Hash);
+
+			// Still store in handle pool if requested (load from the saved StaticMesh)
+			FString HandleName;
+			if (Params->TryGetStringField(TEXT("handle"), HandleName) && !HandleName.IsEmpty())
+			{
+				FString CreateErr;
+				if (Pool->CreateHandle(HandleName, FString::Printf(TEXT("internal:%s"), *HandleCategory), CreateErr))
+				{
+					UDynamicMesh* HandleMesh = Pool->GetHandle(HandleName, CreateErr);
+					if (HandleMesh && Mesh)
+					{
+						HandleMesh->SetMesh(Mesh->GetMeshRef());
+					}
+				}
+				Result->SetStringField(TEXT("handle"), HandleName);
+			}
+
+			// Still place in scene if requested
+			bool bPlace = Params->HasField(TEXT("place_in_scene")) ? Params->GetBoolField(TEXT("place_in_scene")) : false;
+			if (bPlace)
+			{
+				FVector Location = FVector::ZeroVector;
+				MonolithMeshUtils::ParseVector(Params, TEXT("location"), Location);
+				FRotator Rotation = FRotator::ZeroRotator;
+				MonolithMeshUtils::ParseRotator(Params, TEXT("rotation"), Rotation);
+				FString Label;
+				Params->TryGetStringField(TEXT("label"), Label);
+				bool bSnapToFloor = !Params->HasField(TEXT("snap_to_floor")) || Params->GetBoolField(TEXT("snap_to_floor"));
+
+				AActor* Actor = PlaceMeshInScene(CachedPath, Location, Rotation, Label, bSnapToFloor);
+				if (Actor)
+				{
+					Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
+					Result->SetBoolField(TEXT("snapped_to_floor"), bSnapToFloor);
+				}
+			}
+
+			return FString(); // success — cache hit
+		}
+	}
+
+	// ---- Handle pool storage ----
 	FString HandleName;
 	if (Params->TryGetStringField(TEXT("handle"), HandleName) && !HandleName.IsEmpty())
 	{
@@ -1579,9 +1569,41 @@ FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mes
 		Result->SetStringField(TEXT("handle"), HandleName);
 	}
 
-	// Save to asset
+	// ---- Determine save path (explicit, auto-generated, or none) ----
 	FString SavePath;
-	if (Params->TryGetStringField(TEXT("save_path"), SavePath) && !SavePath.IsEmpty())
+	Params->TryGetStringField(TEXT("save_path"), SavePath);
+
+	if (SavePath.IsEmpty() && bAutoSave && !Category.IsEmpty())
+	{
+		// Auto-generate an organized save path
+		FString Type;
+		Result->TryGetStringField(TEXT("type"), Type);
+		if (Type.IsEmpty()) Type = HandleCategory;
+
+		float Width = 100.0f, Depth = 100.0f, Height = 100.0f;
+		const TSharedPtr<FJsonObject>* DimObj = nullptr;
+		if (Params->TryGetObjectField(TEXT("dimensions"), DimObj) && DimObj && (*DimObj).IsValid())
+		{
+			if ((*DimObj)->HasField(TEXT("width")))  Width  = static_cast<float>((*DimObj)->GetNumberField(TEXT("width")));
+			if ((*DimObj)->HasField(TEXT("depth")))  Depth  = static_cast<float>((*DimObj)->GetNumberField(TEXT("depth")));
+			if ((*DimObj)->HasField(TEXT("height"))) Height = static_cast<float>((*DimObj)->GetNumberField(TEXT("height")));
+		}
+		// Also check top-level fields used by some actions (e.g. terrain size)
+		if (Result->HasField(TEXT("size_x"))) Width = static_cast<float>(Result->GetNumberField(TEXT("size_x")));
+		if (Result->HasField(TEXT("size_y"))) Depth = static_cast<float>(Result->GetNumberField(TEXT("size_y")));
+
+		int32 Seed = -1;
+		if (Params->HasField(TEXT("seed")))
+		{
+			Seed = static_cast<int32>(Params->GetNumberField(TEXT("seed")));
+		}
+
+		FString HashForPath = bUseCache ? Hash : FMonolithMeshProceduralCache::Get().ComputeHash(ActionName, Params);
+		SavePath = FMonolithMeshProceduralCache::Get().GenerateAutoPath(Category, Type, Width, Depth, Height, HashForPath, Seed);
+	}
+
+	// ---- Save to asset ----
+	if (!SavePath.IsEmpty())
 	{
 		bool bOverwrite = Params->HasField(TEXT("overwrite")) ? Params->GetBoolField(TEXT("overwrite")) : false;
 		FString SaveErr;
@@ -1591,6 +1613,20 @@ FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mes
 			return FString::Printf(TEXT("Mesh generated (%d tris) but save failed: %s"), TriCount, *SaveErr);
 		}
 		Result->SetStringField(TEXT("save_path"), SavePath);
+
+		// Register in cache
+		if (bUseCache && !Hash.IsEmpty())
+		{
+			FString Type;
+			Result->TryGetStringField(TEXT("type"), Type);
+			int32 TriCount = 0;
+			if (Result->HasField(TEXT("triangle_count")))
+			{
+				TriCount = static_cast<int32>(Result->GetNumberField(TEXT("triangle_count")));
+			}
+			FMonolithMeshProceduralCache::Get().Register(Hash, SavePath, ActionName, Type, TriCount, Params);
+			Result->SetStringField(TEXT("hash"), Hash);
+		}
 
 		// Place in scene if requested
 		bool bPlace = Params->HasField(TEXT("place_in_scene")) ? Params->GetBoolField(TEXT("place_in_scene")) : false;
@@ -1612,6 +1648,8 @@ FString FMonolithMeshProceduralActions::FinalizeProceduralMesh(UDynamicMesh* Mes
 			}
 		}
 	}
+
+	Result->SetBoolField(TEXT("cache_hit"), false);
 
 	return FString(); // empty = success
 }
@@ -1972,7 +2010,8 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateStructure(const TSha
 	Result->SetBoolField(TEXT("had_booleans"), bHadBooleans);
 	Result->SetBoolField(TEXT("add_trim"), bAddTrim);
 
-	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("structure"));
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("structure"),
+		TEXT("create_structure"), TEXT("Structure"));
 	if (!FinalErr.IsEmpty())
 	{
 		return FMonolithActionResult::Error(FinalErr);
@@ -2092,7 +2131,8 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateBuildingShell(const 
 	Result->SetNumberField(TEXT("footprint_points"), Footprint.Num());
 	Result->SetNumberField(TEXT("triangle_count"), TriCount);
 
-	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("building_shell"));
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("building_shell"),
+		TEXT("create_building_shell"), TEXT("BuildingShell"));
 	if (!FinalErr.IsEmpty())
 	{
 		return FMonolithActionResult::Error(FinalErr);
@@ -2482,7 +2522,8 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateMaze(const TSharedPt
 	Result->SetBoolField(TEXT("merged"), bMerge);
 	Result->SetArrayField(TEXT("layout"), LayoutValues);
 
-	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("maze"));
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("maze"),
+		TEXT("create_maze"), TEXT("Maze"));
 	if (!FinalErr.IsEmpty())
 	{
 		return FMonolithActionResult::Error(FinalErr);
@@ -2557,7 +2598,8 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreatePipeNetwork(const TS
 	Result->SetNumberField(TEXT("triangle_count"), TriCount);
 	Result->SetBoolField(TEXT("ball_joints"), bBallJoints);
 
-	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("pipe_network"));
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("pipe_network"),
+		TEXT("create_pipe_network"), TEXT("Pipe"));
 	if (!FinalErr.IsEmpty())
 	{
 		return FMonolithActionResult::Error(FinalErr);
@@ -2803,12 +2845,85 @@ FMonolithActionResult FMonolithMeshProceduralActions::CreateTerrainPatch(const T
 	Result->SetNumberField(TEXT("seed"), Seed);
 	Result->SetNumberField(TEXT("triangle_count"), TriCount);
 
-	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("terrain_patch"));
+	FString FinalErr = FinalizeProceduralMesh(Mesh, Params, Result, TEXT("terrain_patch"),
+		TEXT("create_terrain_patch"), TEXT("Terrain"));
 	if (!FinalErr.IsEmpty())
 	{
 		return FMonolithActionResult::Error(FinalErr);
 	}
 
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// Cache Management Actions
+// ============================================================================
+
+void FMonolithMeshProceduralActions::RegisterCacheActions(FMonolithToolRegistry& Registry)
+{
+	Registry.RegisterAction(TEXT("mesh"), TEXT("list_cached_meshes"),
+		TEXT("List all procedural meshes in the cache manifest with metadata (type, path, triangle count, age)."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshProceduralActions::ListCachedMeshes),
+		FParamSchemaBuilder()
+			.Optional(TEXT("type"), TEXT("string"), TEXT("Filter by mesh type (e.g. chair, barricade, room)"))
+			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max entries to return"), TEXT("100"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("mesh"), TEXT("clear_cache"),
+		TEXT("Clear the procedural mesh cache. Removes manifest entries (assets remain on disk). Optionally filter by type."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshProceduralActions::ClearCacheAction),
+		FParamSchemaBuilder()
+			.Optional(TEXT("type"), TEXT("string"), TEXT("Only clear entries of this type (e.g. chair). Omit to clear all."))
+			.Build());
+
+	Registry.RegisterAction(TEXT("mesh"), TEXT("validate_cache"),
+		TEXT("Validate the cache manifest against disk. Removes entries whose assets no longer exist."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshProceduralActions::ValidateCacheAction),
+		FParamSchemaBuilder()
+			.Build());
+
+	Registry.RegisterAction(TEXT("mesh"), TEXT("get_cache_stats"),
+		TEXT("Get cache statistics: entry counts by type, total entries."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshProceduralActions::GetCacheStatsAction),
+		FParamSchemaBuilder()
+			.Build());
+}
+
+FMonolithActionResult FMonolithMeshProceduralActions::ListCachedMeshes(const TSharedPtr<FJsonObject>& Params)
+{
+	FString TypeFilter;
+	Params->TryGetStringField(TEXT("type"), TypeFilter);
+	int32 Limit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 100;
+
+	TSharedPtr<FJsonObject> Result = FMonolithMeshProceduralCache::Get().ListEntries(TypeFilter, Limit);
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithMeshProceduralActions::ClearCacheAction(const TSharedPtr<FJsonObject>& Params)
+{
+	FString TypeFilter;
+	Params->TryGetStringField(TEXT("type"), TypeFilter);
+
+	int32 Removed = FMonolithMeshProceduralCache::Get().ClearCache(TypeFilter);
+
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetNumberField(TEXT("removed_count"), Removed);
+	Result->SetStringField(TEXT("filter"), TypeFilter.IsEmpty() ? TEXT("all") : TypeFilter);
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithMeshProceduralActions::ValidateCacheAction(const TSharedPtr<FJsonObject>& Params)
+{
+	int32 Removed = FMonolithMeshProceduralCache::Get().ValidateCache();
+
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetNumberField(TEXT("stale_entries_removed"), Removed);
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithMeshProceduralActions::GetCacheStatsAction(const TSharedPtr<FJsonObject>& Params)
+{
+	TSharedPtr<FJsonObject> Result = FMonolithMeshProceduralCache::Get().GetStats();
 	return FMonolithActionResult::Success(Result);
 }
 
