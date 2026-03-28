@@ -12,6 +12,8 @@
 #include "MonolithMeshTemplateActions.h"
 #include "MonolithMeshLevelDesignActions.h"
 #include "MonolithMeshVolumeActions.h"
+#include "MonolithMeshTechArtActions.h"
+#include "MonolithMeshHorrorDesignActions.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithSettings.h"
@@ -19,6 +21,7 @@
 
 #if WITH_GEOMETRYSCRIPT
 #include "MonolithMeshOperationActions.h"
+#include "MonolithMeshProceduralActions.h"
 #include "MonolithMeshHandlePool.h"
 #endif
 
@@ -45,6 +48,8 @@ void FMonolithMeshModule::StartupModule()
 	FMonolithMeshTemplateActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithMeshLevelDesignActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithMeshVolumeActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithMeshTechArtActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithMeshHorrorDesignActions::RegisterActions(FMonolithToolRegistry::Get());
 
 #if WITH_GEOMETRYSCRIPT
 	HandlePool = NewObject<UMonolithMeshHandlePool>();
@@ -52,6 +57,9 @@ void FMonolithMeshModule::StartupModule()
 	HandlePool->Initialize();
 	FMonolithMeshOperationActions::SetHandlePool(HandlePool);
 	FMonolithMeshOperationActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithMeshProceduralActions::SetHandlePool(HandlePool);
+	FMonolithMeshProceduralActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithMeshTechArtActions::SetHandlePool(HandlePool);
 
 	// Clean up handle pool on PreExit — before GC destroys UObjects.
 	// ShutdownModule runs too late; by then the UObject array may be torn down.
@@ -62,6 +70,8 @@ void FMonolithMeshModule::StartupModule()
 			HandlePool->Teardown();
 			HandlePool->RemoveFromRoot();
 			FMonolithMeshOperationActions::SetHandlePool(nullptr);
+			FMonolithMeshProceduralActions::SetHandlePool(nullptr);
+			FMonolithMeshTechArtActions::SetHandlePool(nullptr);
 			HandlePool = nullptr;
 		}
 	});
