@@ -1098,6 +1098,16 @@ FMonolithActionResult FMonolithGASTagActions::HandleValidateTagConsistency(const
 
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef NativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		// Only load GAS-relevant Blueprints (abilities, effects)
+		if (!ParentPath.Contains(TEXT("GameplayAbility")) && !ParentPath.Contains(TEXT("GameplayEffect")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !BP->GeneratedClass) continue;

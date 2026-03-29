@@ -1116,7 +1116,15 @@ FMonolithActionResult FMonolithGASEffectActions::HandleListGameplayEffects(const
 
 	for (const FAssetData& Asset : Assets)
 	{
-		// Load and check if it's a GE Blueprint
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef NativeParentTag = Asset.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		if (!ParentPath.Contains(TEXT("GameplayEffect")))
+		{
+			continue;
+		}
+
 		UBlueprint* BP = Cast<UBlueprint>(Asset.GetAsset());
 		if (!BP || !MonolithGAS::IsGameplayEffectBlueprint(BP))
 		{
@@ -3207,6 +3215,15 @@ FMonolithActionResult FMonolithGASEffectActions::HandleGetEffectInteractionMatri
 
 		for (const FAssetData& Asset : AllBlueprints)
 		{
+			// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+			FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag(FName("ParentClass"));
+			FAssetTagValueRef NativeParentTag = Asset.TagsAndValues.FindTag(FName("NativeParentClass"));
+			FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+			if (!ParentPath.Contains(TEXT("GameplayEffect")))
+			{
+				continue;
+			}
+
 			UBlueprint* BP = Cast<UBlueprint>(Asset.GetAsset());
 			if (!BP || !MonolithGAS::IsGameplayEffectBlueprint(BP)) continue;
 

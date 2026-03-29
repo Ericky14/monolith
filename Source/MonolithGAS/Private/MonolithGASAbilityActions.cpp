@@ -806,7 +806,15 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleListAbilities(const TSha
 
 	for (const FAssetData& AssetData : Assets)
 	{
-		// Load the Blueprint to check parent class
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef NativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		if (!ParentPath.Contains(TEXT("GameplayAbility")))
+		{
+			continue;
+		}
+
 		UBlueprint* BP = Cast<UBlueprint>(AssetData.GetAsset());
 		if (!BP || !BP->GeneratedClass)
 		{
@@ -3216,6 +3224,15 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleFindAbilitiesByTag(const
 
 	for (const FAssetData& Asset : AllBlueprints)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef NativeParentTag = Asset.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		if (!ParentPath.Contains(TEXT("GameplayAbility")))
+		{
+			continue;
+		}
+
 		UBlueprint* BP = Cast<UBlueprint>(Asset.GetAsset());
 		if (!BP || !MonolithGAS::IsAbilityBlueprint(BP)) continue;
 
@@ -3319,6 +3336,15 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleGetAbilityTagMatrix(cons
 
 		for (const FAssetData& Asset : AllBlueprints)
 		{
+			// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+			FAssetTagValueRef ParentTag = Asset.TagsAndValues.FindTag(FName("ParentClass"));
+			FAssetTagValueRef NativeParentTag = Asset.TagsAndValues.FindTag(FName("NativeParentClass"));
+			FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+			if (!ParentPath.Contains(TEXT("GameplayAbility")))
+			{
+				continue;
+			}
+
 			UBlueprint* BP = Cast<UBlueprint>(Asset.GetAsset());
 			if (BP && MonolithGAS::IsAbilityBlueprint(BP))
 			{

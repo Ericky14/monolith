@@ -169,6 +169,15 @@ FMonolithActionResult FMonolithGASInspectActions::HandleExportGASManifest(const 
 	TArray<TSharedPtr<FJsonValue>> AbilitiesArr;
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef AbParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef AbNativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString AbParentPath = AbParentTag.IsSet() ? AbParentTag.GetValue() : (AbNativeParentTag.IsSet() ? AbNativeParentTag.GetValue() : TEXT(""));
+		if (!AbParentPath.Contains(TEXT("GameplayAbility")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !MonolithGAS::IsAbilityBlueprint(BP)) continue;
@@ -232,6 +241,15 @@ FMonolithActionResult FMonolithGASInspectActions::HandleExportGASManifest(const 
 
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef GEParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef GENativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString GEParentPath = GEParentTag.IsSet() ? GEParentTag.GetValue() : (GENativeParentTag.IsSet() ? GENativeParentTag.GetValue() : TEXT(""));
+		if (!GEParentPath.Contains(TEXT("GameplayEffect")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !MonolithGAS::IsGameplayEffectBlueprint(BP)) continue;
@@ -359,6 +377,15 @@ FMonolithActionResult FMonolithGASInspectActions::HandleExportGASManifest(const 
 	TArray<TSharedPtr<FJsonValue>> AttributeSetsArr;
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ASParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef ASNativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ASParentPath = ASParentTag.IsSet() ? ASParentTag.GetValue() : (ASNativeParentTag.IsSet() ? ASNativeParentTag.GetValue() : TEXT(""));
+		if (!ASParentPath.Contains(TEXT("AttributeSet")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !MonolithGAS::IsAttributeSetBlueprint(BP)) continue;
@@ -411,6 +438,15 @@ FMonolithActionResult FMonolithGASInspectActions::HandleExportGASManifest(const 
 	TArray<TSharedPtr<FJsonValue>> ASCArr;
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ASCParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef ASCNativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ASCParentPath = ASCParentTag.IsSet() ? ASCParentTag.GetValue() : (ASCNativeParentTag.IsSet() ? ASCNativeParentTag.GetValue() : TEXT(""));
+		if (!ASCParentPath.Contains(TEXT("AbilitySystemComponent")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !BP->GeneratedClass) continue;
@@ -448,6 +484,15 @@ FMonolithActionResult FMonolithGASInspectActions::HandleExportGASManifest(const 
 
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef CueParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef CueNativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString CueParentPath = CueParentTag.IsSet() ? CueParentTag.GetValue() : (CueNativeParentTag.IsSet() ? CueNativeParentTag.GetValue() : TEXT(""));
+		if (!CueParentPath.Contains(TEXT("GameplayCueNotify")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !BP->GeneratedClass) continue;

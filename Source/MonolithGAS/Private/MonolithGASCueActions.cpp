@@ -579,15 +579,15 @@ FMonolithActionResult FMonolithGASCueActions::HandleListGameplayCues(const TShar
 
 	for (const FAssetData& AssetData : AllBPs)
 	{
-		// Quick-check via NativeParentClass tag in asset registry before loading
-		FString ParentClassPath;
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
 		FAssetTagValueRef ParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
-		if (ParentTag.IsSet())
+		FAssetTagValueRef NativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentClassPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		if (!ParentClassPath.Contains(TEXT("GameplayCueNotify")))
 		{
-			ParentClassPath = ParentTag.GetValue();
+			continue;
 		}
 
-		// Load and check
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !BP->GeneratedClass) continue;
@@ -810,6 +810,15 @@ FMonolithActionResult FMonolithGASCueActions::HandleFindCueTriggers(const TShare
 
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef ParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef NativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString ParentPath = ParentTag.IsSet() ? ParentTag.GetValue() : (NativeParentTag.IsSet() ? NativeParentTag.GetValue() : TEXT(""));
+		if (!ParentPath.Contains(TEXT("GameplayEffect")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !MonolithGAS::IsGameplayEffectBlueprint(BP)) continue;
@@ -904,6 +913,15 @@ FMonolithActionResult FMonolithGASCueActions::HandleValidateCueCoverage(const TS
 	TSet<FString> CueTagsOnEffects;
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef GEParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef GENativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString GEParentPath = GEParentTag.IsSet() ? GEParentTag.GetValue() : (GENativeParentTag.IsSet() ? GENativeParentTag.GetValue() : TEXT(""));
+		if (!GEParentPath.Contains(TEXT("GameplayEffect")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !MonolithGAS::IsGameplayEffectBlueprint(BP)) continue;
@@ -923,6 +941,15 @@ FMonolithActionResult FMonolithGASCueActions::HandleValidateCueCoverage(const TS
 	TMap<FString, FString> CueHandlerMap; // tag -> asset path
 	for (const FAssetData& AssetData : AllBPs)
 	{
+		// Pre-filter via AR tags BEFORE loading — prevents crash from loading ControlRig/AnimBP/etc.
+		FAssetTagValueRef GCNParentTag = AssetData.TagsAndValues.FindTag(FName("ParentClass"));
+		FAssetTagValueRef GCNNativeParentTag = AssetData.TagsAndValues.FindTag(FName("NativeParentClass"));
+		FString GCNParentPath = GCNParentTag.IsSet() ? GCNParentTag.GetValue() : (GCNNativeParentTag.IsSet() ? GCNNativeParentTag.GetValue() : TEXT(""));
+		if (!GCNParentPath.Contains(TEXT("GameplayCueNotify")))
+		{
+			continue;
+		}
+
 		UObject* Obj = AssetData.GetAsset();
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
 		if (!BP || !BP->GeneratedClass) continue;
