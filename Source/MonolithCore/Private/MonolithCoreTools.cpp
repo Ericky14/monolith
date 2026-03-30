@@ -26,6 +26,12 @@ static const TArray<FKnownOptionalModule>& GetKnownOptionalModules()
 			TEXT("bEnableGAS"),
 			TEXT("gas_query"),
 			TEXT("MonolithGAS module provides Gameplay Ability System tooling (attributes, abilities, effects, cues). Requires GameplayAbilities plugin (engine-bundled).")
+		},
+		{
+			TEXT("combograph"),
+			TEXT("bEnableComboGraph"),
+			TEXT("combograph_query"),
+			TEXT("MonolithComboGraph module provides combo graph tooling (nodes, edges, transitions, effects). Requires ComboGraph plugin (Fab marketplace).")
 		}
 	};
 	return Modules;

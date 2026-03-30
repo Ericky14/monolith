@@ -35,7 +35,7 @@ if (-not $SkipBuild) {
 
     # Set env var so Build.cs files skip optional dependency detection
     $env:MONOLITH_RELEASE_BUILD = "1"
-    Write-Host "    MONOLITH_RELEASE_BUILD=1 (BA/GBA forced off)" -ForegroundColor DarkGray
+    Write-Host "    MONOLITH_RELEASE_BUILD=1 (BA/GBA/ComboGraph forced off)" -ForegroundColor DarkGray
 
     try {
         & $UBT LeviathanEditor Win64 Development "-Project=$UProject" -waitmutex

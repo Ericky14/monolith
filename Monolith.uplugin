@@ -127,6 +127,11 @@
 			"Name": "MonolithGAS",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MonolithComboGraph",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }

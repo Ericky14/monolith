@@ -169,6 +169,11 @@ public:
 			  ToolTip="When enabled, registers gas_query actions for Gameplay Ability System manipulation. Requires GameplayAbilities plugin (engine-bundled)."))
 	bool bEnableGAS = true;
 
+	UPROPERTY(config, EditAnywhere, Category="Modules|Optional",
+		meta=(DisplayName="Enable ComboGraph Integration",
+			  ToolTip="When enabled and ComboGraph is installed, registers combograph_query actions for combo graph manipulation."))
+	bool bEnableComboGraph = true;
+
 	// --- Modules|Mesh ---
 
 	UPROPERTY(config, EditAnywhere, Category="Modules|Mesh",
