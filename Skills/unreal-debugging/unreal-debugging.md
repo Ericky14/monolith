@@ -5,57 +5,32 @@ description: Use when debugging Unreal Engine issues via Monolith MCP — build 
 
 # Unreal Debugging Workflows
 
-You have access to **Monolith** with 13 editor diagnostic actions via `editor_query()`.
-
-## Discovery
-
-```
-monolith_discover({ namespace: "editor" })
-```
-
-## Asset Path Conventions
-
-All asset paths follow UE content browser format (no .uasset extension):
-
-| Location | Path Format | Example |
-|----------|------------|--------|
-| Project Content/ | `/Game/Path/To/Asset` | `/Game/Materials/M_Rock` |
-| Project Plugins/ | `/PluginName/Path/To/Asset` | `/MassProjectile/Materials/M_Example` |
-| Engine Plugins | `/PluginName/Path/To/Asset` | `/Niagara/DefaultAssets/SystemAssets/NS_Default` |
-
-**Note:** For project plugins, the path starts with the plugin name as configured in the .uplugin file's "MountPoint" — which defaults to `/<PluginName>/`. Most plugins mount their Content/ folder there directly.
+**13 editor diagnostic actions** via `editor_query()`. Discover with `monolith_discover({ namespace: "editor" })`.
 
 ## Action Reference
 
 | Action | Purpose |
 |--------|---------|
-| `trigger_build` | Trigger a Live Coding compile (use instead of UBT when editor is open) |
-| `live_compile` | Alias for `trigger_build`. Params: `wait` (bool, optional) — block until compile finishes |
-| `get_build_errors` | Get compile errors/warnings. Params: `since` (float), `category` (string), `compile_only` (bool) |
-| `get_build_status` | Check if a build is in progress / succeeded / failed |
-| `get_build_summary` | Summary stats across recent builds |
+| `trigger_build` / `live_compile` | Live Coding compile. `live_compile` accepts `wait` (bool) |
+| `get_build_errors` | Compile errors/warnings. Params: `since`, `category`, `compile_only` |
+| `get_build_status` | Build in progress / succeeded / failed |
+| `get_build_summary` | Stats across recent builds |
 | `search_build_output` | Search build output by pattern |
-| `get_recent_logs` | Get the N most recent log entries |
-| `search_logs` | Search logs by pattern, category, and verbosity |
-| `tail_log` | Get the latest log entries (like `tail -f`) |
-| `get_log_categories` | List all active log categories |
-| `get_log_stats` | Error/warning/log counts by category |
-| `get_compile_output` | Structured compile report: result, time, log lines, error/warning counts, patch status |
-| `get_crash_context` | Get crash dump details, stack trace, and system info |
+| `get_recent_logs` | N most recent log entries |
+| `search_logs` | Search by pattern, category, verbosity |
+| `tail_log` | Latest log entries (like `tail -f`) |
+| `get_log_categories` | All active log categories |
+| `get_log_stats` | Error/warning counts by category |
+| `get_compile_output` | Structured compile report: result, time, errors, patch status |
+| `get_crash_context` | Crash dump, stack trace, system info |
 
-## Debugging Workflow
+## Workflows
 
-### After modifying C++ code
+### After modifying C++
 ```
 editor_query({ action: "trigger_build", params: {} })
-// Wait ~10 seconds for Live Coding
-editor_query({ action: "get_build_status", params: {} })
+// Wait ~10s for Live Coding
 editor_query({ action: "get_build_errors", params: {} })
-```
-
-### Get structured compile results
-```
-editor_query({ action: "get_compile_output", params: {} })
 ```
 
 ### Investigate a crash
@@ -69,38 +44,16 @@ editor_query({ action: "search_logs", params: { pattern: "Fatal", limit: 20 } })
 editor_query({ action: "search_logs", params: { pattern: "MyActor", category: "LogTemp", verbosity: "Warning" } })
 ```
 
-### Check overall log health
-```
-editor_query({ action: "get_log_stats", params: {} })
-editor_query({ action: "get_log_categories", params: {} })
-```
+## Common Error Patterns
 
-## Common UE Error Patterns
-
-### Linker errors (LNK2019 / LNK2001)
-- Missing module dependency in `.Build.cs` — check `PublicDependencyModuleNames`
-- `DeveloperSettings` is a separate module from `Engine`
-- `UObject` constructors must use `ObjectInitializer` signature
-
-### Include path errors
-Use source lookup to find the correct header:
-```
-source_query({ action: "search", params: { query: "FMyStruct", type: "class" } })
-source_query({ action: "get_include_path", params: { symbol: "FMyStruct" } })
-```
-
-### Live Coding limitations
-- **Header changes** (new members, class layout changes) require editor restart + full UBT build
-- Live Coding only handles `.cpp` body changes reliably
-- After triggering build, wait ~10 seconds before checking status
-
-### Package/Asset errors
-- `CreatePackage` with same path returns existing in-memory package — use unique names
-- Asset paths use content browser format with no file extension — see Asset Path Conventions above
+- **LNK2019/LNK2001:** Missing module in `.Build.cs`. `DeveloperSettings` is separate from `Engine`.
+- **Include path errors:** Use `source_query("search_source", ...)` to find correct header. Note: `get_include_path` does NOT exist as an action.
+- **Live Coding limits:** Header changes (new members, class layout) require editor restart + UBT build. Only `.cpp` body changes work.
+- **Package errors:** `CreatePackage` with same path returns existing in-memory package.
 
 ## Tips
 
-- Log buffer holds 10,000 entries and 5 build histories
+- Log buffer: 10,000 entries, 5 build histories
 - Use `search_logs` with category filters to reduce noise
-- `get_build_summary` shows trends across recent builds — useful for spotting regressions
-- Combine with `source_query` to look up engine internals when errors reference engine code
+- `get_build_summary` shows trends -- useful for spotting regressions
+- Combine with `source_query` for engine internal errors
