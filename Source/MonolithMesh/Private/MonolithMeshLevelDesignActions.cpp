@@ -306,6 +306,16 @@ void FMonolithMeshLevelDesignActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Optional(TEXT("properties"), TEXT("array"), TEXT("Array of property names to read (default: all visible)"))
 			.Optional(TEXT("component_class"), TEXT("string"), TEXT("Filter by component class name"))
 			.Build());
+
+	Registry.RegisterAction(TEXT("mesh"), TEXT("set_component_property"),
+		TEXT("Set arbitrary component properties via FProperty reflection. Supports float, int, bool, string, enum, vector, rotator, color, and struct types."),
+		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetActorComponentProperties),
+		FParamSchemaBuilder()
+			.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
+			.Required(TEXT("properties"), TEXT("object"), TEXT("Object mapping property names to values (e.g. {\"BottomRadius\": 0.63, \"AtmosphereHeight\": 0.6})"))
+			.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (default: root component)"))
+			.Optional(TEXT("component_class"), TEXT("string"), TEXT("Filter by component class name"))
+			.Build());
 }
 
 // ============================================================================
@@ -1517,6 +1527,156 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 	Result->SetStringField(TEXT("component_class"), CompClass->GetName());
 	Result->SetNumberField(TEXT("property_count"), PropCount);
 	Result->SetObjectField(TEXT("properties"), PropsObj);
+
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorComponentProperties(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorName;
+	if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required param: actor_name"));
+	}
+
+	const TSharedPtr<FJsonObject>* PropertiesObj = nullptr;
+	if (!Params->TryGetObjectField(TEXT("properties"), PropertiesObj) || !PropertiesObj || !(*PropertiesObj).IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required param: properties (must be an object mapping property names to values)"));
+	}
+
+	FString Error;
+	AActor* Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
+	if (!Actor)
+	{
+		return FMonolithActionResult::Error(Error);
+	}
+
+	// Find target component (same logic as GetActorComponentProperties)
+	UActorComponent* TargetComp = nullptr;
+	FString ComponentName;
+	FString ComponentClass;
+	Params->TryGetStringField(TEXT("component_name"), ComponentName);
+	Params->TryGetStringField(TEXT("component_class"), ComponentClass);
+
+	if (!ComponentName.IsEmpty())
+	{
+		TArray<UActorComponent*> AllComps;
+		Actor->GetComponents(AllComps);
+		for (UActorComponent* Comp : AllComps)
+		{
+			if (Comp->GetFName().ToString() == ComponentName)
+			{
+				TargetComp = Comp;
+				break;
+			}
+		}
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Component '%s' not found on actor '%s'"), *ComponentName, *ActorName));
+		}
+	}
+	else if (!ComponentClass.IsEmpty())
+	{
+		TArray<UActorComponent*> AllComps;
+		Actor->GetComponents(AllComps);
+		for (UActorComponent* Comp : AllComps)
+		{
+			if (Comp->GetClass()->GetName() == ComponentClass || Comp->GetClass()->GetName() == (TEXT("U") + ComponentClass))
+			{
+				TargetComp = Comp;
+				break;
+			}
+		}
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("No component of class '%s' found on actor '%s'"), *ComponentClass, *ActorName));
+		}
+	}
+	else
+	{
+		TargetComp = Actor->GetRootComponent();
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Actor '%s' has no root component"), *ActorName));
+		}
+	}
+
+	LevelDesignHelpers::FScopedMeshTransaction Transaction(FText::FromString(TEXT("Monolith: Set Component Properties")));
+
+	UClass* CompClass = TargetComp->GetClass();
+	TArray<TSharedPtr<FJsonValue>> PropertiesSet;
+	TArray<TSharedPtr<FJsonValue>> Errors;
+
+	// Build property lookup map
+	TMap<FString, FProperty*> PropertyMap;
+	for (TFieldIterator<FProperty> PropIt(CompClass); PropIt; ++PropIt)
+	{
+		PropertyMap.Add((*PropIt)->GetName(), *PropIt);
+	}
+
+	for (const auto& Pair : (*PropertiesObj)->Values)
+	{
+		const FString& PropName = Pair.Key;
+		const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+		FProperty** FoundProp = PropertyMap.Find(PropName);
+		if (!FoundProp || !*FoundProp)
+		{
+			auto ErrObj = MakeShared<FJsonObject>();
+			ErrObj->SetStringField(TEXT("property"), PropName);
+			ErrObj->SetStringField(TEXT("error"), TEXT("Property not found on component"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrObj));
+			continue;
+		}
+
+		FProperty* Prop = *FoundProp;
+		void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(TargetComp);
+
+		// Notify the actor/component that we're about to change it (for undo support)
+		TargetComp->Modify();
+
+		FString SetError;
+		if (LevelDesignHelpers::JsonToProperty(Prop, ValuePtr, JsonVal, SetError))
+		{
+			PropertiesSet.Add(MakeShared<FJsonValueString>(PropName));
+		}
+		else
+		{
+			auto ErrObj = MakeShared<FJsonObject>();
+			ErrObj->SetStringField(TEXT("property"), PropName);
+			ErrObj->SetStringField(TEXT("error"), SetError);
+			Errors.Add(MakeShared<FJsonValueObject>(ErrObj));
+		}
+	}
+
+	if (PropertiesSet.Num() == 0)
+	{
+		Transaction.Cancel();
+		if (Errors.Num() > 0)
+		{
+			auto ErrResult = MakeShared<FJsonObject>();
+			ErrResult->SetArrayField(TEXT("errors"), Errors);
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to set any properties. First error: %s"),
+				*Errors[0]->AsObject()->GetStringField(TEXT("error"))));
+		}
+		return FMonolithActionResult::Error(TEXT("No properties specified in the properties object"));
+	}
+
+	// Mark the component as needing re-registration so changes take effect
+	TargetComp->MarkRenderStateDirty();
+	Actor->MarkPackageDirty();
+
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
+	Result->SetStringField(TEXT("component_name"), TargetComp->GetFName().ToString());
+	Result->SetStringField(TEXT("component_class"), CompClass->GetName());
+	Result->SetNumberField(TEXT("properties_set"), PropertiesSet.Num());
+	Result->SetArrayField(TEXT("set"), PropertiesSet);
+	if (Errors.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("errors"), Errors);
+	}
 
 	return FMonolithActionResult::Success(Result);
 }

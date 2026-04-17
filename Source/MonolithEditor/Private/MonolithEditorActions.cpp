@@ -520,6 +520,17 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
 		MakeShared<FJsonObject>());
 
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_viewport"),
+		TEXT("Capture the active editor viewport as a PNG screenshot. Returns the file path. Optionally set camera position/rotation before capture."),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureViewport),
+		FParamSchemaBuilder()
+			.OptionalDiskPath(TEXT("output_path"), TEXT("Output file path (default: Saved/Screenshots/Monolith/viewport_<timestamp>.png)"))
+			.Optional(TEXT("camera_location"), TEXT("array"), TEXT("Camera location [x,y,z] to set before capture"))
+			.Optional(TEXT("camera_rotation"), TEXT("array"), TEXT("Camera rotation [pitch,yaw,roll] to set before capture"))
+			.Optional(TEXT("fov"), TEXT("number"), TEXT("Camera FOV to set before capture"))
+			.Optional(TEXT("resolution"), TEXT("array"), TEXT("Output resolution [width,height] (default: viewport size)"))
+			.Build());
+
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_system_gif"),
 		TEXT("Capture a Niagara system as a sequence of PNG frames with optional GIF encoding via ffmpeg or python"),
 		FMonolithActionHandler::CreateStatic(&HandleCaptureSystemGif),
@@ -2652,6 +2663,142 @@ FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(
 
 	Result->SetNumberField(TEXT("fov"), FOV);
 	Result->SetBoolField(TEXT("realtime"), ViewportClient->IsRealtime());
+
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleCaptureViewport(
+	const TSharedPtr<FJsonObject>& Params)
+{
+	FLevelEditorModule* LevelEditor = FModuleManager::GetModulePtr<FLevelEditorModule>("LevelEditor");
+	if (!LevelEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("LevelEditor module not loaded"));
+	}
+
+	TSharedPtr<SLevelViewport> LevelViewport = LevelEditor->GetFirstActiveLevelViewport();
+	if (!LevelViewport.IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("No active level viewport found"));
+	}
+
+	FLevelEditorViewportClient& ViewportClient = LevelViewport->GetLevelViewportClient();
+	FViewport* Viewport = LevelViewport->GetActiveViewport();
+	if (!Viewport)
+	{
+		return FMonolithActionResult::Error(TEXT("No active viewport render target"));
+	}
+
+	// Optionally set camera position/rotation/FOV before capture
+	const TArray<TSharedPtr<FJsonValue>>* LocArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("camera_location"), LocArr) && LocArr && LocArr->Num() >= 3)
+	{
+		FVector NewLoc((*LocArr)[0]->AsNumber(), (*LocArr)[1]->AsNumber(), (*LocArr)[2]->AsNumber());
+		ViewportClient.SetViewLocation(NewLoc);
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* RotArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("camera_rotation"), RotArr) && RotArr && RotArr->Num() >= 3)
+	{
+		FRotator NewRot((*RotArr)[0]->AsNumber(), (*RotArr)[1]->AsNumber(), (*RotArr)[2]->AsNumber());
+		ViewportClient.SetViewRotation(NewRot);
+	}
+
+	double NewFOV;
+	if (Params->TryGetNumberField(TEXT("fov"), NewFOV))
+	{
+		ViewportClient.ViewFOV = (float)NewFOV;
+	}
+
+	// Force the viewport to render a full frame so ReadPixels has valid data
+	ViewportClient.Invalidate();
+	Viewport->Draw(false);
+	FlushRenderingCommands();
+
+	FIntPoint ViewportSize = Viewport->GetSizeXY();
+	if (ViewportSize.X == 0 || ViewportSize.Y == 0)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Viewport size is %dx%d — viewport may be minimized or not visible"),
+				ViewportSize.X, ViewportSize.Y));
+	}
+
+	int32 ResX = ViewportSize.X;
+	int32 ResY = ViewportSize.Y;
+
+	const TArray<TSharedPtr<FJsonValue>>* ResArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("resolution"), ResArr) && ResArr && ResArr->Num() >= 2)
+	{
+		ResX = (int32)(*ResArr)[0]->AsNumber();
+		ResY = (int32)(*ResArr)[1]->AsNumber();
+	}
+
+	// Read pixels from the viewport
+	TArray<FColor> Bitmap;
+	bool bReadOk = Viewport->ReadPixels(Bitmap);
+
+	if (!bReadOk || Bitmap.Num() == 0)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Failed to read pixels from viewport (%dx%d, bitmap size: %d)"),
+				ViewportSize.X, ViewportSize.Y, Bitmap.Num()));
+	}
+
+	// Generate output path
+	FString OutputPath;
+	if (Params->HasField(TEXT("output_path")))
+	{
+		OutputPath = Params->GetStringField(TEXT("output_path"));
+		if (FPaths::IsRelative(OutputPath))
+		{
+			OutputPath = FPaths::ProjectDir() / OutputPath;
+		}
+	}
+	else
+	{
+		FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+		OutputPath = FPaths::ProjectDir() / TEXT("Saved/Screenshots/Monolith") /
+			FString::Printf(TEXT("viewport_%s.png"), *Timestamp);
+	}
+
+	// Ensure output directory exists
+	FString Dir = FPaths::GetPath(OutputPath);
+	IFileManager::Get().MakeDirectory(*Dir, true);
+
+	// Save as PNG
+	FImage Image;
+	Image.Init(ViewportSize.X, ViewportSize.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+	FMemory::Memcpy(Image.RawData.GetData(), Bitmap.GetData(), Bitmap.Num() * sizeof(FColor));
+
+	bool bSaveOk = FImageUtils::SaveImageAutoFormat(*OutputPath, Image);
+
+	if (!bSaveOk)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save screenshot to: %s"), *OutputPath));
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("output_file"), OutputPath);
+
+	TSharedPtr<FJsonObject> ResObj = MakeShared<FJsonObject>();
+	ResObj->SetNumberField(TEXT("width"), ViewportSize.X);
+	ResObj->SetNumberField(TEXT("height"), ViewportSize.Y);
+	Result->SetObjectField(TEXT("resolution"), ResObj);
+
+	FVector CamLoc = ViewportClient.GetViewLocation();
+	FRotator CamRot = ViewportClient.GetViewRotation();
+	TArray<TSharedPtr<FJsonValue>> CamLocArr;
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.X));
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.Y));
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.Z));
+	Result->SetArrayField(TEXT("camera_location"), CamLocArr);
+
+	TArray<TSharedPtr<FJsonValue>> CamRotArr;
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Pitch));
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Yaw));
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Roll));
+	Result->SetArrayField(TEXT("camera_rotation"), CamRotArr);
 
 	return FMonolithActionResult::Success(Result);
 }
