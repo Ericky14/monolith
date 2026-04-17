@@ -35,12 +35,14 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/SavePackage.h"
 #include "LevelEditorViewport.h"
+#include "LevelEditor.h"
+#include "SLevelViewport.h"
 #include "PixelFormat.h"
 #include "ObjectTools.h"
 
 // --- Compile state ---
 
-FMonolithLogCapture* FMonolithEditorActions::CachedLogCapture = nullptr;
+FMonolithLogCapture *FMonolithEditorActions::CachedLogCapture = nullptr;
 double FMonolithEditorActions::LastCompileTimestamp = 0.0;
 FString FMonolithEditorActions::LastCompileResult = TEXT("none");
 bool FMonolithEditorActions::bIsCompiling = false;
@@ -49,7 +51,7 @@ double FMonolithEditorActions::LastCompileEndTimestamp = 0.0;
 
 // --- Log capture ---
 
-void FMonolithLogCapture::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category)
+void FMonolithLogCapture::Serialize(const TCHAR *V, ELogVerbosity::Type Verbosity, const FName &Category)
 {
 	FScopeLock ScopeLock(&Lock);
 
@@ -72,14 +74,25 @@ void FMonolithLogCapture::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosit
 
 	switch (Verbosity)
 	{
-	case ELogVerbosity::Fatal: ++TotalFatal; break;
-	case ELogVerbosity::Error: ++TotalError; break;
-	case ELogVerbosity::Warning: ++TotalWarning; break;
+	case ELogVerbosity::Fatal:
+		++TotalFatal;
+		break;
+	case ELogVerbosity::Error:
+		++TotalError;
+		break;
+	case ELogVerbosity::Warning:
+		++TotalWarning;
+		break;
 	case ELogVerbosity::Display:
-	case ELogVerbosity::Log: ++TotalLog; break;
+	case ELogVerbosity::Log:
+		++TotalLog;
+		break;
 	case ELogVerbosity::Verbose:
-	case ELogVerbosity::VeryVerbose: ++TotalVerbose; break;
-	default: break;
+	case ELogVerbosity::VeryVerbose:
+		++TotalVerbose;
+		break;
+	default:
+		break;
 	}
 }
 
@@ -101,7 +114,7 @@ TArray<FMonolithLogEntry> FMonolithLogCapture::GetRecentEntries(int32 Count) con
 	return Result;
 }
 
-TArray<FMonolithLogEntry> FMonolithLogCapture::SearchEntries(const FString& Pattern, const FString& CategoryFilter, ELogVerbosity::Type MaxVerbosity, int32 Limit) const
+TArray<FMonolithLogEntry> FMonolithLogCapture::SearchEntries(const FString &Pattern, const FString &CategoryFilter, ELogVerbosity::Type MaxVerbosity, int32 Limit) const
 {
 	FScopeLock ScopeLock(&Lock);
 	TArray<FMonolithLogEntry> Result;
@@ -113,11 +126,14 @@ TArray<FMonolithLogEntry> FMonolithLogCapture::SearchEntries(const FString& Patt
 	for (int32 i = 0; i < Total && Result.Num() < Limit; ++i)
 	{
 		int32 Idx = (Start + i) % Total;
-		const FMonolithLogEntry& Entry = RingBuffer[Idx];
+		const FMonolithLogEntry &Entry = RingBuffer[Idx];
 
-		if (Entry.Verbosity > MaxVerbosity) continue;
-		if (!CategoryFilter.IsEmpty() && Entry.Category != FName(*CategoryFilter)) continue;
-		if (!PatternLower.IsEmpty() && !Entry.Message.ToLower().Contains(PatternLower)) continue;
+		if (Entry.Verbosity > MaxVerbosity)
+			continue;
+		if (!CategoryFilter.IsEmpty() && Entry.Category != FName(*CategoryFilter))
+			continue;
+		if (!PatternLower.IsEmpty() && !Entry.Message.ToLower().Contains(PatternLower))
+			continue;
 
 		Result.Add(Entry);
 	}
@@ -128,7 +144,7 @@ TArray<FString> FMonolithLogCapture::GetActiveCategories() const
 {
 	FScopeLock ScopeLock(&Lock);
 	TSet<FString> Categories;
-	for (const FMonolithLogEntry& Entry : RingBuffer)
+	for (const FMonolithLogEntry &Entry : RingBuffer)
 	{
 		Categories.Add(Entry.Category.ToString());
 	}
@@ -140,12 +156,18 @@ int32 FMonolithLogCapture::GetCountByVerbosity(ELogVerbosity::Type Verbosity) co
 	FScopeLock ScopeLock(&Lock);
 	switch (Verbosity)
 	{
-	case ELogVerbosity::Fatal: return TotalFatal;
-	case ELogVerbosity::Error: return TotalError;
-	case ELogVerbosity::Warning: return TotalWarning;
-	case ELogVerbosity::Log: return TotalLog;
-	case ELogVerbosity::Verbose: return TotalVerbose;
-	default: return 0;
+	case ELogVerbosity::Fatal:
+		return TotalFatal;
+	case ELogVerbosity::Error:
+		return TotalError;
+	case ELogVerbosity::Warning:
+		return TotalWarning;
+	case ELogVerbosity::Log:
+		return TotalLog;
+	case ELogVerbosity::Verbose:
+		return TotalVerbose;
+	default:
+		return 0;
 	}
 }
 
@@ -155,7 +177,7 @@ int32 FMonolithLogCapture::GetTotalCount() const
 	return TotalFatal + TotalError + TotalWarning + TotalLog + TotalVerbose;
 }
 
-TArray<FMonolithLogEntry> FMonolithLogCapture::GetEntriesSince(double SinceTimestamp, const TArray<FName>& CategoryFilter, ELogVerbosity::Type MaxVerbosity, int32 Limit) const
+TArray<FMonolithLogEntry> FMonolithLogCapture::GetEntriesSince(double SinceTimestamp, const TArray<FName> &CategoryFilter, ELogVerbosity::Type MaxVerbosity, int32 Limit) const
 {
 	FScopeLock ScopeLock(&Lock);
 	TArray<FMonolithLogEntry> Result;
@@ -166,11 +188,14 @@ TArray<FMonolithLogEntry> FMonolithLogCapture::GetEntriesSince(double SinceTimes
 	for (int32 i = 0; i < Total && Result.Num() < Limit; ++i)
 	{
 		int32 Idx = (Start + i) % Total;
-		const FMonolithLogEntry& Entry = RingBuffer[Idx];
+		const FMonolithLogEntry &Entry = RingBuffer[Idx];
 
-		if (Entry.Timestamp < SinceTimestamp) continue;
-		if (Entry.Verbosity > MaxVerbosity) continue;
-		if (CategoryFilter.Num() > 0 && !CategoryFilter.Contains(Entry.Category)) continue;
+		if (Entry.Timestamp < SinceTimestamp)
+			continue;
+		if (Entry.Verbosity > MaxVerbosity)
+			continue;
+		if (CategoryFilter.Num() > 0 && !CategoryFilter.Contains(Entry.Category))
+			continue;
 
 		Result.Add(Entry);
 	}
@@ -187,7 +212,7 @@ int32 FMonolithLogCapture::CountErrorsSince(double SinceTimestamp) const
 	for (int32 i = 0; i < Total; ++i)
 	{
 		int32 Idx = (Start + i) % Total;
-		const FMonolithLogEntry& Entry = RingBuffer[Idx];
+		const FMonolithLogEntry &Entry = RingBuffer[Idx];
 		if (Entry.Timestamp >= SinceTimestamp && Entry.Verbosity <= ELogVerbosity::Error)
 		{
 			++Count;
@@ -202,29 +227,43 @@ static FString VerbosityToString(ELogVerbosity::Type V)
 {
 	switch (V)
 	{
-	case ELogVerbosity::Fatal: return TEXT("fatal");
-	case ELogVerbosity::Error: return TEXT("error");
-	case ELogVerbosity::Warning: return TEXT("warning");
-	case ELogVerbosity::Display: return TEXT("display");
-	case ELogVerbosity::Log: return TEXT("log");
-	case ELogVerbosity::Verbose: return TEXT("verbose");
-	case ELogVerbosity::VeryVerbose: return TEXT("very_verbose");
-	default: return TEXT("unknown");
+	case ELogVerbosity::Fatal:
+		return TEXT("fatal");
+	case ELogVerbosity::Error:
+		return TEXT("error");
+	case ELogVerbosity::Warning:
+		return TEXT("warning");
+	case ELogVerbosity::Display:
+		return TEXT("display");
+	case ELogVerbosity::Log:
+		return TEXT("log");
+	case ELogVerbosity::Verbose:
+		return TEXT("verbose");
+	case ELogVerbosity::VeryVerbose:
+		return TEXT("very_verbose");
+	default:
+		return TEXT("unknown");
 	}
 }
 
-static ELogVerbosity::Type StringToVerbosity(const FString& S)
+static ELogVerbosity::Type StringToVerbosity(const FString &S)
 {
-	if (S == TEXT("fatal")) return ELogVerbosity::Fatal;
-	if (S == TEXT("error")) return ELogVerbosity::Error;
-	if (S == TEXT("warning")) return ELogVerbosity::Warning;
-	if (S == TEXT("display")) return ELogVerbosity::Display;
-	if (S == TEXT("verbose")) return ELogVerbosity::Verbose;
-	if (S == TEXT("very_verbose")) return ELogVerbosity::VeryVerbose;
+	if (S == TEXT("fatal"))
+		return ELogVerbosity::Fatal;
+	if (S == TEXT("error"))
+		return ELogVerbosity::Error;
+	if (S == TEXT("warning"))
+		return ELogVerbosity::Warning;
+	if (S == TEXT("display"))
+		return ELogVerbosity::Display;
+	if (S == TEXT("verbose"))
+		return ELogVerbosity::Verbose;
+	if (S == TEXT("very_verbose"))
+		return ELogVerbosity::VeryVerbose;
 	return ELogVerbosity::Log;
 }
 
-static TSharedPtr<FJsonObject> LogEntryToJson(const FMonolithLogEntry& Entry)
+static TSharedPtr<FJsonObject> LogEntryToJson(const FMonolithLogEntry &Entry)
 {
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetNumberField(TEXT("timestamp"), Entry.Timestamp);
@@ -239,7 +278,7 @@ static TSharedPtr<FJsonObject> LogEntryToJson(const FMonolithLogEntry& Entry)
 void FMonolithEditorActions::InitLiveCodingDelegate()
 {
 #if PLATFORM_WINDOWS
-	ILiveCodingModule* LC = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
+	ILiveCodingModule *LC = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
 	if (LC)
 	{
 		LC->GetOnPatchCompleteDelegate().AddStatic(&FMonolithEditorActions::OnLiveCodingPatchComplete);
@@ -257,7 +296,8 @@ void FMonolithEditorActions::OnLiveCodingPatchComplete()
 
 static FString TimestampToIso(double PlatformSeconds)
 {
-	if (PlatformSeconds <= 0.0) return TEXT("never");
+	if (PlatformSeconds <= 0.0)
+		return TEXT("never");
 	FDateTime Now = FDateTime::UtcNow();
 	double CurrentSeconds = FPlatformTime::Seconds();
 	double Delta = CurrentSeconds - PlatformSeconds;
@@ -267,168 +307,179 @@ static FString TimestampToIso(double PlatformSeconds)
 
 // --- Registration ---
 
-void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
+void FMonolithEditorActions::RegisterActions(FMonolithLogCapture *LogCapture)
 {
 	CachedLogCapture = LogCapture;
-	FMonolithToolRegistry& Registry = FMonolithToolRegistry::Get();
+	FMonolithToolRegistry &Registry = FMonolithToolRegistry::Get();
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("trigger_build"),
-		TEXT("Trigger a Live Coding compile"),
-		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
-		FParamSchemaBuilder()
-			.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
-			.Build());
+							TEXT("Trigger a Live Coding compile"),
+							FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
+							FParamSchemaBuilder()
+								.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("live_compile"),
-		TEXT("Trigger a Live Coding compile (alias for trigger_build)"),
-		FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
-		FParamSchemaBuilder()
-			.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
-			.Build());
+							TEXT("Trigger a Live Coding compile (alias for trigger_build)"),
+							FMonolithActionHandler::CreateStatic(&HandleTriggerBuild),
+							FParamSchemaBuilder()
+								.Optional(TEXT("wait"), TEXT("bool"), TEXT("Block until compile finishes"), TEXT("false"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_errors"),
-		TEXT("Get build errors and warnings"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildErrors),
-		FParamSchemaBuilder()
-			.Optional(TEXT("since"), TEXT("number"), TEXT("Only errors from the last N seconds ago"))
-			.Optional(TEXT("category"), TEXT("string"), TEXT("Filter to a specific log category"))
-			.Optional(TEXT("compile_only"), TEXT("bool"), TEXT("Filter to compile categories only"), TEXT("false"))
-			.Build());
+							TEXT("Get build errors and warnings"),
+							FMonolithActionHandler::CreateStatic(&HandleGetBuildErrors),
+							FParamSchemaBuilder()
+								.Optional(TEXT("since"), TEXT("number"), TEXT("Only errors from the last N seconds ago"))
+								.Optional(TEXT("category"), TEXT("string"), TEXT("Filter to a specific log category"))
+								.Optional(TEXT("compile_only"), TEXT("bool"), TEXT("Filter to compile categories only"), TEXT("false"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_status"),
-		TEXT("Check compile status: compiling, last_result, last_compile_time, errors_since_compile, patch_applied"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildStatus),
-		MakeShared<FJsonObject>());
+							TEXT("Check compile status: compiling, last_result, last_compile_time, errors_since_compile, patch_applied"),
+							FMonolithActionHandler::CreateStatic(&HandleGetBuildStatus),
+							MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_build_summary"),
-		TEXT("Get summary of last build (errors, warnings, time)"),
-		FMonolithActionHandler::CreateStatic(&HandleGetBuildSummary),
-		MakeShared<FJsonObject>());
+							TEXT("Get summary of last build (errors, warnings, time)"),
+							FMonolithActionHandler::CreateStatic(&HandleGetBuildSummary),
+							MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("search_build_output"),
-		TEXT("Search build log output by pattern"),
-		FMonolithActionHandler::CreateStatic(&HandleSearchBuildOutput),
-		FParamSchemaBuilder()
-			.Required(TEXT("pattern"), TEXT("string"), TEXT("Search pattern"))
-			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
-			.Build());
+							TEXT("Search build log output by pattern"),
+							FMonolithActionHandler::CreateStatic(&HandleSearchBuildOutput),
+							FParamSchemaBuilder()
+								.Required(TEXT("pattern"), TEXT("string"), TEXT("Search pattern"))
+								.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_recent_logs"),
-		TEXT("Get recent editor log entries"),
-		FMonolithActionHandler::CreateStatic(&HandleGetRecentLogs),
-		FParamSchemaBuilder()
-			.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of entries to return"), TEXT("50"))
-			.Build());
+							TEXT("Get recent editor log entries"),
+							FMonolithActionHandler::CreateStatic(&HandleGetRecentLogs),
+							FParamSchemaBuilder()
+								.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of entries to return"), TEXT("50"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("search_logs"),
-		TEXT("Search log entries by category, verbosity, and text pattern"),
-		FMonolithActionHandler::CreateStatic(&HandleSearchLogs),
-		FParamSchemaBuilder()
-			.Optional(TEXT("pattern"), TEXT("string"), TEXT("Text pattern to search for"))
-			.Optional(TEXT("category"), TEXT("string"), TEXT("Log category filter"))
-			.Optional(TEXT("verbosity"), TEXT("string"), TEXT("Max verbosity level (error, warning, log, verbose)"))
-			.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
-			.Build());
+							TEXT("Search log entries by category, verbosity, and text pattern"),
+							FMonolithActionHandler::CreateStatic(&HandleSearchLogs),
+							FParamSchemaBuilder()
+								.Optional(TEXT("pattern"), TEXT("string"), TEXT("Text pattern to search for"))
+								.Optional(TEXT("category"), TEXT("string"), TEXT("Log category filter"))
+								.Optional(TEXT("verbosity"), TEXT("string"), TEXT("Max verbosity level (error, warning, log, verbose)"))
+								.Optional(TEXT("limit"), TEXT("integer"), TEXT("Max results to return"), TEXT("100"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("tail_log"),
-		TEXT("Get last N log lines"),
-		FMonolithActionHandler::CreateStatic(&HandleTailLog),
-		FParamSchemaBuilder()
-			.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of lines to return"), TEXT("50"))
-			.Build());
+							TEXT("Get last N log lines"),
+							FMonolithActionHandler::CreateStatic(&HandleTailLog),
+							FParamSchemaBuilder()
+								.Optional(TEXT("count"), TEXT("integer"), TEXT("Number of lines to return"), TEXT("50"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_log_categories"),
-		TEXT("List active log categories"),
-		FMonolithActionHandler::CreateStatic(&HandleGetLogCategories),
-		MakeShared<FJsonObject>());
+							TEXT("List active log categories"),
+							FMonolithActionHandler::CreateStatic(&HandleGetLogCategories),
+							MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_log_stats"),
-		TEXT("Get log statistics by verbosity level"),
-		FMonolithActionHandler::CreateStatic(&HandleGetLogStats),
-		MakeShared<FJsonObject>());
+							TEXT("Get log statistics by verbosity level"),
+							FMonolithActionHandler::CreateStatic(&HandleGetLogStats),
+							MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_compile_output"),
-		TEXT("Get structured compile report: result, time, log lines from compile categories, error/warning counts, patch status"),
-		FMonolithActionHandler::CreateStatic(&HandleGetCompileOutput),
-		MakeShared<FJsonObject>());
+							TEXT("Get structured compile report: result, time, log lines from compile categories, error/warning counts, patch status"),
+							FMonolithActionHandler::CreateStatic(&HandleGetCompileOutput),
+							MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_crash_context"),
-		TEXT("Get last crash/ensure context information"),
-		FMonolithActionHandler::CreateStatic(&HandleGetCrashContext),
-		MakeShared<FJsonObject>());
+							TEXT("Get last crash/ensure context information"),
+							FMonolithActionHandler::CreateStatic(&HandleGetCrashContext),
+							MakeShared<FJsonObject>());
 
 	// --- Capture actions ---
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_scene_preview"),
-		TEXT("Capture a screenshot of an asset (Niagara, material) rendered in a preview scene"),
-		FMonolithActionHandler::CreateStatic(&HandleCaptureScenePreview),
-		FParamSchemaBuilder()
-			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to preview"))
-			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material"))
-			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Mesh for materials: plane, sphere, cube"), TEXT("plane"))
-			.Optional(TEXT("seek_time"), TEXT("number"), TEXT("Advance Niagara sim to this time (seconds)"), TEXT("0.0"))
-			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
-			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
-			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output PNG path (absolute or relative to project)"))
-			.Build());
+							TEXT("Capture a screenshot of an asset (Niagara, material) rendered in a preview scene"),
+							FMonolithActionHandler::CreateStatic(&HandleCaptureScenePreview),
+							FParamSchemaBuilder()
+								.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to preview"))
+								.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material"))
+								.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Mesh for materials: plane, sphere, cube"), TEXT("plane"))
+								.Optional(TEXT("seek_time"), TEXT("number"), TEXT("Advance Niagara sim to this time (seconds)"), TEXT("0.0"))
+								.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
+								.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
+								.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output PNG path (absolute or relative to project)"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_sequence_frames"),
-		TEXT("Capture multiple frames of an animated effect at specified timestamps"),
-		FMonolithActionHandler::CreateStatic(&HandleCaptureSequenceFrames),
-		FParamSchemaBuilder()
-			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to preview"))
-			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara"))
-			.Required(TEXT("timestamps"), TEXT("array"), TEXT("Array of capture times in seconds"))
-			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
-			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
-			.Optional(TEXT("output_dir"), TEXT("string"), TEXT("Output directory for frame PNGs"))
-			.Optional(TEXT("filename_prefix"), TEXT("string"), TEXT("Prefix for frame files"), TEXT("frame"))
-			.Build());
+							TEXT("Capture multiple frames of an animated effect at specified timestamps"),
+							FMonolithActionHandler::CreateStatic(&HandleCaptureSequenceFrames),
+							FParamSchemaBuilder()
+								.Required(TEXT("asset_path"), TEXT("string"), TEXT("Asset path to preview"))
+								.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara"))
+								.Required(TEXT("timestamps"), TEXT("array"), TEXT("Array of capture times in seconds"))
+								.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
+								.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
+								.Optional(TEXT("output_dir"), TEXT("string"), TEXT("Output directory for frame PNGs"))
+								.Optional(TEXT("filename_prefix"), TEXT("string"), TEXT("Prefix for frame files"), TEXT("frame"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("import_texture"),
-		TEXT("Import an external image as a UTexture2D with configurable settings"),
-		FMonolithActionHandler::CreateStatic(&HandleImportTexture),
-		FParamSchemaBuilder()
-			.Required(TEXT("source_path"), TEXT("string"), TEXT("Absolute path to source image (PNG, TGA, EXR, HDR)"))
-			.Required(TEXT("destination"), TEXT("string"), TEXT("UE asset path for imported texture"))
-			.Optional(TEXT("settings"), TEXT("object"), TEXT("{compression, srgb, tiling, max_size, lod_group}"))
-			.Build());
+							TEXT("Import an external image as a UTexture2D with configurable settings"),
+							FMonolithActionHandler::CreateStatic(&HandleImportTexture),
+							FParamSchemaBuilder()
+								.Required(TEXT("source_path"), TEXT("string"), TEXT("Absolute path to source image (PNG, TGA, EXR, HDR)"))
+								.Required(TEXT("destination"), TEXT("string"), TEXT("UE asset path for imported texture"))
+								.Optional(TEXT("settings"), TEXT("object"), TEXT("{compression, srgb, tiling, max_size, lod_group}"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("stitch_flipbook"),
-		TEXT("Stitch individual frame images into a flipbook atlas texture and import as UTexture2D"),
-		FMonolithActionHandler::CreateStatic(&HandleStitchFlipbook),
-		FParamSchemaBuilder()
-			.Required(TEXT("frame_paths"), TEXT("array"), TEXT("Ordered array of absolute file paths to frame PNGs"))
-			.Required(TEXT("dest_path"), TEXT("string"), TEXT("UE asset path for the output texture (e.g. /Game/AgentTraining/Textures/T_FB_001)"))
-			.Required(TEXT("grid"), TEXT("array"), TEXT("[columns, rows] grid layout (e.g. [4, 4] for 16 frames)"))
-			.Optional(TEXT("srgb"), TEXT("bool"), TEXT("sRGB color space (true for color, false for masks)"), TEXT("true"))
-			.Optional(TEXT("no_mipmaps"), TEXT("bool"), TEXT("Disable mipmap generation to prevent atlas bleed"), TEXT("true"))
-			.Optional(TEXT("delete_sources"), TEXT("bool"), TEXT("Delete source PNG files after successful stitch"), TEXT("true"))
-			.Optional(TEXT("lod_group"), TEXT("string"), TEXT("Texture LOD group"), TEXT("TEXTUREGROUP_Effects"))
-			.Build());
+							TEXT("Stitch individual frame images into a flipbook atlas texture and import as UTexture2D"),
+							FMonolithActionHandler::CreateStatic(&HandleStitchFlipbook),
+							FParamSchemaBuilder()
+								.Required(TEXT("frame_paths"), TEXT("array"), TEXT("Ordered array of absolute file paths to frame PNGs"))
+								.Required(TEXT("dest_path"), TEXT("string"), TEXT("UE asset path for the output texture (e.g. /Game/AgentTraining/Textures/T_FB_001)"))
+								.Required(TEXT("grid"), TEXT("array"), TEXT("[columns, rows] grid layout (e.g. [4, 4] for 16 frames)"))
+								.Optional(TEXT("srgb"), TEXT("bool"), TEXT("sRGB color space (true for color, false for masks)"), TEXT("true"))
+								.Optional(TEXT("no_mipmaps"), TEXT("bool"), TEXT("Disable mipmap generation to prevent atlas bleed"), TEXT("true"))
+								.Optional(TEXT("delete_sources"), TEXT("bool"), TEXT("Delete source PNG files after successful stitch"), TEXT("true"))
+								.Optional(TEXT("lod_group"), TEXT("string"), TEXT("Texture LOD group"), TEXT("TEXTUREGROUP_Effects"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("delete_assets"),
-		TEXT("Delete UE assets by path. Optional safety: restrict to allowed path prefixes"),
-		FMonolithActionHandler::CreateStatic(&HandleDeleteAssets),
-		FParamSchemaBuilder()
-			.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of UE asset paths to delete"))
-			.Optional(TEXT("allowed_prefixes"), TEXT("array"), TEXT("If set, only paths starting with one of these prefixes can be deleted (e.g. [\"/Game/AgentTraining/\"])"))
-			.Build());
+							TEXT("Delete UE assets by path. Optional safety: restrict to allowed path prefixes"),
+							FMonolithActionHandler::CreateStatic(&HandleDeleteAssets),
+							FParamSchemaBuilder()
+								.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of UE asset paths to delete"))
+								.Optional(TEXT("allowed_prefixes"), TEXT("array"), TEXT("If set, only paths starting with one of these prefixes can be deleted (e.g. [\"/Game/AgentTraining/\"])"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_viewport_info"),
-		TEXT("Get current editor viewport camera position, rotation, FOV, and resolution"),
-		FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
-		MakeShared<FJsonObject>());
+							TEXT("Get current editor viewport camera position, rotation, FOV, and resolution"),
+							FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
+							MakeShared<FJsonObject>());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_viewport"),
+							TEXT("Capture the active editor viewport as a PNG screenshot. Returns the file path. Optionally set camera position/rotation before capture."),
+							FMonolithActionHandler::CreateStatic(&HandleCaptureViewport),
+							FParamSchemaBuilder()
+								.Optional(TEXT("output_path"), TEXT("string"), TEXT("Output file path (default: Saved/Screenshots/Monolith/viewport_<timestamp>.png)"))
+								.Optional(TEXT("camera_location"), TEXT("array"), TEXT("Camera location [x,y,z] to set before capture"))
+								.Optional(TEXT("camera_rotation"), TEXT("array"), TEXT("Camera rotation [pitch,yaw,roll] to set before capture"))
+								.Optional(TEXT("fov"), TEXT("number"), TEXT("Camera FOV to set before capture"))
+								.Optional(TEXT("resolution"), TEXT("array"), TEXT("Output resolution [width,height] (default: viewport size)"))
+								.Build());
 
 	InitLiveCodingDelegate();
 }
 
 // --- Build actions ---
 
-FMonolithActionResult FMonolithEditorActions::HandleTriggerBuild(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleTriggerBuild(const TSharedPtr<FJsonObject> &Params)
 {
 #if PLATFORM_WINDOWS
-	ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
+	ILiveCodingModule *LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
 	if (!LiveCoding)
 	{
 		return FMonolithActionResult::Error(TEXT("Live Coding module not available"));
@@ -469,13 +520,28 @@ FMonolithActionResult FMonolithEditorActions::HandleTriggerBuild(const TSharedPt
 		FString ResultStr;
 		switch (CompileResult)
 		{
-		case ELiveCodingCompileResult::Success: ResultStr = TEXT("success"); bPatchApplied = true; break;
-		case ELiveCodingCompileResult::NoChanges: ResultStr = TEXT("no_changes"); break;
-		case ELiveCodingCompileResult::Failure: ResultStr = TEXT("failure"); break;
-		case ELiveCodingCompileResult::Cancelled: ResultStr = TEXT("cancelled"); break;
-		case ELiveCodingCompileResult::CompileStillActive: ResultStr = TEXT("compile_still_active"); break;
-		case ELiveCodingCompileResult::NotStarted: ResultStr = TEXT("not_started"); break;
-		default: ResultStr = TEXT("unknown"); break;
+		case ELiveCodingCompileResult::Success:
+			ResultStr = TEXT("success");
+			bPatchApplied = true;
+			break;
+		case ELiveCodingCompileResult::NoChanges:
+			ResultStr = TEXT("no_changes");
+			break;
+		case ELiveCodingCompileResult::Failure:
+			ResultStr = TEXT("failure");
+			break;
+		case ELiveCodingCompileResult::Cancelled:
+			ResultStr = TEXT("cancelled");
+			break;
+		case ELiveCodingCompileResult::CompileStillActive:
+			ResultStr = TEXT("compile_still_active");
+			break;
+		case ELiveCodingCompileResult::NotStarted:
+			ResultStr = TEXT("not_started");
+			break;
+		default:
+			ResultStr = TEXT("unknown");
+			break;
 		}
 		LastCompileResult = ResultStr;
 		Root->SetStringField(TEXT("result"), ResultStr);
@@ -494,7 +560,7 @@ FMonolithActionResult FMonolithEditorActions::HandleTriggerBuild(const TSharedPt
 #endif
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetBuildErrors(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetBuildErrors(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> ErrorsArr;
@@ -531,7 +597,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetBuildErrors(const TShared
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->GetEntriesSince(
 			SinceTimestamp, CategoryFilter, ELogVerbosity::Warning, 500);
 
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			if (Entry.Verbosity <= ELogVerbosity::Error)
 			{
@@ -560,12 +626,12 @@ FMonolithActionResult FMonolithEditorActions::HandleGetBuildErrors(const TShared
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetBuildStatus(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetBuildStatus(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
 #if PLATFORM_WINDOWS
-	ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
+	ILiveCodingModule *LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
 	if (LiveCoding)
 	{
 		bool bCurrentlyCompiling = LiveCoding->IsCompiling();
@@ -611,7 +677,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetBuildStatus(const TShared
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetBuildSummary(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetBuildSummary(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
@@ -629,7 +695,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetBuildSummary(const TShare
 	Root->SetNumberField(TEXT("total_warnings"), WarningCount);
 
 #if PLATFORM_WINDOWS
-	ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
+	ILiveCodingModule *LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
 	if (LiveCoding)
 	{
 		Root->SetBoolField(TEXT("compiling"), LiveCoding->IsCompiling());
@@ -640,7 +706,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetBuildSummary(const TShare
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleSearchBuildOutput(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleSearchBuildOutput(const TSharedPtr<FJsonObject> &Params)
 {
 	FString Pattern = Params->GetStringField(TEXT("pattern"));
 	if (Pattern.IsEmpty())
@@ -663,7 +729,7 @@ FMonolithActionResult FMonolithEditorActions::HandleSearchBuildOutput(const TSha
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->SearchEntries(
 			Pattern, TEXT(""), ELogVerbosity::VeryVerbose, Limit);
 
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			Matches.Add(MakeShared<FJsonValueObject>(LogEntryToJson(Entry)));
 		}
@@ -678,7 +744,7 @@ FMonolithActionResult FMonolithEditorActions::HandleSearchBuildOutput(const TSha
 
 // --- Compile output ---
 
-FMonolithActionResult FMonolithEditorActions::HandleGetCompileOutput(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetCompileOutput(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
@@ -703,11 +769,13 @@ FMonolithActionResult FMonolithEditorActions::HandleGetCompileOutput(const TShar
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->GetEntriesSince(
 			LastCompileTimestamp, CompileCategories, ELogVerbosity::VeryVerbose, 500);
 
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			LogLines.Add(MakeShared<FJsonValueObject>(LogEntryToJson(Entry)));
-			if (Entry.Verbosity <= ELogVerbosity::Error) ++ErrorCount;
-			else if (Entry.Verbosity == ELogVerbosity::Warning) ++WarningCount;
+			if (Entry.Verbosity <= ELogVerbosity::Error)
+				++ErrorCount;
+			else if (Entry.Verbosity == ELogVerbosity::Warning)
+				++WarningCount;
 		}
 	}
 
@@ -721,7 +789,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetCompileOutput(const TShar
 
 // --- Log actions ---
 
-FMonolithActionResult FMonolithEditorActions::HandleGetRecentLogs(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetRecentLogs(const TSharedPtr<FJsonObject> &Params)
 {
 	int32 Count = 100;
 	if (Params->HasField(TEXT("count")))
@@ -740,7 +808,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetRecentLogs(const TSharedP
 	if (CachedLogCapture)
 	{
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->GetRecentEntries(Count);
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			LogArr.Add(MakeShared<FJsonValueObject>(LogEntryToJson(Entry)));
 		}
@@ -752,7 +820,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetRecentLogs(const TSharedP
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleSearchLogs(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleSearchLogs(const TSharedPtr<FJsonObject> &Params)
 {
 	FString Pattern = Params->GetStringField(TEXT("pattern"));
 	FString Category = Params->GetStringField(TEXT("category"));
@@ -772,7 +840,7 @@ FMonolithActionResult FMonolithEditorActions::HandleSearchLogs(const TSharedPtr<
 	if (CachedLogCapture)
 	{
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->SearchEntries(Pattern, Category, MaxVerbosity, Limit);
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			LogArr.Add(MakeShared<FJsonValueObject>(LogEntryToJson(Entry)));
 		}
@@ -784,7 +852,7 @@ FMonolithActionResult FMonolithEditorActions::HandleSearchLogs(const TSharedPtr<
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleTailLog(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleTailLog(const TSharedPtr<FJsonObject> &Params)
 {
 	int32 Count = 50;
 	if (Params->HasField(TEXT("count")))
@@ -799,12 +867,12 @@ FMonolithActionResult FMonolithEditorActions::HandleTailLog(const TSharedPtr<FJs
 	if (CachedLogCapture)
 	{
 		TArray<FMonolithLogEntry> Entries = CachedLogCapture->GetRecentEntries(Count);
-		for (const FMonolithLogEntry& Entry : Entries)
+		for (const FMonolithLogEntry &Entry : Entries)
 		{
 			FString Line = FString::Printf(TEXT("[%s][%s] %s"),
-				*Entry.Category.ToString(),
-				*VerbosityToString(Entry.Verbosity),
-				*Entry.Message);
+										   *Entry.Category.ToString(),
+										   *VerbosityToString(Entry.Verbosity),
+										   *Entry.Message);
 			Lines.Add(MakeShared<FJsonValueString>(Line));
 		}
 	}
@@ -815,7 +883,7 @@ FMonolithActionResult FMonolithEditorActions::HandleTailLog(const TSharedPtr<FJs
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetLogCategories(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetLogCategories(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> CatArr;
@@ -824,7 +892,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetLogCategories(const TShar
 	{
 		TArray<FString> Categories = CachedLogCapture->GetActiveCategories();
 		Categories.Sort();
-		for (const FString& Cat : Categories)
+		for (const FString &Cat : Categories)
 		{
 			CatArr.Add(MakeShared<FJsonValueString>(Cat));
 		}
@@ -836,7 +904,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetLogCategories(const TShar
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetLogStats(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetLogStats(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
@@ -858,7 +926,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetLogStats(const TSharedPtr
 	return FMonolithActionResult::Success(Root);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetCrashContext(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithEditorActions::HandleGetCrashContext(const TSharedPtr<FJsonObject> &Params)
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
@@ -902,7 +970,7 @@ FMonolithActionResult FMonolithEditorActions::HandleGetCrashContext(const TShare
 		TArray<FMonolithLogEntry> ErrorEntries = CachedLogCapture->SearchEntries(
 			TEXT(""), TEXT(""), ELogVerbosity::Error, 20);
 		TArray<TSharedPtr<FJsonValue>> RecentErrors;
-		for (const FMonolithLogEntry& Entry : ErrorEntries)
+		for (const FMonolithLogEntry &Entry : ErrorEntries)
 		{
 			RecentErrors.Add(MakeShared<FJsonValueObject>(LogEntryToJson(Entry)));
 		}
@@ -915,10 +983,10 @@ FMonolithActionResult FMonolithEditorActions::HandleGetCrashContext(const TShare
 // --- Capture helpers ---
 
 bool FMonolithEditorActions::RenderAndSaveCapture(
-	USceneCaptureComponent2D* CaptureComp,
-	UTextureRenderTarget2D* RT,
+	USceneCaptureComponent2D *CaptureComp,
+	UTextureRenderTarget2D *RT,
 	int32 ResX, int32 ResY,
-	const FString& OutputPath)
+	const FString &OutputPath)
 {
 	if (!CaptureComp || !RT)
 	{
@@ -930,7 +998,7 @@ bool FMonolithEditorActions::RenderAndSaveCapture(
 
 	// Use GameThread_GetRenderTargetResource — the non-GameThread variant
 	// asserts IsInRenderingThread() which crashes when called from game thread.
-	FTextureRenderTargetResource* RTResource = RT->GameThread_GetRenderTargetResource();
+	FTextureRenderTargetResource *RTResource = RT->GameThread_GetRenderTargetResource();
 	if (!RTResource)
 	{
 		UE_LOG(LogMonolith, Error, TEXT("CaptureScenePreview: Failed to get RT resource"));
@@ -944,7 +1012,7 @@ bool FMonolithEditorActions::RenderAndSaveCapture(
 	if (!bReadOk || Pixels.Num() == 0)
 	{
 		UE_LOG(LogMonolith, Error, TEXT("CaptureScenePreview: ReadPixels failed (read=%d, count=%d)"),
-			bReadOk, Pixels.Num());
+			   bReadOk, Pixels.Num());
 		return false;
 	}
 
@@ -961,13 +1029,13 @@ bool FMonolithEditorActions::RenderAndSaveCapture(
 }
 
 bool FMonolithEditorActions::CaptureNiagaraFrame(
-	UNiagaraSystem* System,
+	UNiagaraSystem *System,
 	float SeekTime,
-	const FVector& CameraLocation,
-	const FRotator& CameraRotation,
+	const FVector &CameraLocation,
+	const FRotator &CameraRotation,
 	float FOV,
 	int32 ResX, int32 ResY,
-	const FString& OutputPath,
+	const FString &OutputPath,
 	ESceneCaptureSource CaptureSource)
 {
 	if (!System)
@@ -987,7 +1055,7 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 	PreviewScene->SetEnvironmentVisibility(false);
 
 	// Create Niagara component
-	UNiagaraComponent* NiagaraComp = NewObject<UNiagaraComponent>(
+	UNiagaraComponent *NiagaraComp = NewObject<UNiagaraComponent>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	NiagaraComp->CastShadow = false;
 	NiagaraComp->bCastDynamicShadow = false;
@@ -1003,7 +1071,7 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 
 	// Seek to desired time
 	const float SeekDelta = 1.0f / 30.0f;
-	UWorld* World = NiagaraComp->GetWorld();
+	UWorld *World = NiagaraComp->GetWorld();
 
 	if (SeekTime > 0.0f)
 	{
@@ -1025,9 +1093,9 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 		if (World)
 		{
 			World->SendAllEndOfFrameUpdates();
-			if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(World))
+			if (FNiagaraWorldManager *WorldManager = FNiagaraWorldManager::Get(World))
 			{
-				WorldManager->FlushComputeAndDeferredQueues(true);  // Wait for GPU
+				WorldManager->FlushComputeAndDeferredQueues(true); // Wait for GPU
 			}
 		}
 	}
@@ -1042,7 +1110,7 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 			World->Tick(ELevelTick::LEVELTICK_PauseTick, SeekDelta);
 			NiagaraComp->TickComponent(SeekDelta, ELevelTick::LEVELTICK_All, nullptr);
 			World->SendAllEndOfFrameUpdates();
-			if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(World))
+			if (FNiagaraWorldManager *WorldManager = FNiagaraWorldManager::Get(World))
 			{
 				WorldManager->FlushComputeAndDeferredQueues(true);
 			}
@@ -1058,14 +1126,14 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 	FlushRenderingCommands();
 
 	// Create render target
-	UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
+	UTextureRenderTarget2D *RT = NewObject<UTextureRenderTarget2D>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	RT->InitAutoFormat(ResX, ResY);
 	RT->ClearColor = FLinearColor::Black;
 	RT->UpdateResourceImmediate(true);
 
 	// Create scene capture component (same as Baker)
-	USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+	USceneCaptureComponent2D *CaptureComp = NewObject<USceneCaptureComponent2D>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	CaptureComp->bTickInEditor = false;
 	CaptureComp->SetComponentTickEnabled(false);
@@ -1094,13 +1162,13 @@ bool FMonolithEditorActions::CaptureNiagaraFrame(
 }
 
 bool FMonolithEditorActions::CaptureMaterialFrame(
-	UMaterialInterface* Material,
-	const FString& MeshType,
-	const FVector& CameraLocation,
-	const FRotator& CameraRotation,
+	UMaterialInterface *Material,
+	const FString &MeshType,
+	const FVector &CameraLocation,
+	const FRotator &CameraRotation,
 	float FOV,
 	int32 ResX, int32 ResY,
-	const FString& OutputPath,
+	const FString &OutputPath,
 	ESceneCaptureSource CaptureSource)
 {
 	if (!Material)
@@ -1132,7 +1200,7 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 		MeshPath = TEXT("/Engine/BasicShapes/Plane");
 	}
 
-	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+	UStaticMesh *Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
 	if (!Mesh)
 	{
 		UE_LOG(LogMonolith, Error, TEXT("CaptureMaterialFrame: Failed to load mesh %s"), *MeshPath);
@@ -1140,24 +1208,24 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 	}
 
 	// Create static mesh component
-	UStaticMeshComponent* MeshComp = NewObject<UStaticMeshComponent>(
+	UStaticMeshComponent *MeshComp = NewObject<UStaticMeshComponent>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	MeshComp->SetStaticMesh(Mesh);
-	MeshComp->SetMaterial(0, const_cast<UMaterialInterface*>(Material));
+	MeshComp->SetMaterial(0, const_cast<UMaterialInterface *>(Material));
 	// Scale plane to reasonable size (default is 100x100 cm)
 	MeshComp->SetRelativeScale3D(FVector(2.0f, 2.0f, 1.0f));
 
 	PreviewScene->AddComponent(MeshComp, MeshComp->GetRelativeTransform());
 
 	// Create render target
-	UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
+	UTextureRenderTarget2D *RT = NewObject<UTextureRenderTarget2D>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	RT->InitAutoFormat(ResX, ResY);
 	RT->ClearColor = FLinearColor(0.18f, 0.18f, 0.18f); // mid-gray background
 	RT->UpdateResourceImmediate(true);
 
 	// Create scene capture
-	USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+	USceneCaptureComponent2D *CaptureComp = NewObject<USceneCaptureComponent2D>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	CaptureComp->bTickInEditor = false;
 	CaptureComp->SetComponentTickEnabled(false);
@@ -1170,7 +1238,7 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 	CaptureComp->FOVAngle = FOV;
 	CaptureComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
 
-	UWorld* World = PreviewScene->GetWorld();
+	UWorld *World = PreviewScene->GetWorld();
 	CaptureComp->RegisterComponentWithWorld(World);
 	CaptureComp->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
 
@@ -1188,7 +1256,7 @@ bool FMonolithEditorActions::CaptureMaterialFrame(
 // --- Capture action handlers ---
 
 FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
 	// Parse required params
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
@@ -1215,7 +1283,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 	int32 ResX = 512, ResY = 512;
 	if (Params->HasField(TEXT("resolution")))
 	{
-		const TArray<TSharedPtr<FJsonValue>>& ResArray = Params->GetArrayField(TEXT("resolution"));
+		const TArray<TSharedPtr<FJsonValue>> &ResArray = Params->GetArrayField(TEXT("resolution"));
 		if (ResArray.Num() >= 2)
 		{
 			ResX = (int32)ResArray[0]->AsNumber();
@@ -1230,7 +1298,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 
 	if (Params->HasField(TEXT("camera")))
 	{
-		const TSharedPtr<FJsonObject>* CameraObj = nullptr;
+		const TSharedPtr<FJsonObject> *CameraObj = nullptr;
 		TSharedPtr<FJsonObject> ParsedCamera;
 
 		// Handle both object and string-serialized (Claude Code quirk)
@@ -1248,7 +1316,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		{
 			if ((*CameraObj)->HasField(TEXT("location")))
 			{
-				const TArray<TSharedPtr<FJsonValue>>& Loc = (*CameraObj)->GetArrayField(TEXT("location"));
+				const TArray<TSharedPtr<FJsonValue>> &Loc = (*CameraObj)->GetArrayField(TEXT("location"));
 				if (Loc.Num() >= 3)
 				{
 					CameraLocation = FVector(Loc[0]->AsNumber(), Loc[1]->AsNumber(), Loc[2]->AsNumber());
@@ -1256,7 +1324,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 			}
 			if ((*CameraObj)->HasField(TEXT("rotation")))
 			{
-				const TArray<TSharedPtr<FJsonValue>>& Rot = (*CameraObj)->GetArrayField(TEXT("rotation"));
+				const TArray<TSharedPtr<FJsonValue>> &Rot = (*CameraObj)->GetArrayField(TEXT("rotation"));
 				if (Rot.Num() >= 3)
 				{
 					CameraRotation = FRotator(Rot[0]->AsNumber(), Rot[1]->AsNumber(), Rot[2]->AsNumber());
@@ -1284,7 +1352,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 		FString SafeName = FPaths::GetBaseFilename(AssetPath);
 		OutputPath = FPaths::ProjectDir() / TEXT("Saved/Screenshots/Monolith") /
-			FString::Printf(TEXT("%s_%s.png"), *Timestamp, *SafeName);
+					 FString::Printf(TEXT("%s_%s.png"), *Timestamp, *SafeName);
 	}
 
 	// UE's FHttpServerModule dispatches handlers on the game thread via FTicker,
@@ -1296,25 +1364,25 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 
 	if (AssetType.Equals(TEXT("niagara"), ESearchCase::IgnoreCase))
 	{
-		UNiagaraSystem* System = LoadObject<UNiagaraSystem>(nullptr, *AssetPath);
+		UNiagaraSystem *System = LoadObject<UNiagaraSystem>(nullptr, *AssetPath);
 		if (!System)
 		{
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Failed to load Niagara system: %s"), *AssetPath));
 		}
 		bSuccess = CaptureNiagaraFrame(System, SeekTime, CameraLocation, CameraRotation,
-			FOV, ResX, ResY, OutputPath);
+									   FOV, ResX, ResY, OutputPath);
 	}
 	else if (AssetType.Equals(TEXT("material"), ESearchCase::IgnoreCase))
 	{
-		UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *AssetPath);
+		UMaterialInterface *Material = LoadObject<UMaterialInterface>(nullptr, *AssetPath);
 		if (!Material)
 		{
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Failed to load material: %s"), *AssetPath));
 		}
 		bSuccess = CaptureMaterialFrame(Material, PreviewMesh, CameraLocation, CameraRotation,
-			FOV, ResX, ResY, OutputPath);
+										FOV, ResX, ResY, OutputPath);
 	}
 	else
 	{
@@ -1344,7 +1412,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 	FString AssetType = Params->GetStringField(TEXT("asset_type"));
@@ -1361,8 +1429,8 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 
 	// Parse timestamps
 	TArray<float> Timestamps;
-	const TArray<TSharedPtr<FJsonValue>>& TimestampArray = Params->GetArrayField(TEXT("timestamps"));
-	for (const auto& Val : TimestampArray)
+	const TArray<TSharedPtr<FJsonValue>> &TimestampArray = Params->GetArrayField(TEXT("timestamps"));
+	for (const auto &Val : TimestampArray)
 	{
 		Timestamps.Add((float)Val->AsNumber());
 	}
@@ -1377,7 +1445,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 	int32 ResX = 512, ResY = 512;
 	if (Params->HasField(TEXT("resolution")))
 	{
-		const TArray<TSharedPtr<FJsonValue>>& ResArray = Params->GetArrayField(TEXT("resolution"));
+		const TArray<TSharedPtr<FJsonValue>> &ResArray = Params->GetArrayField(TEXT("resolution"));
 		if (ResArray.Num() >= 2)
 		{
 			ResX = (int32)ResArray[0]->AsNumber();
@@ -1391,7 +1459,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 	// Same camera parsing as HandleCaptureScenePreview (with string fallback)
 	if (Params->HasField(TEXT("camera")))
 	{
-		const TSharedPtr<FJsonObject>* CameraObj = nullptr;
+		const TSharedPtr<FJsonObject> *CameraObj = nullptr;
 		TSharedPtr<FJsonObject> ParsedCamera;
 		if (!Params->TryGetObjectField(TEXT("camera"), CameraObj))
 		{
@@ -1406,13 +1474,15 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 		{
 			if ((*CameraObj)->HasField(TEXT("location")))
 			{
-				const TArray<TSharedPtr<FJsonValue>>& Loc = (*CameraObj)->GetArrayField(TEXT("location"));
-				if (Loc.Num() >= 3) CameraLocation = FVector(Loc[0]->AsNumber(), Loc[1]->AsNumber(), Loc[2]->AsNumber());
+				const TArray<TSharedPtr<FJsonValue>> &Loc = (*CameraObj)->GetArrayField(TEXT("location"));
+				if (Loc.Num() >= 3)
+					CameraLocation = FVector(Loc[0]->AsNumber(), Loc[1]->AsNumber(), Loc[2]->AsNumber());
 			}
 			if ((*CameraObj)->HasField(TEXT("rotation")))
 			{
-				const TArray<TSharedPtr<FJsonValue>>& Rot = (*CameraObj)->GetArrayField(TEXT("rotation"));
-				if (Rot.Num() >= 3) CameraRotation = FRotator(Rot[0]->AsNumber(), Rot[1]->AsNumber(), Rot[2]->AsNumber());
+				const TArray<TSharedPtr<FJsonValue>> &Rot = (*CameraObj)->GetArrayField(TEXT("rotation"));
+				if (Rot.Num() >= 3)
+					CameraRotation = FRotator(Rot[0]->AsNumber(), Rot[1]->AsNumber(), Rot[2]->AsNumber());
 			}
 			if ((*CameraObj)->HasField(TEXT("fov")))
 			{
@@ -1435,7 +1505,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 		FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 		FString SafeName = FPaths::GetBaseFilename(AssetPath);
 		OutputDir = FPaths::ProjectDir() / TEXT("Saved/Screenshots/Monolith") /
-			FString::Printf(TEXT("%s_%s"), *Timestamp, *SafeName);
+					FString::Printf(TEXT("%s_%s"), *Timestamp, *SafeName);
 	}
 
 	FString FilenamePrefix = TEXT("frame");
@@ -1453,7 +1523,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 	// Already on game thread (UE HTTP server dispatches via FTicker)
 	check(IsInGameThread());
 
-	UNiagaraSystem* System = LoadObject<UNiagaraSystem>(nullptr, *AssetPath);
+	UNiagaraSystem *System = LoadObject<UNiagaraSystem>(nullptr, *AssetPath);
 	if (!System)
 	{
 		return FMonolithActionResult::Error(
@@ -1470,10 +1540,10 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 	{
 		float T = Timestamps[i];
 		FString FramePath = OutputDir / FString::Printf(TEXT("%s_%03d_t%.2f.png"),
-			*FilenamePrefix, i, T);
+														*FilenamePrefix, i, T);
 
 		bool bOk = CaptureNiagaraFrame(System, T, CameraLocation, CameraRotation,
-			FOV, ResX, ResY, FramePath);
+									   FOV, ResX, ResY, FramePath);
 
 		TSharedPtr<FJsonObject> FrameObj = MakeShared<FJsonObject>();
 		FrameObj->SetNumberField(TEXT("timestamp"), T);
@@ -1493,7 +1563,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureSequenceFrames(
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
 	FString SourcePath = Params->GetStringField(TEXT("source_path"));
 	FString Destination = Params->GetStringField(TEXT("destination"));
@@ -1511,21 +1581,21 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 	}
 
 	// Import using AssetTools
-	UAutomatedAssetImportData* ImportData = NewObject<UAutomatedAssetImportData>();
+	UAutomatedAssetImportData *ImportData = NewObject<UAutomatedAssetImportData>();
 	ImportData->Filenames.Add(SourcePath);
 	ImportData->DestinationPath = FPackageName::GetLongPackagePath(Destination);
 	ImportData->bReplaceExisting = true;
 
-	FAssetToolsModule& AssetToolsModule =
+	FAssetToolsModule &AssetToolsModule =
 		FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
-	TArray<UObject*> ImportedAssets = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
+	TArray<UObject *> ImportedAssets = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
 
 	if (ImportedAssets.Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("Import failed — no assets imported"));
 	}
 
-	UTexture2D* Texture = Cast<UTexture2D>(ImportedAssets[0]);
+	UTexture2D *Texture = Cast<UTexture2D>(ImportedAssets[0]);
 	if (!Texture)
 	{
 		return FMonolithActionResult::Error(TEXT("Imported asset is not a Texture2D"));
@@ -1534,7 +1604,7 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 	// Apply optional settings
 	if (Params->HasField(TEXT("settings")))
 	{
-		const TSharedPtr<FJsonObject>* SettingsObj;
+		const TSharedPtr<FJsonObject> *SettingsObj;
 		// Handle string-serialized params (Claude Code quirk)
 		TSharedPtr<FJsonObject> ParsedSettings;
 		if (Params->TryGetObjectField(TEXT("settings"), SettingsObj))
@@ -1556,11 +1626,16 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 			if (ParsedSettings->HasField(TEXT("compression")))
 			{
 				FString Comp = ParsedSettings->GetStringField(TEXT("compression"));
-				if (Comp == TEXT("TC_Normalmap")) Texture->CompressionSettings = TC_Normalmap;
-				else if (Comp == TEXT("TC_Masks")) Texture->CompressionSettings = TC_Masks;
-				else if (Comp == TEXT("TC_HDR")) Texture->CompressionSettings = TC_HDR;
-				else if (Comp == TEXT("TC_VectorDisplacementmap")) Texture->CompressionSettings = TC_VectorDisplacementmap;
-				else Texture->CompressionSettings = TC_Default;
+				if (Comp == TEXT("TC_Normalmap"))
+					Texture->CompressionSettings = TC_Normalmap;
+				else if (Comp == TEXT("TC_Masks"))
+					Texture->CompressionSettings = TC_Masks;
+				else if (Comp == TEXT("TC_HDR"))
+					Texture->CompressionSettings = TC_HDR;
+				else if (Comp == TEXT("TC_VectorDisplacementmap"))
+					Texture->CompressionSettings = TC_VectorDisplacementmap;
+				else
+					Texture->CompressionSettings = TC_Default;
 			}
 
 			// sRGB
@@ -1593,9 +1668,12 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 			if (ParsedSettings->HasField(TEXT("lod_group")))
 			{
 				FString LODGroup = ParsedSettings->GetStringField(TEXT("lod_group"));
-				if (LODGroup == TEXT("TEXTUREGROUP_WorldNormalMap")) Texture->LODGroup = TEXTUREGROUP_WorldNormalMap;
-				else if (LODGroup == TEXT("TEXTUREGROUP_Effects")) Texture->LODGroup = TEXTUREGROUP_Effects;
-				else if (LODGroup == TEXT("TEXTUREGROUP_EffectsNotFiltered")) Texture->LODGroup = TEXTUREGROUP_EffectsNotFiltered;
+				if (LODGroup == TEXT("TEXTUREGROUP_WorldNormalMap"))
+					Texture->LODGroup = TEXTUREGROUP_WorldNormalMap;
+				else if (LODGroup == TEXT("TEXTUREGROUP_Effects"))
+					Texture->LODGroup = TEXTUREGROUP_Effects;
+				else if (LODGroup == TEXT("TEXTUREGROUP_EffectsNotFiltered"))
+					Texture->LODGroup = TEXTUREGROUP_EffectsNotFiltered;
 				// Default: TEXTUREGROUP_World (already default)
 			}
 		}
@@ -1606,7 +1684,7 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 	Texture->MarkPackageDirty();
 
 	// Save the package
-	UPackage* Package = Texture->GetOutermost();
+	UPackage *Package = Texture->GetOutermost();
 	FString PackageFilename = FPackageName::LongPackageNameToFilename(
 		Package->GetName(), FPackageName::GetAssetPackageExtension());
 	FSavePackageArgs SaveArgs;
@@ -1624,7 +1702,7 @@ FMonolithActionResult FMonolithEditorActions::HandleImportTexture(
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
 	// --- Extract required params ---
 	FString DestPath = Params->GetStringField(TEXT("dest_path"));
@@ -1634,14 +1712,14 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	}
 
 	// Parse frame_paths array
-	const TArray<TSharedPtr<FJsonValue>>* FramePathsArray = nullptr;
+	const TArray<TSharedPtr<FJsonValue>> *FramePathsArray = nullptr;
 	if (!Params->TryGetArrayField(TEXT("frame_paths"), FramePathsArray) || !FramePathsArray || FramePathsArray->Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("frame_paths array is required and must not be empty"));
 	}
 
 	TArray<FString> FramePaths;
-	for (const auto& Val : *FramePathsArray)
+	for (const auto &Val : *FramePathsArray)
 	{
 		FString Path;
 		if (Val->TryGetString(Path) && !Path.IsEmpty())
@@ -1656,7 +1734,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	}
 
 	// Parse grid [cols, rows]
-	const TArray<TSharedPtr<FJsonValue>>* GridArray = nullptr;
+	const TArray<TSharedPtr<FJsonValue>> *GridArray = nullptr;
 	if (!Params->TryGetArrayField(TEXT("grid"), GridArray) || !GridArray || GridArray->Num() != 2)
 	{
 		return FMonolithActionResult::Error(TEXT("grid must be an array of [columns, rows]"));
@@ -1689,7 +1767,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	}
 
 	// --- Load all frame images ---
-	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+	IImageWrapperModule &ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
 
 	int32 FrameWidth = 0;
 	int32 FrameHeight = 0;
@@ -1698,7 +1776,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 
 	for (int32 i = 0; i < FramePaths.Num(); i++)
 	{
-		const FString& FilePath = FramePaths[i];
+		const FString &FilePath = FramePaths[i];
 
 		if (!FPaths::FileExists(FilePath))
 		{
@@ -1761,7 +1839,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 		int32 OffsetX = Col * FrameWidth;
 		int32 OffsetY = Row * FrameHeight;
 
-		const TArray<FColor>& Src = FramePixels[FrameIdx];
+		const TArray<FColor> &Src = FramePixels[FrameIdx];
 		for (int32 Y = 0; Y < FrameHeight; Y++)
 		{
 			for (int32 X = 0; X < FrameWidth; X++)
@@ -1779,7 +1857,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 
 	// Ensure unique package name
 	FString PackageName = PackagePath / AssetName;
-	UPackage* Package = CreatePackage(*PackageName);
+	UPackage *Package = CreatePackage(*PackageName);
 	if (!Package)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
@@ -1787,27 +1865,27 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	}
 	Package->FullyLoad();
 
-	UTexture2D* Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone);
+	UTexture2D *Texture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone);
 	if (!Texture)
 	{
 		return FMonolithActionResult::Error(TEXT("Failed to create UTexture2D"));
 	}
 
 	// Configure platform data
-	FTexturePlatformData* PlatformData = new FTexturePlatformData();
+	FTexturePlatformData *PlatformData = new FTexturePlatformData();
 	PlatformData->SizeX = AtlasWidth;
 	PlatformData->SizeY = AtlasHeight;
 	PlatformData->PixelFormat = PF_B8G8R8A8;
 	PlatformData->SetNumSlices(1);
 
-	FTexture2DMipMap* Mip = new FTexture2DMipMap();
+	FTexture2DMipMap *Mip = new FTexture2DMipMap();
 	Mip->SizeX = AtlasWidth;
 	Mip->SizeY = AtlasHeight;
 	PlatformData->Mips.Add(Mip);
 
 	// Copy pixel data into mip
 	Mip->BulkData.Lock(LOCK_READ_WRITE);
-	void* MipData = Mip->BulkData.Realloc(AtlasWidth * AtlasHeight * sizeof(FColor));
+	void *MipData = Mip->BulkData.Realloc(AtlasWidth * AtlasHeight * sizeof(FColor));
 	FMemory::Memcpy(MipData, AtlasPixels.GetData(), AtlasWidth * AtlasHeight * sizeof(FColor));
 	Mip->BulkData.Unlock();
 
@@ -1816,7 +1894,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	// Apply texture settings
 	Texture->Source.Init(AtlasWidth, AtlasHeight, 1, 1, TSF_BGRA8, nullptr);
 	{
-		uint8* SourceData = Texture->Source.LockMip(0);
+		uint8 *SourceData = Texture->Source.LockMip(0);
 		FMemory::Memcpy(SourceData, AtlasPixels.GetData(), AtlasWidth * AtlasHeight * sizeof(FColor));
 		Texture->Source.UnlockMip(0);
 	}
@@ -1864,7 +1942,7 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	int32 DeletedCount = 0;
 	if (bDeleteSources)
 	{
-		for (const FString& FilePath : FramePaths)
+		for (const FString &FilePath : FramePaths)
 		{
 			if (IFileManager::Get().Delete(*FilePath))
 			{
@@ -1901,25 +1979,28 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
-	// Get the active level editor viewport
-	FLevelEditorViewportClient* ViewportClient = nullptr;
-	if (GEditor && GEditor->GetLevelViewportClients().Num() > 0)
+	// Get the active level editor viewport via LevelEditor module
+	FLevelEditorModule *LevelEditor = FModuleManager::GetModulePtr<FLevelEditorModule>("LevelEditor");
+	if (!LevelEditor)
 	{
-		ViewportClient = GEditor->GetLevelViewportClients()[0];
+		return FMonolithActionResult::Error(TEXT("LevelEditor module not loaded"));
 	}
 
-	if (!ViewportClient)
+	TSharedPtr<SLevelViewport> LevelViewport = LevelEditor->GetFirstActiveLevelViewport();
+	if (!LevelViewport.IsValid())
 	{
-		return FMonolithActionResult::Error(TEXT("No active viewport found"));
+		return FMonolithActionResult::Error(TEXT("No active level viewport found"));
 	}
 
-	FVector CamLocation = ViewportClient->GetViewLocation();
-	FRotator CamRotation = ViewportClient->GetViewRotation();
-	float FOV = ViewportClient->ViewFOV;
+	FLevelEditorViewportClient &ViewportClient = LevelViewport->GetLevelViewportClient();
+	FVector CamLocation = ViewportClient.GetViewLocation();
+	FRotator CamRotation = ViewportClient.GetViewRotation();
+	float FOV = ViewportClient.ViewFOV;
 
-	FIntPoint ViewportSize = ViewportClient->Viewport->GetSizeXY();
+	FViewport *Viewport = LevelViewport->GetActiveViewport();
+	FIntPoint ViewportSize = Viewport ? Viewport->GetSizeXY() : FIntPoint(0, 0);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetNumberField(TEXT("active_viewport"), 0);
@@ -1942,22 +2023,162 @@ FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(
 	Result->SetArrayField(TEXT("camera_rotation"), RotArr);
 
 	Result->SetNumberField(TEXT("fov"), FOV);
-	Result->SetBoolField(TEXT("realtime"), ViewportClient->IsRealtime());
+	Result->SetBoolField(TEXT("realtime"), ViewportClient.IsRealtime());
+
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// Capture viewport screenshot
+// ============================================================================
+
+FMonolithActionResult FMonolithEditorActions::HandleCaptureViewport(
+	const TSharedPtr<FJsonObject> &Params)
+{
+	FLevelEditorModule *LevelEditor = FModuleManager::GetModulePtr<FLevelEditorModule>("LevelEditor");
+	if (!LevelEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("LevelEditor module not loaded"));
+	}
+
+	TSharedPtr<SLevelViewport> LevelViewport = LevelEditor->GetFirstActiveLevelViewport();
+	if (!LevelViewport.IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("No active level viewport found"));
+	}
+
+	FLevelEditorViewportClient &ViewportClient = LevelViewport->GetLevelViewportClient();
+	FViewport *Viewport = LevelViewport->GetActiveViewport();
+	if (!Viewport)
+	{
+		return FMonolithActionResult::Error(TEXT("No active viewport render target"));
+	}
+
+	// Optionally set camera position/rotation/FOV before capture
+	const TArray<TSharedPtr<FJsonValue>> *LocArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("camera_location"), LocArr) && LocArr && LocArr->Num() >= 3)
+	{
+		FVector NewLoc((*LocArr)[0]->AsNumber(), (*LocArr)[1]->AsNumber(), (*LocArr)[2]->AsNumber());
+		ViewportClient.SetViewLocation(NewLoc);
+	}
+
+	const TArray<TSharedPtr<FJsonValue>> *RotArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("camera_rotation"), RotArr) && RotArr && RotArr->Num() >= 3)
+	{
+		FRotator NewRot((*RotArr)[0]->AsNumber(), (*RotArr)[1]->AsNumber(), (*RotArr)[2]->AsNumber());
+		ViewportClient.SetViewRotation(NewRot);
+	}
+
+	double NewFOV;
+	if (Params->TryGetNumberField(TEXT("fov"), NewFOV))
+	{
+		ViewportClient.ViewFOV = (float)NewFOV;
+	}
+
+	// Force the viewport to render a full frame so ReadPixels has valid data
+	ViewportClient.Invalidate();
+	Viewport->Draw(false);
+	FlushRenderingCommands();
+
+	FIntPoint ViewportSize = Viewport->GetSizeXY();
+	if (ViewportSize.X == 0 || ViewportSize.Y == 0)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Viewport size is %dx%d — viewport may be minimized or not visible"),
+							ViewportSize.X, ViewportSize.Y));
+	}
+
+	int32 ResX = ViewportSize.X;
+	int32 ResY = ViewportSize.Y;
+
+	const TArray<TSharedPtr<FJsonValue>> *ResArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("resolution"), ResArr) && ResArr && ResArr->Num() >= 2)
+	{
+		ResX = (int32)(*ResArr)[0]->AsNumber();
+		ResY = (int32)(*ResArr)[1]->AsNumber();
+	}
+
+	// Read pixels from the viewport
+	TArray<FColor> Bitmap;
+	bool bReadOk = Viewport->ReadPixels(Bitmap);
+
+	if (!bReadOk || Bitmap.Num() == 0)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Failed to read pixels from viewport (%dx%d, bitmap size: %d)"),
+							ViewportSize.X, ViewportSize.Y, Bitmap.Num()));
+	}
+
+	// Generate output path
+	FString OutputPath;
+	if (Params->HasField(TEXT("output_path")))
+	{
+		OutputPath = Params->GetStringField(TEXT("output_path"));
+		if (FPaths::IsRelative(OutputPath))
+		{
+			OutputPath = FPaths::ProjectDir() / OutputPath;
+		}
+	}
+	else
+	{
+		FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+		OutputPath = FPaths::ProjectDir() / TEXT("Saved/Screenshots/Monolith") /
+					 FString::Printf(TEXT("viewport_%s.png"), *Timestamp);
+	}
+
+	// Ensure output directory exists
+	FString Dir = FPaths::GetPath(OutputPath);
+	IFileManager::Get().MakeDirectory(*Dir, true);
+
+	// Save as PNG
+	FImage Image;
+	Image.Init(ViewportSize.X, ViewportSize.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+	FMemory::Memcpy(Image.RawData.GetData(), Bitmap.GetData(), Bitmap.Num() * sizeof(FColor));
+
+	bool bSaveOk = FImageUtils::SaveImageAutoFormat(*OutputPath, Image);
+
+	if (!bSaveOk)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to save screenshot to: %s"), *OutputPath));
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("output_file"), OutputPath);
+
+	TSharedPtr<FJsonObject> ResObj = MakeShared<FJsonObject>();
+	ResObj->SetNumberField(TEXT("width"), ViewportSize.X);
+	ResObj->SetNumberField(TEXT("height"), ViewportSize.Y);
+	Result->SetObjectField(TEXT("resolution"), ResObj);
+
+	FVector CamLoc = ViewportClient.GetViewLocation();
+	FRotator CamRot = ViewportClient.GetViewRotation();
+	TArray<TSharedPtr<FJsonValue>> CamLocArr;
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.X));
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.Y));
+	CamLocArr.Add(MakeShared<FJsonValueNumber>(CamLoc.Z));
+	Result->SetArrayField(TEXT("camera_location"), CamLocArr);
+
+	TArray<TSharedPtr<FJsonValue>> CamRotArr;
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Pitch));
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Yaw));
+	CamRotArr.Add(MakeShared<FJsonValueNumber>(CamRot.Roll));
+	Result->SetArrayField(TEXT("camera_rotation"), CamRotArr);
 
 	return FMonolithActionResult::Success(Result);
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
-	const TSharedPtr<FJsonObject>& Params)
+	const TSharedPtr<FJsonObject> &Params)
 {
-	const TArray<TSharedPtr<FJsonValue>>* AssetPathsArray = nullptr;
+	const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
 	if (!Params->TryGetArrayField(TEXT("asset_paths"), AssetPathsArray) || !AssetPathsArray || AssetPathsArray->Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("asset_paths array is required and must not be empty"));
 	}
 
 	TArray<FString> AssetPaths;
-	for (const auto& Val : *AssetPathsArray)
+	for (const auto &Val : *AssetPathsArray)
 	{
 		FString Path;
 		if (Val->TryGetString(Path) && !Path.IsEmpty())
@@ -1973,10 +2194,10 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 
 	// Optional safety: restrict deletion to allowed prefixes
 	TArray<FString> AllowedPrefixes;
-	const TArray<TSharedPtr<FJsonValue>>* PrefixArray = nullptr;
+	const TArray<TSharedPtr<FJsonValue>> *PrefixArray = nullptr;
 	if (Params->TryGetArrayField(TEXT("allowed_prefixes"), PrefixArray) && PrefixArray)
 	{
-		for (const auto& PVal : *PrefixArray)
+		for (const auto &PVal : *PrefixArray)
 		{
 			FString Prefix;
 			if (PVal->TryGetString(Prefix) && !Prefix.IsEmpty())
@@ -1988,10 +2209,10 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 
 	if (AllowedPrefixes.Num() > 0)
 	{
-		for (const FString& Path : AssetPaths)
+		for (const FString &Path : AssetPaths)
 		{
 			bool bAllowed = false;
-			for (const FString& Prefix : AllowedPrefixes)
+			for (const FString &Prefix : AllowedPrefixes)
 			{
 				if (Path.StartsWith(Prefix))
 				{
@@ -2009,12 +2230,12 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 	}
 
 	// Load and delete each asset
-	TArray<UObject*> ObjectsToDelete;
+	TArray<UObject *> ObjectsToDelete;
 	TArray<FString> NotFound;
 
-	for (const FString& Path : AssetPaths)
+	for (const FString &Path : AssetPaths)
 	{
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
+		UObject *Asset = UEditorAssetLibrary::LoadAsset(Path);
 		if (Asset)
 		{
 			ObjectsToDelete.Add(Asset);
@@ -2040,7 +2261,7 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 	if (NotFound.Num() > 0)
 	{
 		TArray<TSharedPtr<FJsonValue>> NotFoundArr;
-		for (const FString& P : NotFound)
+		for (const FString &P : NotFound)
 		{
 			NotFoundArr.Add(MakeShared<FJsonValueString>(P));
 		}

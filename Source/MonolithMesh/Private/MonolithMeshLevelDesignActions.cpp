@@ -36,7 +36,7 @@ namespace LevelDesignHelpers
 	{
 		bool bOwnsTransaction;
 
-		FScopedMeshTransaction(const FText& Description)
+		FScopedMeshTransaction(const FText &Description)
 			: bOwnsTransaction(true)
 		{
 			if (GEditor)
@@ -64,7 +64,7 @@ namespace LevelDesignHelpers
 	};
 
 	/** Make a JSON array from a FVector */
-	TArray<TSharedPtr<FJsonValue>> VectorToJsonArray(const FVector& V)
+	TArray<TSharedPtr<FJsonValue>> VectorToJsonArray(const FVector &V)
 	{
 		TArray<TSharedPtr<FJsonValue>> Arr;
 		Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -74,54 +74,66 @@ namespace LevelDesignHelpers
 	}
 
 	/** Parse mobility string to enum */
-	bool ParseMobility(const FString& Str, EComponentMobility::Type& Out)
+	bool ParseMobility(const FString &Str, EComponentMobility::Type &Out)
 	{
-		if (Str.Equals(TEXT("Static"), ESearchCase::IgnoreCase))         { Out = EComponentMobility::Static; return true; }
-		if (Str.Equals(TEXT("Stationary"), ESearchCase::IgnoreCase))     { Out = EComponentMobility::Stationary; return true; }
-		if (Str.Equals(TEXT("Movable"), ESearchCase::IgnoreCase))        { Out = EComponentMobility::Movable; return true; }
+		if (Str.Equals(TEXT("Static"), ESearchCase::IgnoreCase))
+		{
+			Out = EComponentMobility::Static;
+			return true;
+		}
+		if (Str.Equals(TEXT("Stationary"), ESearchCase::IgnoreCase))
+		{
+			Out = EComponentMobility::Stationary;
+			return true;
+		}
+		if (Str.Equals(TEXT("Movable"), ESearchCase::IgnoreCase))
+		{
+			Out = EComponentMobility::Movable;
+			return true;
+		}
 		return false;
 	}
 
 	/** Convert FProperty value to a JSON value for reflection output */
-	TSharedPtr<FJsonValue> PropertyToJson(const FProperty* Prop, const void* ValuePtr)
+	TSharedPtr<FJsonValue> PropertyToJson(const FProperty *Prop, const void *ValuePtr)
 	{
-		if (const FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+		if (const FBoolProperty *BoolProp = CastField<FBoolProperty>(Prop))
 		{
 			return MakeShared<FJsonValueBoolean>(BoolProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FIntProperty* IntProp = CastField<FIntProperty>(Prop))
+		if (const FIntProperty *IntProp = CastField<FIntProperty>(Prop))
 		{
 			return MakeShared<FJsonValueNumber>(IntProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+		if (const FFloatProperty *FloatProp = CastField<FFloatProperty>(Prop))
 		{
 			return MakeShared<FJsonValueNumber>(FloatProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Prop))
+		if (const FDoubleProperty *DoubleProp = CastField<FDoubleProperty>(Prop))
 		{
 			return MakeShared<FJsonValueNumber>(DoubleProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+		if (const FStrProperty *StrProp = CastField<FStrProperty>(Prop))
 		{
 			return MakeShared<FJsonValueString>(StrProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+		if (const FNameProperty *NameProp = CastField<FNameProperty>(Prop))
 		{
 			return MakeShared<FJsonValueString>(NameProp->GetPropertyValue(ValuePtr).ToString());
 		}
-		if (const FTextProperty* TextProp = CastField<FTextProperty>(Prop))
+		if (const FTextProperty *TextProp = CastField<FTextProperty>(Prop))
 		{
 			return MakeShared<FJsonValueString>(TextProp->GetPropertyValue(ValuePtr).ToString());
 		}
-		if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+		if (const FEnumProperty *EnumProp = CastField<FEnumProperty>(Prop))
 		{
-			UEnum* Enum = EnumProp->GetEnum();
-			const FNumericProperty* UnderlyingProp = EnumProp->GetUnderlyingProperty();
+			UEnum *Enum = EnumProp->GetEnum();
+			const FNumericProperty *UnderlyingProp = EnumProp->GetUnderlyingProperty();
 			int64 Val = UnderlyingProp->GetSignedIntPropertyValue(ValuePtr);
 			FString EnumStr = Enum ? Enum->GetNameByValue(Val).ToString() : FString::FromInt(Val);
 			return MakeShared<FJsonValueString>(EnumStr);
 		}
-		if (const FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+		if (const FByteProperty *ByteProp = CastField<FByteProperty>(Prop))
 		{
 			if (ByteProp->Enum)
 			{
@@ -130,12 +142,12 @@ namespace LevelDesignHelpers
 			}
 			return MakeShared<FJsonValueNumber>(ByteProp->GetPropertyValue(ValuePtr));
 		}
-		if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+		if (const FStructProperty *StructProp = CastField<FStructProperty>(Prop))
 		{
 			// Handle common vector/rotator/color types
 			if (StructProp->Struct == TBaseStructure<FVector>::Get())
 			{
-				const FVector& Vec = *reinterpret_cast<const FVector*>(ValuePtr);
+				const FVector &Vec = *reinterpret_cast<const FVector *>(ValuePtr);
 				auto Obj = MakeShared<FJsonObject>();
 				Obj->SetNumberField(TEXT("x"), Vec.X);
 				Obj->SetNumberField(TEXT("y"), Vec.Y);
@@ -144,7 +156,7 @@ namespace LevelDesignHelpers
 			}
 			if (StructProp->Struct == TBaseStructure<FRotator>::Get())
 			{
-				const FRotator& Rot = *reinterpret_cast<const FRotator*>(ValuePtr);
+				const FRotator &Rot = *reinterpret_cast<const FRotator *>(ValuePtr);
 				auto Obj = MakeShared<FJsonObject>();
 				Obj->SetNumberField(TEXT("pitch"), Rot.Pitch);
 				Obj->SetNumberField(TEXT("yaw"), Rot.Yaw);
@@ -153,7 +165,7 @@ namespace LevelDesignHelpers
 			}
 			if (StructProp->Struct == TBaseStructure<FLinearColor>::Get())
 			{
-				const FLinearColor& Col = *reinterpret_cast<const FLinearColor*>(ValuePtr);
+				const FLinearColor &Col = *reinterpret_cast<const FLinearColor *>(ValuePtr);
 				auto Obj = MakeShared<FJsonObject>();
 				Obj->SetNumberField(TEXT("r"), Col.R);
 				Obj->SetNumberField(TEXT("g"), Col.G);
@@ -163,7 +175,7 @@ namespace LevelDesignHelpers
 			}
 			if (StructProp->Struct == TBaseStructure<FColor>::Get())
 			{
-				const FColor& Col = *reinterpret_cast<const FColor*>(ValuePtr);
+				const FColor &Col = *reinterpret_cast<const FColor *>(ValuePtr);
 				auto Obj = MakeShared<FJsonObject>();
 				Obj->SetNumberField(TEXT("r"), Col.R);
 				Obj->SetNumberField(TEXT("g"), Col.G);
@@ -176,9 +188,9 @@ namespace LevelDesignHelpers
 			StructProp->ExportTextItem_Direct(ExportText, ValuePtr, nullptr, nullptr, PPF_None);
 			return MakeShared<FJsonValueString>(ExportText);
 		}
-		if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+		if (const FObjectPropertyBase *ObjProp = CastField<FObjectPropertyBase>(Prop))
 		{
-			UObject* Obj = ObjProp->GetObjectPropertyValue(ValuePtr);
+			UObject *Obj = ObjProp->GetObjectPropertyValue(ValuePtr);
 			return MakeShared<FJsonValueString>(Obj ? Obj->GetPathName() : TEXT("None"));
 		}
 		// Fallback: export as string
@@ -186,133 +198,314 @@ namespace LevelDesignHelpers
 		Prop->ExportTextItem_Direct(ExportText, ValuePtr, nullptr, nullptr, PPF_None);
 		return MakeShared<FJsonValueString>(ExportText);
 	}
+
+	/** Set an FProperty value from a JSON value. Returns true on success. */
+	bool JsonToProperty(FProperty *Prop, void *ValuePtr, const TSharedPtr<FJsonValue> &JsonVal, FString &OutError)
+	{
+		if (FBoolProperty *BoolProp = CastField<FBoolProperty>(Prop))
+		{
+			if (JsonVal->Type == EJson::Boolean)
+			{
+				BoolProp->SetPropertyValue(ValuePtr, JsonVal->AsBool());
+				return true;
+			}
+			// Also accept 0/1
+			if (JsonVal->Type == EJson::Number)
+			{
+				BoolProp->SetPropertyValue(ValuePtr, JsonVal->AsNumber() != 0.0);
+				return true;
+			}
+			OutError = FString::Printf(TEXT("Property '%s' expects a boolean"), *Prop->GetName());
+			return false;
+		}
+		if (FIntProperty *IntProp = CastField<FIntProperty>(Prop))
+		{
+			IntProp->SetPropertyValue(ValuePtr, (int32)JsonVal->AsNumber());
+			return true;
+		}
+		if (FFloatProperty *FloatProp = CastField<FFloatProperty>(Prop))
+		{
+			FloatProp->SetPropertyValue(ValuePtr, (float)JsonVal->AsNumber());
+			return true;
+		}
+		if (FDoubleProperty *DoubleProp = CastField<FDoubleProperty>(Prop))
+		{
+			DoubleProp->SetPropertyValue(ValuePtr, JsonVal->AsNumber());
+			return true;
+		}
+		if (FStrProperty *StrProp = CastField<FStrProperty>(Prop))
+		{
+			StrProp->SetPropertyValue(ValuePtr, JsonVal->AsString());
+			return true;
+		}
+		if (FNameProperty *NameProp = CastField<FNameProperty>(Prop))
+		{
+			NameProp->SetPropertyValue(ValuePtr, FName(*JsonVal->AsString()));
+			return true;
+		}
+		if (FTextProperty *TextProp = CastField<FTextProperty>(Prop))
+		{
+			TextProp->SetPropertyValue(ValuePtr, FText::FromString(JsonVal->AsString()));
+			return true;
+		}
+		if (FEnumProperty *EnumProp = CastField<FEnumProperty>(Prop))
+		{
+			UEnum *Enum = EnumProp->GetEnum();
+			FNumericProperty *UnderlyingProp = EnumProp->GetUnderlyingProperty();
+			if (Enum)
+			{
+				FString EnumString = JsonVal->AsString();
+				int64 Val = Enum->GetValueByNameString(EnumString);
+				if (Val == INDEX_NONE)
+				{
+					// Try with full qualified name (e.g. "ESkyAtmosphereTransformMode::PlanetCenterAtComponentTransform")
+					for (int32 i = 0; i < Enum->NumEnums(); ++i)
+					{
+						FString FullName = Enum->GetNameStringByIndex(i);
+						if (FullName.EndsWith(EnumString) || FullName.Equals(EnumString, ESearchCase::IgnoreCase))
+						{
+							Val = Enum->GetValueByIndex(i);
+							break;
+						}
+					}
+				}
+				if (Val == INDEX_NONE)
+				{
+					OutError = FString::Printf(TEXT("Invalid enum value '%s' for %s"), *EnumString, *Enum->GetName());
+					return false;
+				}
+				UnderlyingProp->SetIntPropertyValue(ValuePtr, Val);
+				return true;
+			}
+		}
+		if (FByteProperty *ByteProp = CastField<FByteProperty>(Prop))
+		{
+			if (ByteProp->Enum)
+			{
+				FString EnumString = JsonVal->AsString();
+				int64 Val = ByteProp->Enum->GetValueByNameString(EnumString);
+				if (Val == INDEX_NONE)
+				{
+					for (int32 i = 0; i < ByteProp->Enum->NumEnums(); ++i)
+					{
+						FString FullName = ByteProp->Enum->GetNameStringByIndex(i);
+						if (FullName.EndsWith(EnumString) || FullName.Equals(EnumString, ESearchCase::IgnoreCase))
+						{
+							Val = ByteProp->Enum->GetValueByIndex(i);
+							break;
+						}
+					}
+				}
+				if (Val == INDEX_NONE)
+				{
+					OutError = FString::Printf(TEXT("Invalid enum value '%s' for %s"), *EnumString, *ByteProp->Enum->GetName());
+					return false;
+				}
+				ByteProp->SetPropertyValue(ValuePtr, (uint8)Val);
+			}
+			else
+			{
+				ByteProp->SetPropertyValue(ValuePtr, (uint8)JsonVal->AsNumber());
+			}
+			return true;
+		}
+		if (FStructProperty *StructProp = CastField<FStructProperty>(Prop))
+		{
+			const TSharedPtr<FJsonObject> *ObjPtr = nullptr;
+			if (JsonVal->TryGetObject(ObjPtr) && ObjPtr && (*ObjPtr).IsValid())
+			{
+				if (StructProp->Struct == TBaseStructure<FVector>::Get())
+				{
+					FVector &Vec = *reinterpret_cast<FVector *>(ValuePtr);
+					Vec.X = (*ObjPtr)->GetNumberField(TEXT("x"));
+					Vec.Y = (*ObjPtr)->GetNumberField(TEXT("y"));
+					Vec.Z = (*ObjPtr)->GetNumberField(TEXT("z"));
+					return true;
+				}
+				if (StructProp->Struct == TBaseStructure<FRotator>::Get())
+				{
+					FRotator &Rot = *reinterpret_cast<FRotator *>(ValuePtr);
+					Rot.Pitch = (*ObjPtr)->GetNumberField(TEXT("pitch"));
+					Rot.Yaw = (*ObjPtr)->GetNumberField(TEXT("yaw"));
+					Rot.Roll = (*ObjPtr)->GetNumberField(TEXT("roll"));
+					return true;
+				}
+				if (StructProp->Struct == TBaseStructure<FLinearColor>::Get())
+				{
+					FLinearColor &Col = *reinterpret_cast<FLinearColor *>(ValuePtr);
+					Col.R = (float)(*ObjPtr)->GetNumberField(TEXT("r"));
+					Col.G = (float)(*ObjPtr)->GetNumberField(TEXT("g"));
+					Col.B = (float)(*ObjPtr)->GetNumberField(TEXT("b"));
+					Col.A = (*ObjPtr)->HasField(TEXT("a")) ? (float)(*ObjPtr)->GetNumberField(TEXT("a")) : 1.0f;
+					return true;
+				}
+				if (StructProp->Struct == TBaseStructure<FColor>::Get())
+				{
+					FColor &Col = *reinterpret_cast<FColor *>(ValuePtr);
+					Col.R = (uint8)(*ObjPtr)->GetNumberField(TEXT("r"));
+					Col.G = (uint8)(*ObjPtr)->GetNumberField(TEXT("g"));
+					Col.B = (uint8)(*ObjPtr)->GetNumberField(TEXT("b"));
+					Col.A = (*ObjPtr)->HasField(TEXT("a")) ? (uint8)(*ObjPtr)->GetNumberField(TEXT("a")) : 255;
+					return true;
+				}
+			}
+			// Fallback: ImportText from string representation
+			FString TextVal = JsonVal->AsString();
+			const TCHAR *Buffer = *TextVal;
+			if (StructProp->ImportText_Direct(Buffer, ValuePtr, nullptr, PPF_None) != nullptr)
+			{
+				return true;
+			}
+			OutError = FString::Printf(TEXT("Failed to parse struct value for '%s'"), *Prop->GetName());
+			return false;
+		}
+		// Fallback: ImportText
+		FString TextVal = JsonVal->AsString();
+		const TCHAR *Buffer = *TextVal;
+		if (Prop->ImportText_Direct(Buffer, ValuePtr, nullptr, PPF_None) != nullptr)
+		{
+			return true;
+		}
+		OutError = FString::Printf(TEXT("Failed to set property '%s' — unsupported type or bad value"), *Prop->GetName());
+		return false;
+	}
 }
 
 // ============================================================================
 // Registration
 // ============================================================================
 
-void FMonolithMeshLevelDesignActions::RegisterActions(FMonolithToolRegistry& Registry)
+void FMonolithMeshLevelDesignActions::RegisterActions(FMonolithToolRegistry &Registry)
 {
 	Registry.RegisterAction(TEXT("mesh"), TEXT("place_light"),
-		TEXT("Spawn a light actor (point/spot/rect/directional) with full property configuration"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::PlaceLight),
-		FParamSchemaBuilder()
-			.Required(TEXT("type"), TEXT("string"), TEXT("Light type: point, spot, rect, directional"))
-			.Required(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
-			.Optional(TEXT("rotation"), TEXT("array"), TEXT("Rotation [pitch, yaw, roll]"), TEXT("[0,0,0]"))
-			.Optional(TEXT("intensity"), TEXT("number"), TEXT("Light intensity (candelas for point/spot, lux for directional)"), TEXT("5000"))
-			.Optional(TEXT("color"), TEXT("array"), TEXT("Light color [r, g, b] normalized 0-1"), TEXT("[1,1,1]"))
-			.Optional(TEXT("attenuation_radius"), TEXT("number"), TEXT("Attenuation radius (point/spot/rect)"), TEXT("1000"))
-			.Optional(TEXT("cast_shadows"), TEXT("boolean"), TEXT("Enable shadow casting"), TEXT("true"))
-			.Optional(TEXT("temperature"), TEXT("number"), TEXT("Color temperature in Kelvin"), TEXT("6500"))
-			.Optional(TEXT("use_temperature"), TEXT("boolean"), TEXT("Use temperature instead of color"), TEXT("false"))
-			.Optional(TEXT("source_radius"), TEXT("number"), TEXT("Soft source radius (point/spot)"), TEXT("0"))
-			.Optional(TEXT("source_width"), TEXT("number"), TEXT("Source width (rect light only)"), TEXT("64"))
-			.Optional(TEXT("source_height"), TEXT("number"), TEXT("Source height (rect light only)"), TEXT("64"))
-			.Optional(TEXT("inner_cone_angle"), TEXT("number"), TEXT("Inner cone angle in degrees (spot only)"), TEXT("25"))
-			.Optional(TEXT("outer_cone_angle"), TEXT("number"), TEXT("Outer cone angle in degrees (spot only)"), TEXT("44"))
-			.Optional(TEXT("name"), TEXT("string"), TEXT("Actor label"))
-			.Optional(TEXT("folder"), TEXT("string"), TEXT("Outliner folder path"))
-			.Optional(TEXT("mobility"), TEXT("string"), TEXT("Mobility: Static, Stationary, Movable"), TEXT("Stationary"))
-			.Build());
+							TEXT("Spawn a light actor (point/spot/rect/directional) with full property configuration"),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::PlaceLight),
+							FParamSchemaBuilder()
+								.Required(TEXT("type"), TEXT("string"), TEXT("Light type: point, spot, rect, directional"))
+								.Required(TEXT("location"), TEXT("array"), TEXT("World location [x, y, z]"))
+								.Optional(TEXT("rotation"), TEXT("array"), TEXT("Rotation [pitch, yaw, roll]"), TEXT("[0,0,0]"))
+								.Optional(TEXT("intensity"), TEXT("number"), TEXT("Light intensity (candelas for point/spot, lux for directional)"), TEXT("5000"))
+								.Optional(TEXT("color"), TEXT("array"), TEXT("Light color [r, g, b] normalized 0-1"), TEXT("[1,1,1]"))
+								.Optional(TEXT("attenuation_radius"), TEXT("number"), TEXT("Attenuation radius (point/spot/rect)"), TEXT("1000"))
+								.Optional(TEXT("cast_shadows"), TEXT("boolean"), TEXT("Enable shadow casting"), TEXT("true"))
+								.Optional(TEXT("temperature"), TEXT("number"), TEXT("Color temperature in Kelvin"), TEXT("6500"))
+								.Optional(TEXT("use_temperature"), TEXT("boolean"), TEXT("Use temperature instead of color"), TEXT("false"))
+								.Optional(TEXT("source_radius"), TEXT("number"), TEXT("Soft source radius (point/spot)"), TEXT("0"))
+								.Optional(TEXT("source_width"), TEXT("number"), TEXT("Source width (rect light only)"), TEXT("64"))
+								.Optional(TEXT("source_height"), TEXT("number"), TEXT("Source height (rect light only)"), TEXT("64"))
+								.Optional(TEXT("inner_cone_angle"), TEXT("number"), TEXT("Inner cone angle in degrees (spot only)"), TEXT("25"))
+								.Optional(TEXT("outer_cone_angle"), TEXT("number"), TEXT("Outer cone angle in degrees (spot only)"), TEXT("44"))
+								.Optional(TEXT("name"), TEXT("string"), TEXT("Actor label"))
+								.Optional(TEXT("folder"), TEXT("string"), TEXT("Outliner folder path"))
+								.Optional(TEXT("mobility"), TEXT("string"), TEXT("Mobility: Static, Stationary, Movable"), TEXT("Stationary"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("set_light_properties"),
-		TEXT("Modify properties on an existing light actor (intensity, color, shadows, temperature, cone angles, etc.)"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetLightProperties),
-		FParamSchemaBuilder()
-			.Required(TEXT("actor_name"), TEXT("string"), TEXT("Light actor name or label"))
-			.Optional(TEXT("intensity"), TEXT("number"), TEXT("Light intensity"))
-			.Optional(TEXT("color"), TEXT("array"), TEXT("Light color [r, g, b] normalized 0-1"))
-			.Optional(TEXT("attenuation_radius"), TEXT("number"), TEXT("Attenuation radius"))
-			.Optional(TEXT("cast_shadows"), TEXT("boolean"), TEXT("Enable shadow casting"))
-			.Optional(TEXT("temperature"), TEXT("number"), TEXT("Color temperature in Kelvin"))
-			.Optional(TEXT("use_temperature"), TEXT("boolean"), TEXT("Use temperature instead of color"))
-			.Optional(TEXT("source_radius"), TEXT("number"), TEXT("Soft source radius (point/spot)"))
-			.Optional(TEXT("source_width"), TEXT("number"), TEXT("Source width (rect only)"))
-			.Optional(TEXT("source_height"), TEXT("number"), TEXT("Source height (rect only)"))
-			.Optional(TEXT("inner_cone_angle"), TEXT("number"), TEXT("Inner cone angle (spot only)"))
-			.Optional(TEXT("outer_cone_angle"), TEXT("number"), TEXT("Outer cone angle (spot only)"))
-			.Optional(TEXT("mobility"), TEXT("string"), TEXT("Mobility: Static, Stationary, Movable"))
-			.Build());
+							TEXT("Modify properties on an existing light actor (intensity, color, shadows, temperature, cone angles, etc.)"),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetLightProperties),
+							FParamSchemaBuilder()
+								.Required(TEXT("actor_name"), TEXT("string"), TEXT("Light actor name or label"))
+								.Optional(TEXT("intensity"), TEXT("number"), TEXT("Light intensity"))
+								.Optional(TEXT("color"), TEXT("array"), TEXT("Light color [r, g, b] normalized 0-1"))
+								.Optional(TEXT("attenuation_radius"), TEXT("number"), TEXT("Attenuation radius"))
+								.Optional(TEXT("cast_shadows"), TEXT("boolean"), TEXT("Enable shadow casting"))
+								.Optional(TEXT("temperature"), TEXT("number"), TEXT("Color temperature in Kelvin"))
+								.Optional(TEXT("use_temperature"), TEXT("boolean"), TEXT("Use temperature instead of color"))
+								.Optional(TEXT("source_radius"), TEXT("number"), TEXT("Soft source radius (point/spot)"))
+								.Optional(TEXT("source_width"), TEXT("number"), TEXT("Source width (rect only)"))
+								.Optional(TEXT("source_height"), TEXT("number"), TEXT("Source height (rect only)"))
+								.Optional(TEXT("inner_cone_angle"), TEXT("number"), TEXT("Inner cone angle (spot only)"))
+								.Optional(TEXT("outer_cone_angle"), TEXT("number"), TEXT("Outer cone angle (spot only)"))
+								.Optional(TEXT("mobility"), TEXT("string"), TEXT("Mobility: Static, Stationary, Movable"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("set_actor_material"),
-		TEXT("Assign a material to an actor's mesh component by slot index or slot name. SetMaterial creates override array — setting slot 2 without 0-1 fills them with defaults."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetActorMaterial),
-		FParamSchemaBuilder()
-			.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
-			.Required(TEXT("material"), TEXT("string"), TEXT("Material asset path (e.g. /Game/Materials/MI_Concrete)"))
-			.Optional(TEXT("slot"), TEXT("integer"), TEXT("Material slot index"), TEXT("0"))
-			.Optional(TEXT("slot_name"), TEXT("string"), TEXT("Material slot name (alternative to slot index)"))
-			.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (if actor has multiple mesh components)"))
-			.Build());
+							TEXT("Assign a material to an actor's mesh component by slot index or slot name. SetMaterial creates override array — setting slot 2 without 0-1 fills them with defaults."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetActorMaterial),
+							FParamSchemaBuilder()
+								.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
+								.Required(TEXT("material"), TEXT("string"), TEXT("Material asset path (e.g. /Game/Materials/MI_Concrete)"))
+								.Optional(TEXT("slot"), TEXT("integer"), TEXT("Material slot index"), TEXT("0"))
+								.Optional(TEXT("slot_name"), TEXT("string"), TEXT("Material slot name (alternative to slot index)"))
+								.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (if actor has multiple mesh components)"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("swap_material_in_level"),
-		TEXT("Replace all instances of material X with material Y across actors or entire level"),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SwapMaterialInLevel),
-		FParamSchemaBuilder()
-			.Required(TEXT("source_material"), TEXT("string"), TEXT("Source material asset path to find"))
-			.Required(TEXT("target_material"), TEXT("string"), TEXT("Target material asset path to replace with"))
-			.Optional(TEXT("actors"), TEXT("array"), TEXT("Specific actor names to process (default: all actors)"))
-			.Optional(TEXT("preview"), TEXT("boolean"), TEXT("If true, report what would change without modifying"), TEXT("false"))
-			.Build());
+							TEXT("Replace all instances of material X with material Y across actors or entire level"),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SwapMaterialInLevel),
+							FParamSchemaBuilder()
+								.Required(TEXT("source_material"), TEXT("string"), TEXT("Source material asset path to find"))
+								.Required(TEXT("target_material"), TEXT("string"), TEXT("Target material asset path to replace with"))
+								.Optional(TEXT("actors"), TEXT("array"), TEXT("Specific actor names to process (default: all actors)"))
+								.Optional(TEXT("preview"), TEXT("boolean"), TEXT("If true, report what would change without modifying"), TEXT("false"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("find_replace_mesh"),
-		TEXT("Swap all instances of static mesh X with mesh Y. Essential for blockout-to-art pass."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::FindReplaceMesh),
-		FParamSchemaBuilder()
-			.Required(TEXT("source_mesh"), TEXT("string"), TEXT("Source mesh asset path"))
-			.Required(TEXT("target_mesh"), TEXT("string"), TEXT("Target mesh asset path"))
-			.Optional(TEXT("actors"), TEXT("array"), TEXT("Specific actor names to process (default: all)"))
-			.Optional(TEXT("match_mode"), TEXT("string"), TEXT("Match mode: exact or contains"), TEXT("exact"))
-			.Optional(TEXT("preview"), TEXT("boolean"), TEXT("If true, report without modifying"), TEXT("false"))
-			.Build());
+							TEXT("Swap all instances of static mesh X with mesh Y. Essential for blockout-to-art pass."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::FindReplaceMesh),
+							FParamSchemaBuilder()
+								.Required(TEXT("source_mesh"), TEXT("string"), TEXT("Source mesh asset path"))
+								.Required(TEXT("target_mesh"), TEXT("string"), TEXT("Target mesh asset path"))
+								.Optional(TEXT("actors"), TEXT("array"), TEXT("Specific actor names to process (default: all)"))
+								.Optional(TEXT("match_mode"), TEXT("string"), TEXT("Match mode: exact or contains"), TEXT("exact"))
+								.Optional(TEXT("preview"), TEXT("boolean"), TEXT("If true, report without modifying"), TEXT("false"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("set_lod_screen_sizes"),
-		TEXT("Set per-LOD screen size thresholds on a static mesh asset. Sizes must be monotonically decreasing."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetLodScreenSizes),
-		FParamSchemaBuilder()
-			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Static mesh asset path"))
-			.Required(TEXT("screen_sizes"), TEXT("array"), TEXT("Array of screen size floats per LOD (e.g. [1.0, 0.4, 0.15])"))
-			.Build());
+							TEXT("Set per-LOD screen size thresholds on a static mesh asset. Sizes must be monotonically decreasing."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetLodScreenSizes),
+							FParamSchemaBuilder()
+								.Required(TEXT("asset_path"), TEXT("string"), TEXT("Static mesh asset path"))
+								.Required(TEXT("screen_sizes"), TEXT("array"), TEXT("Array of screen size floats per LOD (e.g. [1.0, 0.4, 0.15])"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("find_instancing_candidates"),
-		TEXT("Identify meshes used many times that could benefit from HISM conversion. Groups by mesh and material set."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::FindInstancingCandidates),
-		FParamSchemaBuilder()
-			.Optional(TEXT("min_count"), TEXT("integer"), TEXT("Minimum instance count to report"), TEXT("5"))
-			.Optional(TEXT("region_min"), TEXT("array"), TEXT("Region AABB minimum [x, y, z]"))
-			.Optional(TEXT("region_max"), TEXT("array"), TEXT("Region AABB maximum [x, y, z]"))
-			.Optional(TEXT("include_materials"), TEXT("boolean"), TEXT("Include material override info in grouping"), TEXT("true"))
-			.Build());
+							TEXT("Identify meshes used many times that could benefit from HISM conversion. Groups by mesh and material set."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::FindInstancingCandidates),
+							FParamSchemaBuilder()
+								.Optional(TEXT("min_count"), TEXT("integer"), TEXT("Minimum instance count to report"), TEXT("5"))
+								.Optional(TEXT("region_min"), TEXT("array"), TEXT("Region AABB minimum [x, y, z]"))
+								.Optional(TEXT("region_max"), TEXT("array"), TEXT("Region AABB maximum [x, y, z]"))
+								.Optional(TEXT("include_materials"), TEXT("boolean"), TEXT("Include material override info in grouping"), TEXT("true"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("convert_to_hism"),
-		TEXT("Convert grouped StaticMeshActors into a single HISM actor. Deletes originals. Single undo transaction."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::ConvertToHism),
-		FParamSchemaBuilder()
-			.Required(TEXT("mesh"), TEXT("string"), TEXT("Static mesh asset path for the HISM"))
-			.Required(TEXT("actors"), TEXT("array"), TEXT("Array of actor names to convert"))
-			.Optional(TEXT("name"), TEXT("string"), TEXT("Label for the new HISM actor"))
-			.Optional(TEXT("folder"), TEXT("string"), TEXT("Outliner folder path"))
-			.Optional(TEXT("preserve_materials"), TEXT("boolean"), TEXT("Copy material overrides from first actor"), TEXT("true"))
-			.Build());
+							TEXT("Convert grouped StaticMeshActors into a single HISM actor. Deletes originals. Single undo transaction."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::ConvertToHism),
+							FParamSchemaBuilder()
+								.Required(TEXT("mesh"), TEXT("string"), TEXT("Static mesh asset path for the HISM"))
+								.Required(TEXT("actors"), TEXT("array"), TEXT("Array of actor names to convert"))
+								.Optional(TEXT("name"), TEXT("string"), TEXT("Label for the new HISM actor"))
+								.Optional(TEXT("folder"), TEXT("string"), TEXT("Outliner folder path"))
+								.Optional(TEXT("preserve_materials"), TEXT("boolean"), TEXT("Copy material overrides from first actor"), TEXT("true"))
+								.Build());
 
 	Registry.RegisterAction(TEXT("mesh"), TEXT("get_actor_component_properties"),
-		TEXT("Read arbitrary component properties via FProperty reflection. Returns typed values for any UPROPERTY."),
-		FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::GetActorComponentProperties),
-		FParamSchemaBuilder()
-			.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
-			.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (default: root component)"))
-			.Optional(TEXT("properties"), TEXT("array"), TEXT("Array of property names to read (default: all visible)"))
-			.Optional(TEXT("component_class"), TEXT("string"), TEXT("Filter by component class name"))
-			.Build());
+							TEXT("Read arbitrary component properties via FProperty reflection. Returns typed values for any UPROPERTY."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::GetActorComponentProperties),
+							FParamSchemaBuilder()
+								.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
+								.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (default: root component)"))
+								.Optional(TEXT("properties"), TEXT("array"), TEXT("Array of property names to read (default: all visible)"))
+								.Optional(TEXT("component_class"), TEXT("string"), TEXT("Filter by component class name"))
+								.Build());
+
+	Registry.RegisterAction(TEXT("mesh"), TEXT("set_component_property"),
+							TEXT("Set arbitrary component properties via FProperty reflection. Supports float, int, bool, string, enum, vector, rotator, color, and struct types."),
+							FMonolithActionHandler::CreateStatic(&FMonolithMeshLevelDesignActions::SetActorComponentProperties),
+							FParamSchemaBuilder()
+								.Required(TEXT("actor_name"), TEXT("string"), TEXT("Actor name or label"))
+								.Required(TEXT("properties"), TEXT("object"), TEXT("Object mapping property names to values (e.g. {\"BottomRadius\": 0.63, \"AtmosphereHeight\": 0.6})"))
+								.Optional(TEXT("component_name"), TEXT("string"), TEXT("Specific component name (default: root component)"))
+								.Optional(TEXT("component_class"), TEXT("string"), TEXT("Filter by component class name"))
+								.Build());
 }
 
 // ============================================================================
 // Helper: Apply light properties from JSON
 // ============================================================================
 
-TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComponent* LightComp, const TSharedPtr<FJsonObject>& Params)
+TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComponent *LightComp, const TSharedPtr<FJsonObject> &Params)
 {
 	TArray<FString> PropsSet;
 
@@ -336,14 +529,13 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 		PropsSet.Add(TEXT("intensity"));
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* ColorArr;
+	const TArray<TSharedPtr<FJsonValue>> *ColorArr;
 	if (Params->TryGetArrayField(TEXT("color"), ColorArr) && ColorArr->Num() >= 3)
 	{
 		FLinearColor Color(
 			static_cast<float>((*ColorArr)[0]->AsNumber()),
 			static_cast<float>((*ColorArr)[1]->AsNumber()),
-			static_cast<float>((*ColorArr)[2]->AsNumber())
-		);
+			static_cast<float>((*ColorArr)[2]->AsNumber()));
 		LightComp->SetLightColor(Color);
 		PropsSet.Add(TEXT("color"));
 	}
@@ -351,7 +543,7 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 	double AttenuationRadius;
 	if (Params->TryGetNumberField(TEXT("attenuation_radius"), AttenuationRadius))
 	{
-		if (ULocalLightComponent* LocalLight = Cast<ULocalLightComponent>(LightComp))
+		if (ULocalLightComponent *LocalLight = Cast<ULocalLightComponent>(LightComp))
 		{
 			// Direct UPROPERTY write — SetAttenuationRadius() silently no-ops on
 			// non-Movable lights via AreDynamicDataChangesAllowed(). We bypass
@@ -392,7 +584,7 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 	double SourceRadius;
 	if (Params->TryGetNumberField(TEXT("source_radius"), SourceRadius))
 	{
-		if (UPointLightComponent* PLC = Cast<UPointLightComponent>(LightComp))
+		if (UPointLightComponent *PLC = Cast<UPointLightComponent>(LightComp))
 		{
 			PLC->SetSourceRadius(static_cast<float>(SourceRadius));
 			PropsSet.Add(TEXT("source_radius"));
@@ -400,7 +592,7 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 	}
 
 	// Rect light: SourceWidth / SourceHeight
-	if (URectLightComponent* RLC = Cast<URectLightComponent>(LightComp))
+	if (URectLightComponent *RLC = Cast<URectLightComponent>(LightComp))
 	{
 		double SourceWidth;
 		if (Params->TryGetNumberField(TEXT("source_width"), SourceWidth))
@@ -419,7 +611,7 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 	}
 
 	// Spot light: cone angles
-	if (USpotLightComponent* SLC = Cast<USpotLightComponent>(LightComp))
+	if (USpotLightComponent *SLC = Cast<USpotLightComponent>(LightComp))
 	{
 		double InnerConeAngle;
 		if (Params->TryGetNumberField(TEXT("inner_cone_angle"), InnerConeAngle))
@@ -442,7 +634,7 @@ TArray<FString> FMonolithMeshLevelDesignActions::ApplyLightProperties(ULightComp
 // 1. place_light
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedPtr<FJsonObject> &Params)
 {
 	FString TypeStr;
 	if (!Params->TryGetStringField(TEXT("type"), TypeStr))
@@ -460,14 +652,14 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 	FRotator Rotation(0, 0, 0);
 	MonolithMeshUtils::ParseRotator(Params, TEXT("rotation"), Rotation);
 
-	UWorld* World = MonolithMeshUtils::GetEditorWorld();
+	UWorld *World = MonolithMeshUtils::GetEditorWorld();
 	if (!World)
 	{
 		return FMonolithActionResult::Error(TEXT("No editor world available"));
 	}
 
 	// Determine actor class
-	UClass* LightClass = nullptr;
+	UClass *LightClass = nullptr;
 	FString ClassName;
 	if (TypeStr == TEXT("point"))
 	{
@@ -499,7 +691,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	AActor* SpawnedActor = World->SpawnActor(LightClass, &Location, &Rotation, SpawnParams);
+	AActor *SpawnedActor = World->SpawnActor(LightClass, &Location, &Rotation, SpawnParams);
 	if (!SpawnedActor)
 	{
 		Transaction.Cancel();
@@ -507,7 +699,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 	}
 
 	// Get the light component
-	ULightComponent* LightComp = SpawnedActor->FindComponentByClass<ULightComponent>();
+	ULightComponent *LightComp = SpawnedActor->FindComponentByClass<ULightComponent>();
 	if (!LightComp)
 	{
 		Transaction.Cancel();
@@ -541,7 +733,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 	Result->SetArrayField(TEXT("location"), LevelDesignHelpers::VectorToJsonArray(SpawnedActor->GetActorLocation()));
 
 	TArray<TSharedPtr<FJsonValue>> PropsArr;
-	for (const FString& P : PropsSet)
+	for (const FString &P : PropsSet)
 	{
 		PropsArr.Add(MakeShared<FJsonValueString>(P));
 	}
@@ -554,7 +746,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::PlaceLight(const TSharedP
 // 2. set_light_properties
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::SetLightProperties(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::SetLightProperties(const TSharedPtr<FJsonObject> &Params)
 {
 	FString ActorName;
 	if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
@@ -563,13 +755,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetLightProperties(const 
 	}
 
 	FString Error;
-	AActor* Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
+	AActor *Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
 	if (!Actor)
 	{
 		return FMonolithActionResult::Error(Error);
 	}
 
-	ULightComponent* LightComp = Actor->FindComponentByClass<ULightComponent>();
+	ULightComponent *LightComp = Actor->FindComponentByClass<ULightComponent>();
 	if (!LightComp)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Actor '%s' has no ULightComponent"), *ActorName));
@@ -590,7 +782,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetLightProperties(const 
 	Result->SetStringField(TEXT("light_class"), LightComp->GetClass()->GetName());
 
 	TArray<TSharedPtr<FJsonValue>> PropsArr;
-	for (const FString& P : PropsSet)
+	for (const FString &P : PropsSet)
 	{
 		PropsArr.Add(MakeShared<FJsonValueString>(P));
 	}
@@ -603,7 +795,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetLightProperties(const 
 // 3. set_actor_material
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TSharedPtr<FJsonObject> &Params)
 {
 	FString ActorName;
 	if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
@@ -618,27 +810,27 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TS
 	}
 
 	FString Error;
-	AActor* Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
+	AActor *Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
 	if (!Actor)
 	{
 		return FMonolithActionResult::Error(Error);
 	}
 
 	// Load material
-	UMaterialInterface* Material = FMonolithAssetUtils::LoadAssetByPath<UMaterialInterface>(MaterialPath);
+	UMaterialInterface *Material = FMonolithAssetUtils::LoadAssetByPath<UMaterialInterface>(MaterialPath);
 	if (!Material)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Material not found: %s"), *MaterialPath));
 	}
 
 	// Find mesh component
-	UMeshComponent* MeshComp = nullptr;
+	UMeshComponent *MeshComp = nullptr;
 	FString ComponentName;
 	if (Params->TryGetStringField(TEXT("component_name"), ComponentName) && !ComponentName.IsEmpty())
 	{
-		TArray<UActorComponent*> Components;
+		TArray<UActorComponent *> Components;
 		Actor->GetComponents(Components);
-		for (UActorComponent* Comp : Components)
+		for (UActorComponent *Comp : Components)
 		{
 			if (Comp->GetFName().ToString() == ComponentName)
 			{
@@ -680,11 +872,11 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TS
 	{
 		// Find index by slot name from the underlying mesh asset
 		int32 FoundIndex = INDEX_NONE;
-		if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(MeshComp))
+		if (UStaticMeshComponent *SMC = Cast<UStaticMeshComponent>(MeshComp))
 		{
-			if (UStaticMesh* SM = SMC->GetStaticMesh())
+			if (UStaticMesh *SM = SMC->GetStaticMesh())
 			{
-				const TArray<FStaticMaterial>& Mats = SM->GetStaticMaterials();
+				const TArray<FStaticMaterial> &Mats = SM->GetStaticMaterials();
 				for (int32 i = 0; i < Mats.Num(); ++i)
 				{
 					if (Mats[i].MaterialSlotName.ToString().Equals(SlotName, ESearchCase::IgnoreCase))
@@ -716,7 +908,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TS
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Slot index %d out of range (component has %d slots)"), SlotIndex, MeshComp->GetNumMaterials()));
 	}
 
-	UMaterialInterface* OldMat = MeshComp->GetMaterial(SlotIndex);
+	UMaterialInterface *OldMat = MeshComp->GetMaterial(SlotIndex);
 	if (OldMat)
 	{
 		OldMaterialPath = OldMat->GetPathName();
@@ -741,7 +933,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorMaterial(const TS
 // 4. swap_material_in_level
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const TSharedPtr<FJsonObject> &Params)
 {
 	FString SourcePath, TargetPath;
 	if (!Params->TryGetStringField(TEXT("source_material"), SourcePath))
@@ -756,13 +948,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 	bool bPreview = false;
 	Params->TryGetBoolField(TEXT("preview"), bPreview);
 
-	UMaterialInterface* SourceMat = FMonolithAssetUtils::LoadAssetByPath<UMaterialInterface>(SourcePath);
+	UMaterialInterface *SourceMat = FMonolithAssetUtils::LoadAssetByPath<UMaterialInterface>(SourcePath);
 	if (!SourceMat)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Source material not found: %s"), *SourcePath));
 	}
 
-	UMaterialInterface* TargetMat = nullptr;
+	UMaterialInterface *TargetMat = nullptr;
 	if (!bPreview)
 	{
 		TargetMat = FMonolithAssetUtils::LoadAssetByPath<UMaterialInterface>(TargetPath);
@@ -772,7 +964,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 		}
 	}
 
-	UWorld* World = MonolithMeshUtils::GetEditorWorld();
+	UWorld *World = MonolithMeshUtils::GetEditorWorld();
 	if (!World)
 	{
 		return FMonolithActionResult::Error(TEXT("No editor world available"));
@@ -780,10 +972,10 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 
 	// Optional: specific actor filter
 	TSet<FString> ActorFilter;
-	const TArray<TSharedPtr<FJsonValue>>* ActorsArr;
+	const TArray<TSharedPtr<FJsonValue>> *ActorsArr;
 	if (Params->TryGetArrayField(TEXT("actors"), ActorsArr))
 	{
-		for (const auto& Val : *ActorsArr)
+		for (const auto &Val : *ActorsArr)
 		{
 			ActorFilter.Add(Val->AsString());
 		}
@@ -801,7 +993,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		AActor* Actor = *It;
+		AActor *Actor = *It;
 
 		// Apply actor filter
 		if (ActorFilter.Num() > 0)
@@ -812,15 +1004,15 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 			}
 		}
 
-		TArray<UMeshComponent*> MeshComps;
+		TArray<UMeshComponent *> MeshComps;
 		Actor->GetComponents<UMeshComponent>(MeshComps);
 
 		bool bActorModified = false;
-		for (UMeshComponent* MC : MeshComps)
+		for (UMeshComponent *MC : MeshComps)
 		{
 			for (int32 i = 0; i < MC->GetNumMaterials(); ++i)
 			{
-				UMaterialInterface* CurMat = MC->GetMaterial(i);
+				UMaterialInterface *CurMat = MC->GetMaterial(i);
 				if (CurMat && CurMat == SourceMat)
 				{
 					if (!bPreview)
@@ -859,7 +1051,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SwapMaterialInLevel(const
 // 5. find_replace_mesh
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSharedPtr<FJsonObject> &Params)
 {
 	FString SourcePath, TargetPath;
 	if (!Params->TryGetStringField(TEXT("source_mesh"), SourcePath))
@@ -877,13 +1069,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 	bool bPreview = false;
 	Params->TryGetBoolField(TEXT("preview"), bPreview);
 
-	UStaticMesh* SourceMesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(SourcePath);
+	UStaticMesh *SourceMesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(SourcePath);
 	if (!SourceMesh)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Source mesh not found: %s"), *SourcePath));
 	}
 
-	UStaticMesh* TargetMesh = nullptr;
+	UStaticMesh *TargetMesh = nullptr;
 	if (!bPreview)
 	{
 		TargetMesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(TargetPath);
@@ -893,7 +1085,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 		}
 	}
 
-	UWorld* World = MonolithMeshUtils::GetEditorWorld();
+	UWorld *World = MonolithMeshUtils::GetEditorWorld();
 	if (!World)
 	{
 		return FMonolithActionResult::Error(TEXT("No editor world available"));
@@ -901,10 +1093,10 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 
 	// Optional: specific actor filter
 	TSet<FString> ActorFilter;
-	const TArray<TSharedPtr<FJsonValue>>* ActorsArr;
+	const TArray<TSharedPtr<FJsonValue>> *ActorsArr;
 	if (Params->TryGetArrayField(TEXT("actors"), ActorsArr))
 	{
-		for (const auto& Val : *ActorsArr)
+		for (const auto &Val : *ActorsArr)
 		{
 			ActorFilter.Add(Val->AsString());
 		}
@@ -924,7 +1116,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		AActor* Actor = *It;
+		AActor *Actor = *It;
 
 		// Skip ISM/HISM actors unless explicitly targeted
 		if (ActorFilter.Num() == 0)
@@ -943,10 +1135,10 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 			}
 		}
 
-		TArray<UStaticMeshComponent*> SMCs;
+		TArray<UStaticMeshComponent *> SMCs;
 		Actor->GetComponents<UStaticMeshComponent>(SMCs);
 
-		for (UStaticMeshComponent* SMC : SMCs)
+		for (UStaticMeshComponent *SMC : SMCs)
 		{
 			// Skip ISM components
 			if (Cast<UInstancedStaticMeshComponent>(SMC))
@@ -954,8 +1146,9 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 				continue;
 			}
 
-			UStaticMesh* CurMesh = SMC->GetStaticMesh();
-			if (!CurMesh) continue;
+			UStaticMesh *CurMesh = SMC->GetStaticMesh();
+			if (!CurMesh)
+				continue;
 
 			bool bMatch = false;
 			if (bContains)
@@ -979,9 +1172,9 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 					if (TargetMesh->GetStaticMaterials().Num() != SourceMesh->GetStaticMaterials().Num())
 					{
 						UE_LOG(LogTemp, Warning, TEXT("Monolith: Mesh swap on '%s' — material slot count differs (source: %d, target: %d). Material overrides may be invalid."),
-							*Actor->GetActorNameOrLabel(),
-							SourceMesh->GetStaticMaterials().Num(),
-							TargetMesh->GetStaticMaterials().Num());
+							   *Actor->GetActorNameOrLabel(),
+							   SourceMesh->GetStaticMaterials().Num(),
+							   TargetMesh->GetStaticMaterials().Num());
 					}
 				}
 				ReplacedCount++;
@@ -1004,7 +1197,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindReplaceMesh(const TSh
 // 6. set_lod_screen_sizes
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::SetLodScreenSizes(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::SetLodScreenSizes(const TSharedPtr<FJsonObject> &Params)
 {
 	FString AssetPath;
 	if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
@@ -1012,13 +1205,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetLodScreenSizes(const T
 		return FMonolithActionResult::Error(TEXT("Missing required param: asset_path"));
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* ScreenSizesArr;
+	const TArray<TSharedPtr<FJsonValue>> *ScreenSizesArr;
 	if (!Params->TryGetArrayField(TEXT("screen_sizes"), ScreenSizesArr) || ScreenSizesArr->Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("Missing or empty required param: screen_sizes"));
 	}
 
-	UStaticMesh* SM = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(AssetPath);
+	UStaticMesh *SM = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(AssetPath);
 	if (!SM)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Static mesh not found: %s"), *AssetPath));
@@ -1081,7 +1274,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetLodScreenSizes(const T
 // 7. find_instancing_candidates
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(const TSharedPtr<FJsonObject> &Params)
 {
 	int32 MinCount = 5;
 	double MinCountVal;
@@ -1093,7 +1286,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 	bool bIncludeMaterials = true;
 	Params->TryGetBoolField(TEXT("include_materials"), bIncludeMaterials);
 
-	UWorld* World = MonolithMeshUtils::GetEditorWorld();
+	UWorld *World = MonolithMeshUtils::GetEditorWorld();
 	if (!World)
 	{
 		return FMonolithActionResult::Error(TEXT("No editor world available"));
@@ -1101,8 +1294,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 
 	// Optional region filter
 	FVector RegionMin(ForceInit), RegionMax(ForceInit);
-	bool bHasRegion = MonolithMeshUtils::ParseVector(Params, TEXT("region_min"), RegionMin)
-	                && MonolithMeshUtils::ParseVector(Params, TEXT("region_max"), RegionMax);
+	bool bHasRegion = MonolithMeshUtils::ParseVector(Params, TEXT("region_min"), RegionMin) && MonolithMeshUtils::ParseVector(Params, TEXT("region_max"), RegionMax);
 
 	// Group key: mesh path + optional material set hash
 	struct FInstanceGroup
@@ -1118,15 +1310,18 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 
 	for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
 	{
-		AStaticMeshActor* SMA = *It;
-		UStaticMeshComponent* SMC = SMA->GetStaticMeshComponent();
-		if (!SMC) continue;
+		AStaticMeshActor *SMA = *It;
+		UStaticMeshComponent *SMC = SMA->GetStaticMeshComponent();
+		if (!SMC)
+			continue;
 
 		// Skip existing ISM/HISM
-		if (Cast<UInstancedStaticMeshComponent>(SMC)) continue;
+		if (Cast<UInstancedStaticMeshComponent>(SMC))
+			continue;
 
-		UStaticMesh* Mesh = SMC->GetStaticMesh();
-		if (!Mesh) continue;
+		UStaticMesh *Mesh = SMC->GetStaticMesh();
+		if (!Mesh)
+			continue;
 
 		// Region filter
 		if (bHasRegion)
@@ -1147,19 +1342,19 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 		{
 			for (int32 i = 0; i < SMC->GetNumMaterials(); ++i)
 			{
-				UMaterialInterface* Mat = SMC->GetMaterial(i);
+				UMaterialInterface *Mat = SMC->GetMaterial(i);
 				MatPaths.Add(Mat ? Mat->GetPathName() : TEXT("None"));
 			}
 			// Append material hash to key
 			FString MatKey;
-			for (const FString& MP : MatPaths)
+			for (const FString &MP : MatPaths)
 			{
 				MatKey += MP + TEXT("|");
 			}
 			GroupKey += TEXT("::") + MatKey;
 		}
 
-		FInstanceGroup& Group = Groups.FindOrAdd(GroupKey);
+		FInstanceGroup &Group = Groups.FindOrAdd(GroupKey);
 		if (Group.Count == 0)
 		{
 			Group.MeshPath = MeshPath;
@@ -1171,18 +1366,19 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 
 	// Filter and sort by count
 	TArray<FInstanceGroup> Candidates;
-	for (auto& Pair : Groups)
+	for (auto &Pair : Groups)
 	{
 		if (Pair.Value.Count >= MinCount)
 		{
 			Candidates.Add(MoveTemp(Pair.Value));
 		}
 	}
-	Candidates.Sort([](const FInstanceGroup& A, const FInstanceGroup& B) { return A.Count > B.Count; });
+	Candidates.Sort([](const FInstanceGroup &A, const FInstanceGroup &B)
+					{ return A.Count > B.Count; });
 
 	int32 TotalSavings = 0;
 	TArray<TSharedPtr<FJsonValue>> CandidateArr;
-	for (const FInstanceGroup& Group : Candidates)
+	for (const FInstanceGroup &Group : Candidates)
 	{
 		auto CandObj = MakeShared<FJsonObject>();
 		CandObj->SetStringField(TEXT("mesh"), Group.MeshPath);
@@ -1195,7 +1391,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 		if (bIncludeMaterials && Group.MaterialPaths.Num() > 0)
 		{
 			TArray<TSharedPtr<FJsonValue>> MatArr;
-			for (const FString& MP : Group.MaterialPaths)
+			for (const FString &MP : Group.MaterialPaths)
 			{
 				MatArr.Add(MakeShared<FJsonValueString>(MP));
 			}
@@ -1203,7 +1399,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 		}
 
 		TArray<TSharedPtr<FJsonValue>> ActorArr;
-		for (const FString& AN : Group.ActorNames)
+		for (const FString &AN : Group.ActorNames)
 		{
 			ActorArr.Add(MakeShared<FJsonValueString>(AN));
 		}
@@ -1224,7 +1420,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::FindInstancingCandidates(
 // 8. convert_to_hism
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TSharedPtr<FJsonObject> &Params)
 {
 	FString MeshPath;
 	if (!Params->TryGetStringField(TEXT("mesh"), MeshPath))
@@ -1232,7 +1428,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 		return FMonolithActionResult::Error(TEXT("Missing required param: mesh"));
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* ActorsArr;
+	const TArray<TSharedPtr<FJsonValue>> *ActorsArr;
 	if (!Params->TryGetArrayField(TEXT("actors"), ActorsArr) || ActorsArr->Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("Missing or empty required param: actors"));
@@ -1241,25 +1437,25 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 	bool bPreserveMaterials = true;
 	Params->TryGetBoolField(TEXT("preserve_materials"), bPreserveMaterials);
 
-	UStaticMesh* Mesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(MeshPath);
+	UStaticMesh *Mesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(MeshPath);
 	if (!Mesh)
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Static mesh not found: %s"), *MeshPath));
 	}
 
-	UWorld* World = MonolithMeshUtils::GetEditorWorld();
+	UWorld *World = MonolithMeshUtils::GetEditorWorld();
 	if (!World)
 	{
 		return FMonolithActionResult::Error(TEXT("No editor world available"));
 	}
 
 	// Validate ALL actors exist before starting
-	TArray<AActor*> SourceActors;
-	for (const auto& Val : *ActorsArr)
+	TArray<AActor *> SourceActors;
+	for (const auto &Val : *ActorsArr)
 	{
 		FString Name = Val->AsString();
 		FString Error;
-		AActor* Actor = MonolithMeshUtils::FindActorByName(Name, Error);
+		AActor *Actor = MonolithMeshUtils::FindActorByName(Name, Error);
 		if (!Actor)
 		{
 			return FMonolithActionResult::Error(FString::Printf(TEXT("Actor not found: %s"), *Name));
@@ -1270,7 +1466,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 	// Collect transforms
 	TArray<FTransform> Transforms;
 	Transforms.Reserve(SourceActors.Num());
-	for (AActor* Actor : SourceActors)
+	for (AActor *Actor : SourceActors)
 	{
 		Transforms.Add(Actor->GetActorTransform());
 	}
@@ -1284,14 +1480,14 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 
 	// Use the average position as the HISM actor origin
 	FVector AvgLocation = FVector::ZeroVector;
-	for (const FTransform& T : Transforms)
+	for (const FTransform &T : Transforms)
 	{
 		AvgLocation += T.GetLocation();
 	}
 	AvgLocation /= Transforms.Num();
 
 	FRotator DefaultRot = FRotator::ZeroRotator;
-	AActor* HISMActor = World->SpawnActor(AActor::StaticClass(), &AvgLocation, &DefaultRot, SpawnParams);
+	AActor *HISMActor = World->SpawnActor(AActor::StaticClass(), &AvgLocation, &DefaultRot, SpawnParams);
 	if (!HISMActor)
 	{
 		Transaction.Cancel();
@@ -1299,13 +1495,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 	}
 
 	// Add root scene component
-	USceneComponent* RootComp = NewObject<USceneComponent>(HISMActor, TEXT("RootComponent"));
+	USceneComponent *RootComp = NewObject<USceneComponent>(HISMActor, TEXT("RootComponent"));
 	HISMActor->SetRootComponent(RootComp);
 	RootComp->RegisterComponent();
 	RootComp->SetWorldLocation(AvgLocation);
 
 	// Create HISM component
-	UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(HISMActor, TEXT("HISMComponent"));
+	UHierarchicalInstancedStaticMeshComponent *HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(HISMActor, TEXT("HISMComponent"));
 	HISM->SetupAttachment(RootComp);
 	HISM->RegisterComponent();
 	HISM->SetStaticMesh(Mesh);
@@ -1314,12 +1510,12 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 	// Copy material overrides from first source actor
 	if (bPreserveMaterials && SourceActors.Num() > 0)
 	{
-		UStaticMeshComponent* FirstSMC = SourceActors[0]->FindComponentByClass<UStaticMeshComponent>();
+		UStaticMeshComponent *FirstSMC = SourceActors[0]->FindComponentByClass<UStaticMeshComponent>();
 		if (FirstSMC)
 		{
 			for (int32 i = 0; i < FirstSMC->GetNumMaterials(); ++i)
 			{
-				UMaterialInterface* Mat = FirstSMC->GetMaterial(i);
+				UMaterialInterface *Mat = FirstSMC->GetMaterial(i);
 				if (Mat)
 				{
 					HISM->SetMaterial(i, Mat);
@@ -1332,7 +1528,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 	FTransform HISMWorldTransform = HISMActor->GetActorTransform();
 	TArray<FTransform> LocalTransforms;
 	LocalTransforms.Reserve(Transforms.Num());
-	for (const FTransform& WorldTransform : Transforms)
+	for (const FTransform &WorldTransform : Transforms)
 	{
 		LocalTransforms.Add(WorldTransform.GetRelativeTransform(HISMWorldTransform));
 	}
@@ -1359,7 +1555,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 
 	// Delete original actors
 	TArray<TSharedPtr<FJsonValue>> RemovedArr;
-	for (AActor* Actor : SourceActors)
+	for (AActor *Actor : SourceActors)
 	{
 		RemovedArr.Add(MakeShared<FJsonValueString>(Actor->GetActorNameOrLabel()));
 		World->DestroyActor(Actor);
@@ -1379,7 +1575,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::ConvertToHism(const TShar
 // 9. get_actor_component_properties
 // ============================================================================
 
-FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperties(const TSharedPtr<FJsonObject>& Params)
+FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperties(const TSharedPtr<FJsonObject> &Params)
 {
 	FString ActorName;
 	if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
@@ -1388,14 +1584,14 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 	}
 
 	FString Error;
-	AActor* Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
+	AActor *Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
 	if (!Actor)
 	{
 		return FMonolithActionResult::Error(Error);
 	}
 
 	// Find target component
-	UActorComponent* TargetComp = nullptr;
+	UActorComponent *TargetComp = nullptr;
 	FString ComponentName;
 	FString ComponentClass;
 	Params->TryGetStringField(TEXT("component_name"), ComponentName);
@@ -1403,9 +1599,9 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 
 	if (!ComponentName.IsEmpty())
 	{
-		TArray<UActorComponent*> AllComps;
+		TArray<UActorComponent *> AllComps;
 		Actor->GetComponents(AllComps);
-		for (UActorComponent* Comp : AllComps)
+		for (UActorComponent *Comp : AllComps)
 		{
 			if (Comp->GetFName().ToString() == ComponentName)
 			{
@@ -1420,9 +1616,9 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 	}
 	else if (!ComponentClass.IsEmpty())
 	{
-		TArray<UActorComponent*> AllComps;
+		TArray<UActorComponent *> AllComps;
 		Actor->GetComponents(AllComps);
-		for (UActorComponent* Comp : AllComps)
+		for (UActorComponent *Comp : AllComps)
 		{
 			if (Comp->GetClass()->GetName() == ComponentClass || Comp->GetClass()->GetName() == (TEXT("U") + ComponentClass))
 			{
@@ -1447,10 +1643,10 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 
 	// Optional: specific property names
 	TSet<FString> PropertyFilter;
-	const TArray<TSharedPtr<FJsonValue>>* PropsArr;
+	const TArray<TSharedPtr<FJsonValue>> *PropsArr;
 	if (Params->TryGetArrayField(TEXT("properties"), PropsArr))
 	{
-		for (const auto& Val : *PropsArr)
+		for (const auto &Val : *PropsArr)
 		{
 			PropertyFilter.Add(Val->AsString());
 		}
@@ -1458,13 +1654,13 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 
 	// Read properties via FProperty reflection
 	auto PropsObj = MakeShared<FJsonObject>();
-	UClass* CompClass = TargetComp->GetClass();
+	UClass *CompClass = TargetComp->GetClass();
 	int32 PropCount = 0;
 	const int32 MaxProps = 200; // Safety cap
 
 	for (TFieldIterator<FProperty> PropIt(CompClass); PropIt; ++PropIt)
 	{
-		FProperty* Prop = *PropIt;
+		FProperty *Prop = *PropIt;
 
 		// If filter specified, only include those
 		if (PropertyFilter.Num() > 0)
@@ -1483,7 +1679,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 			}
 		}
 
-		const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(TargetComp);
+		const void *ValuePtr = Prop->ContainerPtrToValuePtr<void>(TargetComp);
 		TSharedPtr<FJsonValue> JsonVal = LevelDesignHelpers::PropertyToJson(Prop, ValuePtr);
 		if (JsonVal.IsValid())
 		{
@@ -1491,7 +1687,8 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 			PropCount++;
 		}
 
-		if (PropCount >= MaxProps) break;
+		if (PropCount >= MaxProps)
+			break;
 	}
 
 	auto Result = MakeShared<FJsonObject>();
@@ -1500,6 +1697,160 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::GetActorComponentProperti
 	Result->SetStringField(TEXT("component_class"), CompClass->GetName());
 	Result->SetNumberField(TEXT("property_count"), PropCount);
 	Result->SetObjectField(TEXT("properties"), PropsObj);
+
+	return FMonolithActionResult::Success(Result);
+}
+
+// ============================================================================
+// Set component properties via FProperty reflection
+// ============================================================================
+
+FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorComponentProperties(const TSharedPtr<FJsonObject> &Params)
+{
+	FString ActorName;
+	if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required param: actor_name"));
+	}
+
+	const TSharedPtr<FJsonObject> *PropertiesObj = nullptr;
+	if (!Params->TryGetObjectField(TEXT("properties"), PropertiesObj) || !PropertiesObj || !(*PropertiesObj).IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required param: properties (must be an object mapping property names to values)"));
+	}
+
+	FString Error;
+	AActor *Actor = MonolithMeshUtils::FindActorByName(ActorName, Error);
+	if (!Actor)
+	{
+		return FMonolithActionResult::Error(Error);
+	}
+
+	// Find target component (same logic as GetActorComponentProperties)
+	UActorComponent *TargetComp = nullptr;
+	FString ComponentName;
+	FString ComponentClass;
+	Params->TryGetStringField(TEXT("component_name"), ComponentName);
+	Params->TryGetStringField(TEXT("component_class"), ComponentClass);
+
+	if (!ComponentName.IsEmpty())
+	{
+		TArray<UActorComponent *> AllComps;
+		Actor->GetComponents(AllComps);
+		for (UActorComponent *Comp : AllComps)
+		{
+			if (Comp->GetFName().ToString() == ComponentName)
+			{
+				TargetComp = Comp;
+				break;
+			}
+		}
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Component '%s' not found on actor '%s'"), *ComponentName, *ActorName));
+		}
+	}
+	else if (!ComponentClass.IsEmpty())
+	{
+		TArray<UActorComponent *> AllComps;
+		Actor->GetComponents(AllComps);
+		for (UActorComponent *Comp : AllComps)
+		{
+			if (Comp->GetClass()->GetName() == ComponentClass || Comp->GetClass()->GetName() == (TEXT("U") + ComponentClass))
+			{
+				TargetComp = Comp;
+				break;
+			}
+		}
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("No component of class '%s' found on actor '%s'"), *ComponentClass, *ActorName));
+		}
+	}
+	else
+	{
+		TargetComp = Actor->GetRootComponent();
+		if (!TargetComp)
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Actor '%s' has no root component"), *ActorName));
+		}
+	}
+
+	LevelDesignHelpers::FScopedMeshTransaction Transaction(FText::FromString(TEXT("Monolith: Set Component Properties")));
+
+	UClass *CompClass = TargetComp->GetClass();
+	TArray<TSharedPtr<FJsonValue>> PropertiesSet;
+	TArray<TSharedPtr<FJsonValue>> Errors;
+
+	// Build property lookup map
+	TMap<FString, FProperty *> PropertyMap;
+	for (TFieldIterator<FProperty> PropIt(CompClass); PropIt; ++PropIt)
+	{
+		PropertyMap.Add((*PropIt)->GetName(), *PropIt);
+	}
+
+	for (const auto &Pair : (*PropertiesObj)->Values)
+	{
+		const FString &PropName = Pair.Key;
+		const TSharedPtr<FJsonValue> &JsonVal = Pair.Value;
+
+		FProperty **FoundProp = PropertyMap.Find(PropName);
+		if (!FoundProp || !*FoundProp)
+		{
+			auto ErrObj = MakeShared<FJsonObject>();
+			ErrObj->SetStringField(TEXT("property"), PropName);
+			ErrObj->SetStringField(TEXT("error"), TEXT("Property not found on component"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrObj));
+			continue;
+		}
+
+		FProperty *Prop = *FoundProp;
+		void *ValuePtr = Prop->ContainerPtrToValuePtr<void>(TargetComp);
+
+		// Notify the actor/component that we're about to change it (for undo support)
+		TargetComp->Modify();
+
+		FString SetError;
+		if (LevelDesignHelpers::JsonToProperty(Prop, ValuePtr, JsonVal, SetError))
+		{
+			PropertiesSet.Add(MakeShared<FJsonValueString>(PropName));
+		}
+		else
+		{
+			auto ErrObj = MakeShared<FJsonObject>();
+			ErrObj->SetStringField(TEXT("property"), PropName);
+			ErrObj->SetStringField(TEXT("error"), SetError);
+			Errors.Add(MakeShared<FJsonValueObject>(ErrObj));
+		}
+	}
+
+	if (PropertiesSet.Num() == 0)
+	{
+		Transaction.Cancel();
+		if (Errors.Num() > 0)
+		{
+			auto ErrResult = MakeShared<FJsonObject>();
+			ErrResult->SetArrayField(TEXT("errors"), Errors);
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to set any properties. First error: %s"),
+																*Errors[0]->AsObject()->GetStringField(TEXT("error"))));
+		}
+		return FMonolithActionResult::Error(TEXT("No properties specified in the properties object"));
+	}
+
+	// Mark the component as needing re-registration so changes take effect
+	TargetComp->MarkRenderStateDirty();
+	Actor->MarkPackageDirty();
+
+	auto Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("actor_name"), Actor->GetActorNameOrLabel());
+	Result->SetStringField(TEXT("component_name"), TargetComp->GetFName().ToString());
+	Result->SetStringField(TEXT("component_class"), CompClass->GetName());
+	Result->SetNumberField(TEXT("properties_set"), PropertiesSet.Num());
+	Result->SetArrayField(TEXT("set"), PropertiesSet);
+	if (Errors.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("errors"), Errors);
+	}
 
 	return FMonolithActionResult::Success(Result);
 }
