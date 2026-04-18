@@ -10,7 +10,7 @@
 
 ## What is Monolith?
 
-Monolith is an Unreal Engine editor plugin that gives your AI full read/write access to your project through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Install one plugin, point your AI client at one endpoint, and it can work with Blueprints, Materials, Animation, Niagara, AI (Behavior Trees, State Trees, EQS, Smart Objects), Gameplay Ability System, Logic Driver state machines, project configuration, and more.
+Monolith is an Unreal Engine editor plugin that gives your AI full read/write access to your project through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Install one plugin, point your AI client at one endpoint, and it can work with Blueprints, Materials, Animation, Niagara, Audio (Sound Cues, MetaSounds), AI (Behavior Trees, State Trees, EQS, Smart Objects), Gameplay Ability System, Logic Driver state machines, project configuration, and more.
 
 It works with **Claude Code**, **Cursor**, or any MCP-compatible client. If your AI tool speaks MCP, it speaks Monolith.
 
@@ -18,7 +18,7 @@ It works with **Claude Code**, **Cursor**, or any MCP-compatible client. If your
 
 ## Why Monolith?
 
-Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (18 tools), massive capability (1145 actions across 15 modules). The AI gets oriented fast and spends its context on your actual problem.
+Most MCP integrations register every action as a separate tool, which floods the AI's context window and buries the actually useful stuff. Monolith uses a **namespace dispatch pattern** instead: each domain exposes a single `{namespace}_query(action, params)` tool, and a central `monolith_discover()` call lists everything available. Small tool list (18 tools), massive capability (1226 actions across 16 modules). The AI gets oriented fast and spends its context on your actual problem.
 
 ## What Can It Actually Do?
 
@@ -50,6 +50,8 @@ Most MCP integrations register every action as a separate tool, which floods the
 
 **ComboGraph (13 actions)** — Integration with the ComboGraph marketplace plugin for visual combo tree editing. Graph CRUD — create, inspect, validate combo graphs. Node and edge management — add combo nodes with montage animations, wire them with edges, configure effects and cues. GAS cross-integration — scaffold combo abilities that bridge ComboGraph with Gameplay Ability System. Reflection-only integration, conditional on `#if WITH_COMBOGRAPH`.
 
+**Audio (81 actions)** — Editor-time audio asset authoring across the full UE audio pipeline. Full CRUD on the 5 configurable audio asset types — SoundAttenuation, SoundClass, SoundMix, SoundConcurrency, SoundSubmix. Sound Cue graph construction — add nodes (22 types), wire them, set properties via reflection. MetaSound Builder API integration for programmatic MetaSound authoring — nodes, pins, graph inputs/outputs, interfaces, variables. Crown jewels: `build_sound_cue_from_spec` and `build_metasound_from_spec` — declarative JSON-to-graph in a single call. Batch operations for class/attenuation/submix/concurrency/compression/looping/virtualization across dozens of assets at once. Audio health checks — find unused sounds, missing attenuation, unassigned classes. Five template Sound Cues (random, layered, looping ambient, distance crossfade, switch) and four template MetaSounds (oneshot SFX, looping ambient, synth tone, interactive). SoundWave inspection is read-only; reflection-based property edits still work for batch sound wave tuning. MetaSound features gated on `#if WITH_METASOUND` — graceful degradation when absent.
+
 ---
 
 ## Features
@@ -63,6 +65,7 @@ Most MCP integrations register every action as a separate tool, which floods the
 - **GAS (130 actions)** — Full Gameplay Ability System: abilities, AttributeSets (C++ and Blueprint via optional GBA), Gameplay Effects, ASC management, tags, cues, targeting, input binding, runtime inspection, scaffolding templates, accessibility-focused infinite-duration GEs
 - **Logic Driver (66 actions)** — Logic Driver Pro state machines: SM CRUD, graph read/write, node config, runtime/PIE, `build_sm_from_spec`, JSON spec, scaffolding (door, health, AI patrol, dialogue, elevator, puzzle, inventory), component management
 - **ComboGraph (13 actions)** — ComboGraph combo trees: graph CRUD, nodes, edges, effects, cues, GAS cross-integration, ability scaffolding
+- **Audio (81 actions)** — Sound asset CRUD (SoundAttenuation, SoundClass, SoundMix, SoundConcurrency, SoundSubmix), Sound Cue graph building, MetaSound Builder API (conditional on `WITH_METASOUND`), batch ops, audio health checks, `build_sound_cue_from_spec`, `build_metasound_from_spec`, `apply_audio_template`, template cues + MetaSounds
 - **UI (42 actions)** — Widget Blueprint CRUD, pre-built templates (HUDs, menus, settings, inventory, save slots), styling, animation, game system scaffolding (save/load, audio, input remapping), accessibility audit, colorblind modes, text scaling
 - **Editor control (20 actions)** — UBT builds, Live Coding, error diagnosis, log search, scene capture, GIF capture, texture import, crash context
 - **Config intelligence (6 actions)** — Full INI resolution chain, explain, diff, search across all config files
@@ -72,7 +75,7 @@ Most MCP integrations register every action as a separate tool, which floods the
 - **Auto-updater** — Checks GitHub Releases on editor startup, downloads and stages updates, auto-swaps on exit
 - **MCP auto-reconnect proxy** — stdio-to-HTTP proxy keeps Claude Code sessions alive across editor restarts. Available as native exe (zero dependencies) or Python script (fallback)
 - **Optional module system** — Extend Monolith with new MCP namespaces for third-party plugins (GeometryScripting, BlueprintAssist, GBA, ComboGraph, Logic Driver) without breaking the build for users who don't own them
-- **Claude Code skills** — 14 domain-specific workflow guides bundled with the plugin
+- **Claude Code skills** — 15 domain-specific workflow guides bundled with the plugin
 - **Pure C++** — Direct UE API access, embedded Streamable HTTP server, zero external dependencies
 
 ---
@@ -264,6 +267,7 @@ Monolith.uplugin
   MonolithGAS           — Gameplay Ability System: abilities, effects, attributes, ASC, tags, cues, targeting (130 actions)
   MonolithLogicDriver   — Logic Driver Pro state machines: SM CRUD, graph read/write, JSON spec, scaffolding (66 actions)
   MonolithComboGraph    — ComboGraph combo trees: graph CRUD, nodes, edges, effects, cues (13 actions)
+  MonolithAudio         — Audio asset CRUD, Sound Cue + MetaSound graph building, batch ops, templates (81 actions)
   MonolithBABridge      — Blueprint Assist integration bridge (0 MCP actions — IModularFeatures only)
 
 Standalone Tools (in Binaries/)
@@ -271,7 +275,7 @@ Standalone Tools (in Binaries/)
   monolith_query.exe    — Offline DB query tool (1.8MB, sqlite3 amalgamation, zero UE dependency)
 ```
 
-**1145 actions total across 15 modules, exposed through 18 MCP tools.**
+**1226 actions total across 16 modules, exposed through 18 MCP tools.**
 
 ### Tool Reference
 
@@ -290,6 +294,7 @@ Standalone Tools (in Binaries/)
 | `gas` | `gas_query` | 130 | Gameplay Ability System — abilities, effects, attributes, ASC, tags, cues, targeting, input, inspect, scaffold |
 | `logicdriver` | `logicdriver_query` | 66 | Logic Driver Pro state machines — SM CRUD, graph read/write, JSON spec, scaffolding, components |
 | `combograph` | `combograph_query` | 13 | ComboGraph combo trees — graph CRUD, nodes, edges, effects, cues, ability scaffolding |
+| `audio` | `audio_query` | 81 | Sound asset CRUD, Sound Cue + MetaSound graph building, batch ops, audio health checks, templates |
 | `ui` | `ui_query` | 42 | UI widget Blueprint CRUD, templates, styling, animation, settings scaffolding, accessibility |
 | `editor` | `editor_query` | 20 | Build triggers, error logs, compile output, crash context, scene capture, GIF capture, texture import |
 | `config` | `config_query` | 6 | INI resolution, explain, diff, search |
@@ -420,7 +425,7 @@ Settings live at **Editor Preferences > Plugins > Monolith**:
 
 ## Skills
 
-Monolith bundles 14 Claude Code skills in `Skills/` — domain-specific workflow guides that give your AI the right mental model for each area:
+Monolith bundles 15 Claude Code skills in `Skills/` — domain-specific workflow guides that give your AI the right mental model for each area:
 
 | Skill | Description |
 |-------|-------------|
@@ -428,6 +433,7 @@ Monolith bundles 14 Claude Code skills in `Skills/` — domain-specific workflow
 | `unreal-materials` | PBR setup, graph building, validation |
 | `unreal-animation` | Montages, ABP state machines, blend spaces |
 | `unreal-niagara` | Particle system creation, HLSL modules, scalability |
+| `unreal-audio` | Sound Cue + MetaSound graph building, audio asset CRUD, batch ops, templates |
 | `unreal-mesh` | Mesh inspection, spatial queries, blockout, procedural geometry, horror/accessibility |
 | `unreal-ui` | Widget Blueprint CRUD, templates, styling, accessibility |
 | `unreal-gas` | Gameplay Ability System — abilities, effects, attributes, ASC, tags, cues |
