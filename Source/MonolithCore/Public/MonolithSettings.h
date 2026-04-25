@@ -129,6 +129,43 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Indexing")
 	bool bIndexMarketplacePlugins = true;
 
+	// --- Indexing Performance ---
+
+	/** Memory budget for indexing in megabytes. 0 = auto-detect from installed RAM. Indexing will pause and run GC when this limit is exceeded. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Memory Budget (MB)",
+		meta=(ClampMin="0", ClampMax="65536", ToolTip="0 = auto-detect tier based on installed RAM (64+ GB -> 32 GB, 32+ GB -> 16 GB, 16 GB -> 6 GB, <16 GB -> 3 GB). Set explicitly to override."))
+	int32 MemoryBudgetMB = 0;
+
+	/** Number of assets to process per batch during deep indexing. 0 = auto-detect from installed RAM. Lower values reduce memory spikes but increase indexing time. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Deep Index Batch Size",
+		meta=(ClampMin="0", ClampMax="64", ToolTip="0 = auto-detect tier (32+ GB -> 8, 16 GB -> 4, <16 GB -> 2). Set explicitly to override. Lower = less memory, slower indexing."))
+	int32 DeepIndexBatchSize = 0;
+
+	/** Number of assets to process per batch for post-pass indexers (levels, meshes). 0 = auto-detect from installed RAM. These are memory-heavy so use smaller batches. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Post-Pass Batch Size",
+		meta=(ClampMin="0", ClampMax="32", ToolTip="0 = auto-detect tier (32+ GB -> 4, 16 GB -> 2, <16 GB -> 1). Set explicitly to override. Lower for large assets."))
+	int32 PostPassBatchSize = 0;
+
+	/** Run garbage collection every N batches during indexing. Lower values keep memory lower but slow down indexing. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="GC Frequency (Batches)",
+		meta=(ClampMin="1", ClampMax="20", ToolTip="Run GC every N batches. 1 = every batch, higher = less frequent."))
+	int32 GCFrequencyBatches = 2;
+
+	/** Time to yield between batches when memory pressure is detected (seconds). Allows editor to remain responsive. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Yield Time (seconds)",
+		meta=(ClampMin="0.0", ClampMax="1.0", ToolTip="Sleep time when throttling due to memory pressure."))
+	float YieldTimeSeconds = 0.1f;
+
+	/** Defer first-time indexing until explicitly triggered via console command. Useful for very large projects. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Defer First-Time Index",
+		meta=(ToolTip="If true, first-time indexing won't run automatically. Use 'Monolith.StartIndex' console command to trigger."))
+	bool bDeferFirstTimeIndex = false;
+
+	/** Log memory statistics periodically during indexing. Off by default to keep shipped-project logs quiet — opt in when debugging indexer behavior. */
+	UPROPERTY(config, EditAnywhere, Category="Indexing|Performance", DisplayName="Log Memory Stats",
+		meta=(ToolTip="Log memory usage during indexing for debugging. Default off — enable when investigating memory pressure."))
+	bool bLogMemoryStats = false;
+
 	// --- Module Toggles ---
 
 	UPROPERTY(config, EditAnywhere, Category = "Modules")
@@ -192,6 +229,16 @@ public:
 			  meta = (DisplayName = "Enable Voxel Plugin Integration",
 					  ToolTip = "When enabled and Voxel Plugin is installed, registers voxel_query actions for inspecting VoxelGraph, VoxelVolumeGraph, and VoxelSmartSurfaceType assets."))
 	bool bEnableVoxel = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Modules|Optional",
+			  meta = (DisplayName = "Enable Inventory System X Module",
+					  ToolTip = "Registers inventory_query actions for InventorySystemX integration (items, equipment, storage, crafting, runtime PIE, AI, accessibility)."))
+	bool bEnableInventorySystemX = true;
+
+	UPROPERTY(config, EditAnywhere, Category = "Modules|Optional",
+			  meta = (DisplayName = "Enable Audio Module",
+					  ToolTip = "Registers audio_query actions for audio asset creation, inspection, batch management, Sound Cue graph building, and MetaSound graph building."))
+	bool bEnableAudio = true;
 
 	// --- Modules|Mesh ---
 

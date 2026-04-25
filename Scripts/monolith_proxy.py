@@ -13,6 +13,10 @@ Usage (in .mcp.json):
 Requirements: Python 3.8+ (stdlib only, no pip install needed)
 """
 
+# PEP 563: defer annotation evaluation so PEP 604 unions (`str | None`) below
+# parse on Python 3.8/3.9 too (macOS ships 3.9 by default via Xcode).
+from __future__ import annotations
+
 import json
 import os
 import sys

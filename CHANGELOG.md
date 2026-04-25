@@ -6,6 +6,110 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-04-24
+
+### Fixed
+
+- **Build error: missing `MonolithPackagePathValidator.h`** ([#35](https://github.com/tumourlove/monolith/issues/35)) — Header was added to working tree but not tracked by git when v0.14.3 was cut. Three modules (`MonolithAI`, `MonolithGAS`, `MonolithUI`) included it, causing `C1083` on clean builds. Now properly tracked. Reported by **@krojew**.
+
+Full diff: [v0.14.3...v0.14.4](https://github.com/tumourlove/monolith/compare/v0.14.3...v0.14.4)
+
+## [0.14.3] - 2026-04-24
+
+### Added
+
+- **HTTP bind retry with port probe** ([#33](https://github.com/tumourlove/monolith/pull/33)) — `Start()` now retries up to 5 times with exponential backoff when the port is held by a zombie editor instance. A TCP socket probe verifies the bind actually took, instead of trusting `StartAllListeners()` which can fail silently. New `Monolith.Restart` console command for manual recovery without restarting the editor. PR by **@MaxenceEpitech**.
+
+- **Animation IK and bone control nodes** ([#34](https://github.com/tumourlove/monolith/pull/34)) — `add_anim_graph_node` now supports `TwoBoneIK`, `ModifyBone`, `LocalToComponentSpace`, and `ComponentToLocalSpace` node types. TwoBoneIK auto-exposes `EffectorLocation`, `JointTargetLocation`, and `Alpha` as input pins. New `expose_pins` parameter for manual pin control on any node type. PR by **@MaxenceEpitech**.
+
+- **`add_variable_get` action** ([#34](https://github.com/tumourlove/monolith/pull/34)) — Places a `K2Node_VariableGet` in an ABP anim graph for reading AnimInstance member variables. Validates the variable exists on the skeleton class before spawning. Animation action count: 115 → 116. PR by **@MaxenceEpitech**.
+
+### Fixed
+
+- **Nested struct/array cross-package TObjectPtr serialization** ([#29](https://github.com/tumourlove/monolith/issues/29)) — `set_cdo_property` now fires recursive `PreEditChange`/`PostEditChangeChainProperty` on every nested sub-property containing object references, matching the Details panel's full edit cradle. Previously only the outer property got the notification, so inner `TObjectPtr` fields in structs and arrays would serialize as null on save. Also wired the cradle into `create_data_asset` and `create_blueprint` to fix creation-side `FOverridableManager` poisoning. Reported by **@danielandric**.
+
+### Credits
+
+- **@MaxenceEpitech** — PRs [#33](https://github.com/tumourlove/monolith/pull/33), [#34](https://github.com/tumourlove/monolith/pull/34) (HTTP retry + animation IK nodes). Two solid contributions in the same day.
+- **@danielandric** — Issue [#29](https://github.com/tumourlove/monolith/issues/29) (nested property cradle). Thorough repro with the IMC DefaultKeyMappings case — made the fix straightforward.
+
+Full diff: [v0.14.2...v0.14.3](https://github.com/tumourlove/monolith/compare/v0.14.2...v0.14.3)
+
+## [0.14.0] - 2026-04-20
+
+### Added
+
+- **macOS (Apple Silicon) support** ([#24](https://github.com/tumourlove/monolith/pull/24)) — Monolith now builds and runs on macOS 15 / Apple Silicon under UE 5.7. Uses the existing Python proxy as the stdio↔HTTP bridge (the native C++ proxy remains Windows-only for now).
+  - New `Scripts/monolith_proxy.sh` shell launcher with `python3`/`python` auto-detection and 3.8+ version gate (parity with `monolith_proxy.bat`).
+  - `Scripts/monolith_proxy.py` now declares `from __future__ import annotations` so PEP 604 type syntax (`str | None`) works on Python 3.8+ — macOS ships 3.9 by default.
+  - `MonolithNiagaraActions.cpp`: renamed local `NO` → `NodeObj` to dodge the `<objc/objc.h>` `#define NO __objc_no` macro leak that transitively reaches `ApplePlatformProcess.h` and broke compilation.
+  - `Monolith.uplugin`: dropped ghost `MonolithISX` module reference (source lives outside master; release pipeline still strips ISX + SteamBridge on its own).
+  - README + CONTRIBUTING updated to document macOS/Linux support and `.sh` launcher.
+  - PR by **@MaxenceEpitech**.
+  - **Note for macOS users:** this release ships Windows binaries only. Please clone the repo and build from source per `CONTRIBUTING.md` — the macOS build path is proven (all 17 Monolith dylibs compile on UE 5.7 / Apple Silicon). Prebuilt macOS dylibs will follow once a GitHub Actions macOS runner is wired up.
+
+### Fixed
+
+- **Editor crash on indexer pass with WorldPartition-enabled persistent level** ([#20](https://github.com/tumourlove/monolith/issues/20), fix [#21](https://github.com/tumourlove/monolith/pull/21)) — `LevelIndexer::IndexAsset` loaded level packages via `LoadPackage` to enumerate actors, which initializes `UWorldPartition` for WP-enabled levels (UE 5.4+ default). Because `LoadPackage` skips the editor's open-level flow, nothing tore down the subsystem, and when the batch loop marked the package for unload and GC eventually ran, `UWorldPartitionSubsystem::Deinitialize` asserted at `WorldPartitionSubsystem.cpp:507`. Fix uninitializes WorldPartition after `IndexActorsInLevel` and before `TryUnloadPackage(World)`. Affected every UE 5.4+ project with a WP-enabled persistent level and the default `bIndexLevels` setting. Reported and fixed by **@danielandric**.
+- **Full Monolith rebuild on every UBT invocation after ZIP install** ([#22](https://github.com/tumourlove/monolith/issues/22), fix [#23](https://github.com/tumourlove/monolith/pull/23)) — PowerShell's `Compress-Archive` writes only DOS time (no NTFS or Unix extended timestamp), and DOS time is naked wall-clock with no timezone tag. `Expand-Archive` reinterprets the stored bytes as the user's local time, so a UTC+10-packaged ZIP extracted on UTC+0 landed with file mtimes ~10 hours in the user's future. UBT's `TargetMakefile.IsValidForSourceFiles` compares `ExternalDependency.LastWriteTimeUtc` against `Makefile.CreateTimeUtc`, so a future mtime on `Monolith.uplugin` tripped the check on every build and forced a full Monolith rebuild until the user's wall clock caught up. Affected every C++ user with auto-update on (default) and every C++ user installing from the ZIP manually. Fix mirrors POSIX tar's `--touch`: the auto-updater swap scripts (Windows + macOS/Linux) touch installed files post-xcopy, and `MonolithCoreModule::StartupModule` runs an idempotent self-heal that walks the plugin tree if `Monolith.uplugin` shows a future mtime (covers manual-install users). Microsoft acknowledged the underlying ZIP design flaw in [PowerShell/Microsoft.PowerShell.Archive#133](https://github.com/PowerShell/Microsoft.PowerShell.Archive/issues/133); their fix has not shipped. Reported and fixed by **@danielandric**.
+
+### Changed
+
+- **Release builds now run non-unity** — `Scripts/make_release.ps1` passes `-DisableUnity` to UBT so missing includes and unity-only symbol collisions get caught before they reach a public release.
+
+### Credits
+
+- **@danielandric** — PR [#21](https://github.com/tumourlove/monolith/pull/21) + issue [#20](https://github.com/tumourlove/monolith/issues/20) (WorldPartition indexer crash), PR [#23](https://github.com/tumourlove/monolith/pull/23) + issue [#22](https://github.com/tumourlove/monolith/issues/22) (ZIP mtime normalization). Thank you for two clean, well-diagnosed fixes in a single day.
+- **@MaxenceEpitech** — PR [#24](https://github.com/tumourlove/monolith/pull/24) (macOS support — shell launcher, Python compat, Objective-C macro dodge, ghost module cleanup). Thanks for putting in the proof-of-work end-to-end build verification on Apple Silicon.
+
+Full diff: [v0.13.2...v0.14.0](https://github.com/tumourlove/monolith/compare/v0.13.2...v0.14.0)
+
+## [0.13.2] - 2026-04-19
+
+### Hotfix
+
+- **Pulled v0.13.1 — it accidentally shipped with some work-in-progress CommonUI stuff in `MonolithUI` that I forgot was sitting in my working tree.** Same #19 fix as 0.13.1, just rebuilt clean from a committed tree. Grab this one instead. The release script now refuses to run with a dirty working tree so this doesn't happen again.
+
+## [0.13.1] - 2026-04-19 — DO NOT USE
+
+Withdrawn. Use [v0.13.2](#0132---2026-04-19) — same fix, built from a clean tree. 0.13.1's release zip contained uncommitted WIP for unrelated `MonolithUI` work.
+
+### Fixed
+
+- **Indexer fatal crash: "Calling FinishCompilation is not allowed during PostCompilation"** ([#19](https://github.com/tumourlove/monolith/issues/19)) — sorry about this one, the fix I shipped for [#16](https://github.com/tumourlove/monolith/issues/16) in 0.13.0 caused the regression. I was calling `FAssetCompilingManager::FinishAllCompilation()` from inside `AsyncTask(ENamedThreads::GameThread, ...)` lambdas to avoid the reentrant compile crash, but those lambdas can land on the game thread while UE is already mid-`FTextureCompilingManager::PostCompilation`, and the engine fatals on that reentrance (`TextureCompiler.cpp:454`). Epic's own comment on the line above says workers should use `ExecuteOnGameThread` or tick-scheduled dispatch instead of `AsyncTask(GT)`. Done and done.
+  - New `FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle` helper — schedules work via `FTSTicker` (main tick loop, not task graph) and only fires when `FAssetCompilingManager::GetNumRemainingAssets() == 0`, with a 120s timeout safeguard.
+  - All 8 asset-loading `AsyncTask(GT)` sites in `MonolithIndexSubsystem.cpp` rerouted through the helper: deep-index batch, dependency, level, data table, animation, gameplay tag, niagara, mesh catalog indexers.
+  - All 5 `FinishAllCompilation()` calls inside indexer payloads deleted — the helper's idle-precondition is now the single point of compiler synchronization.
+  - Reported by **@asafdubaaa**.
+
+### Credits
+
+- **@asafdubaaa** — issue [#19](https://github.com/tumourlove/monolith/issues/19) (caught the regression fast, thanks for the stack traces)
+
+Full diff: [v0.13.0...v0.13.2](https://github.com/tumourlove/monolith/compare/v0.13.0...v0.13.2)
+
+## [0.13.0] - 2026-04-18
+
+### Added
+
+- **MonolithAudio module shipped** — 81 actions across Phases 0-2: Sound asset CRUD (15), query/search (10), batch operations (10), Sound Cue graph building (21), MetaSound Builder API integration (25). Includes three power actions: `build_sound_cue_from_spec`, `build_metasound_from_spec`, `apply_audio_template`. MetaSound features gated on `WITH_METASOUND`. Phases 0-2 fully tested (28/28 PASS, 5 bugs fixed during test pass). Module had been completed + tested on 2026-04-08 but was not yet public.
+- **Indexer RAM tier auto-detect** — `FMonolithMemoryHelper` now picks a memory budget and batch sizes based on installed RAM: 64+ GB → 32768 MB / deep=8 / post=4; 32+ GB → 16384 MB / deep=8 / post=4; 16 GB → 6144 MB / deep=4 / post=2; <16 GB → 3072 MB / deep=2 / post=1. Settings defaults changed to `0` (auto-detect sentinel) for `MemoryBudgetMB`, `DeepIndexBatchSize`, `PostPassBatchSize`. Users can still override via Project Settings > Monolith > Indexing > Performance. Tier logged once per editor session on first index run.
+
+### Fixed
+
+- **Indexer OOM + reentrant texture compiler crash on large projects** ([#16](https://github.com/tumourlove/monolith/issues/16)) — deep-index batches could exhaust physical RAM or re-enter `FTextureCompilingManager::ProcessAsyncTasks`, crashing the editor on large projects (>20 GB content). Fix introduces `FAssetCompilingManager::FinishAllCompilation()` guards before each batch, forced GC between batches, Slate-safe yields, emergency pause when available memory drops below 2 GB, and honors the async notification Cancel button. Shipped as PR [#17](https://github.com/tumourlove/monolith/pull/17) from **@alakangas**. Reported by **@MAYLYBY**.
+
+### Changed
+
+- **`bLogMemoryStats` default flipped to `false`** — opt in when debugging indexer memory behavior. Keeps shipped-project logs quiet.
+
+### Credits
+
+- **@alakangas** — PR [#17](https://github.com/tumourlove/monolith/pull/17) (indexer OOM + reentrant compiler crash fix)
+- **@MAYLYBY** — issue [#16](https://github.com/tumourlove/monolith/issues/16) (detailed crash report that drove the fix and uncovered the low-spec regression we addressed with the RAM tier auto-detect)
+
+Full diff: [v0.12.1...v0.13.0](https://github.com/tumourlove/monolith/compare/v0.12.1...v0.13.0)
+
 ## [0.12.1] - 2026-04-03
 
 ### Fixed

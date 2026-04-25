@@ -7,8 +7,8 @@ Thanks for your interest in contributing. This guide covers everything you need 
 ### Prerequisites
 
 - **Unreal Engine 5.7+** (source or launcher build)
-- **Windows** (Mac/Linux support is planned but not yet available)
-- **Python 3.10+** (only needed for engine source indexing)
+- **Windows, macOS, or Linux** — see [README Installation](README.md#installation) for per-platform proxy setup
+- **Python 3.10+** (only needed for engine source indexing and for the cross-platform MCP proxy on macOS/Linux)
 - **Git**
 
 ### Clone & Build
@@ -284,7 +284,7 @@ Then use Claude Code or any MCP-compatible client to interact with the tools.
 
 4. **Update docs** — If you add actions, update:
    - The relevant skill in `Skills/`
-   - `Docs/SPEC.md` action tables
+   - `Docs/specs/SPEC_<Module>.md` action tables (per-module spec for the namespace you touched)
    - `README.md` action counts (if totals change)
 
 5. **Commit messages** — Use conventional format: `feat:`, `fix:`, `docs:`, `refactor:`

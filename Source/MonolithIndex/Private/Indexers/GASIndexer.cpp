@@ -77,6 +77,8 @@ namespace
 		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
 		Registry.GetAssets(Filter, BPAssets);
 
+		// Compiler-idle gate is enforced by FMonolithCompilerSafeDispatch at the call site (see issue #19).
+
 		for (const FAssetData& AssetData : BPAssets)
 		{
 			UBlueprint* BP = Cast<UBlueprint>(AssetData.GetAsset());

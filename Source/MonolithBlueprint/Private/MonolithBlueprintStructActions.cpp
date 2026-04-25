@@ -11,6 +11,10 @@
 #include "StructUtils/UserDefinedStruct.h"
 #include "Engine/UserDefinedEnum.h"
 #include "Engine/DataTable.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "MonolithBlueprintEditCradle.h"
+#include "ScopedTransaction.h"
 
 // ============================================================
 //  Registration
@@ -58,6 +62,15 @@ void FMonolithBlueprintStructActions::RegisterActions(FMonolithToolRegistry& Reg
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_path"), TEXT("string"), TEXT("DataTable asset path, e.g. /Game/Data/DT_Weapons"))
 			.Optional(TEXT("row_name"),   TEXT("string"), TEXT("If provided, return only this row. Otherwise return all rows."))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("create_data_asset"),
+		TEXT("Create a raw UObject asset (NOT a Blueprint). Use for DataAssets, MaterialParameterCollections, PhysicalMaterials, CurveFloats, and any UObject-derived class that needs to exist as a direct instance rather than a Blueprint-generated class. Resolves class_name via FindFirstObject with U/A prefix fallback. Rejects abstract, deprecated, Actor-derived, and Blueprint classes."),
+		FMonolithActionHandler::CreateStatic(&HandleCreateDataAsset),
+		FParamSchemaBuilder()
+			.Required(TEXT("save_path"),  TEXT("string"),  TEXT("Asset save path, e.g. /Game/Data/DA_ResponseMap"))
+			.Required(TEXT("class_name"), TEXT("string"),  TEXT("UObject class name, e.g. CarnageFXResponseMap, MaterialParameterCollection, PhysicalMaterial, CurveFloat. Can also use full path /Script/Module.ClassName for disambiguation"))
+			.Optional(TEXT("skip_save"),  TEXT("boolean"), TEXT("Skip synchronous package save (default: false)"), TEXT("false"))
 			.Build());
 }
 
@@ -714,6 +727,152 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleGetDataTableRows(co
 	Root->SetNumberField(TEXT("row_count"), RowResults.Num());
 	Root->SetNumberField(TEXT("total_rows"), RowMap.Num());
 	Root->SetArrayField(TEXT("rows"), RowResults);
+	Root->SetBoolField(TEXT("success"), true);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  create_data_asset
+// ============================================================
+
+FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateDataAsset(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SavePath = Params->GetStringField(TEXT("save_path"));
+	if (SavePath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: save_path"));
+	}
+
+	FString ClassName = Params->GetStringField(TEXT("class_name"));
+	if (ClassName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: class_name"));
+	}
+
+	// Extract asset name from save path
+	int32 LastSlash;
+	if (!SavePath.FindLastChar(TEXT('/'), LastSlash))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid save_path — must contain at least one '/': %s"), *SavePath));
+	}
+	FString AssetName = SavePath.Mid(LastSlash + 1);
+	if (AssetName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("save_path must not end with '/': %s"), *SavePath));
+	}
+
+	// Resolve class_name → UClass*
+	UClass* ResolvedClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::NativeFirst);
+	if (!ResolvedClass)
+	{
+		ResolvedClass = FindFirstObject<UClass>(*(TEXT("U") + ClassName), EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!ResolvedClass)
+	{
+		ResolvedClass = FindFirstObject<UClass>(*(TEXT("A") + ClassName), EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!ResolvedClass)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class not found: '%s'. Tried as-is, with 'U' prefix, and with 'A' prefix. "
+				 "Use full path (e.g. /Script/Module.ClassName) for disambiguation."), *ClassName));
+	}
+
+	// Guard: reject Blueprint and BlueprintGeneratedClass (use create_blueprint instead)
+	if (ResolvedClass->IsChildOf(UBlueprint::StaticClass()) ||
+		ResolvedClass->IsChildOf(UBlueprintGeneratedClass::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' is a Blueprint class. Use create_blueprint instead."), *ResolvedClass->GetName()));
+	}
+
+	// Guard: reject abstract, deprecated, or superseded classes
+	if (ResolvedClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+	{
+		FString Reason;
+		if (ResolvedClass->HasAnyClassFlags(CLASS_Abstract)) Reason = TEXT("abstract");
+		else if (ResolvedClass->HasAnyClassFlags(CLASS_Deprecated)) Reason = TEXT("deprecated");
+		else Reason = TEXT("superseded by a newer version");
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Cannot instantiate class '%s': it is %s."), *ResolvedClass->GetName(), *Reason));
+	}
+
+	// Guard: reject Actor-derived classes (use spawn_actor instead)
+	if (ResolvedClass->IsChildOf(AActor::StaticClass()))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Class '%s' is Actor-derived. Actors must live in a ULevel — use spawn_actor or create_blueprint instead."),
+			*ResolvedClass->GetName()));
+	}
+
+	// Guard against existing asset (2-tier: Asset Registry + FindObject)
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	FAssetData ExistingAsset = AR.GetAssetByObjectPath(FSoftObjectPath(SavePath + TEXT(".") + AssetName));
+	if (ExistingAsset.IsValid())
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset already exists at '%s'. Delete it first."), *SavePath));
+	}
+	if (FindObject<UObject>(nullptr, *(SavePath + TEXT(".") + AssetName)))
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Asset already exists in memory at '%s'. Delete it first."), *SavePath));
+	}
+
+	// Create package
+	UPackage* Package = CreatePackage(*SavePath);
+	if (!Package)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to create package at path: %s"), *SavePath));
+	}
+	Package->FullyLoad();
+
+	// Create the raw UObject instance
+	UObject* NewAsset = NewObject<UObject>(Package, ResolvedClass, FName(*AssetName), RF_Public | RF_Standalone);
+	if (!NewAsset)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("NewObject failed for class '%s' at path '%s'."), *ResolvedClass->GetName(), *SavePath));
+	}
+
+	// Fire edit cradle on all properties — initializes FOverridableManager state (#29).
+	NewAsset->SetFlags(RF_Transactional);
+	FScopedTransaction Transaction(NSLOCTEXT("MonolithBlueprintStructActions",
+		"CreateDataAsset", "Monolith Create Data Asset"));
+	NewAsset->Modify();
+
+	for (TFieldIterator<FProperty> It(ResolvedClass); It; ++It)
+	{
+		FProperty* Prop = *It;
+		if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+			continue;
+		MonolithEditCradle::FireFullCradle(NewAsset, Prop);
+	}
+
+	// Read skip_save param
+	bool bSkipSave = false;
+	if (Params->HasField(TEXT("skip_save")))
+	{
+		bSkipSave = Params->GetBoolField(TEXT("skip_save"));
+	}
+
+	// Notify and save
+	Package->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(NewAsset);
+
+	bool bSaved = false;
+	if (!bSkipSave)
+	{
+		bSaved = UEditorAssetLibrary::SaveLoadedAsset(NewAsset, false);
+	}
+
+	// Build response
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), SavePath);
+	Root->SetStringField(TEXT("class_name"), ClassName);
+	Root->SetStringField(TEXT("actual_class"), ResolvedClass->GetName());
+	Root->SetStringField(TEXT("class_path"), ResolvedClass->GetPathName());
+	Root->SetBoolField(TEXT("saved"), bSaved);
 	Root->SetBoolField(TEXT("success"), true);
 	return FMonolithActionResult::Success(Root);
 }

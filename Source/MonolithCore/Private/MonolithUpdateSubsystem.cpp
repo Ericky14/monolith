@@ -840,6 +840,11 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		TEXT("    pause\r\n")
 		TEXT("    exit /b 1\r\n")
 		TEXT(")\r\n")
+		// Touch installed files so mtimes reflect this machine, not the ZIP's DOS wall-time.
+		// Cross-TZ extraction otherwise leaves future mtimes that invalidate UBT's makefile
+		// every build (analogous to tar --touch; Expand-Archive has no equivalent flag).
+		TEXT("echo  Normalizing file timestamps...\r\n")
+		TEXT("powershell -NoProfile -Command \"Get-ChildItem -Recurse -File '%s' | ForEach-Object { $_.LastWriteTime = Get-Date }\"\r\n")
 		TEXT("rem Preserve .git if it exists (developer workflow)\r\n")
 		TEXT("if exist \"%s\\.git\" (\r\n")
 		TEXT("    echo  Preserving git repository...\r\n")
@@ -876,6 +881,8 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		// Rollback: rmdir partial copy + move backup back
 		*WinPluginDir, *WinPluginDir,
 		*WinBackupDir, *WinPluginDir,
+		// Touch step
+		*WinPluginDir,
 		// Preserve .git from backup
 		*WinBackupDir, *WinBackupDir, *WinPluginDir,
 		*WinBackupDir, *WinBackupDir, *WinPluginDir,
@@ -898,6 +905,9 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		TEXT("mv \"%s\" \"%s\" || { sleep 5; mv \"%s\" \"%s\"; }\n")
 		TEXT("cp -r \"%s/.\" \"%s/\"\n")
 		TEXT("if [ $? -ne 0 ]; then mv \"%s\" \"%s\"; echo 'FAILED'; exit 1; fi\n")
+		// Defense-in-depth touch (cp without -p already resets mtimes here).
+		TEXT("echo 'Normalizing file timestamps...'\n")
+		TEXT("find \"%s\" -exec touch {} +\n")
 		TEXT("# Preserve .git if it exists (developer workflow)\n")
 		TEXT("[ -d \"%s/.git\" ] && cp -r \"%s/.git\" \"%s/.git\"\n")
 		TEXT("[ -f \"%s/.gitignore\" ] && cp \"%s/.gitignore\" \"%s/.gitignore\"\n")
@@ -910,6 +920,8 @@ bool UMonolithUpdateSubsystem::WriteSwapScript(const FString& StagingDir, const 
 		*PluginDir, *BackupDir, *PluginDir, *BackupDir,
 		*StagingDir, *PluginDir,
 		*BackupDir, *PluginDir,
+		// Touch step
+		*PluginDir,
 		// Preserve .git from backup
 		*BackupDir, *BackupDir, *PluginDir,
 		*BackupDir, *BackupDir, *PluginDir,

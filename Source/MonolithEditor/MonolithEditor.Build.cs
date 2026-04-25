@@ -37,7 +37,8 @@ public class MonolithEditor : ModuleRules
 			"AdvancedPreviewScene",
 			"ImageCore",
 			"Projects",
-			"LevelEditor"
+			"LevelEditor",
+			"ProceduralMeshComponent"
 		});
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
