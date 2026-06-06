@@ -67,11 +67,42 @@ FProperty* FMonolithReflectionWalker::FindPropertyForwarding(UStruct* Struct, co
 	{
 		return P;
 	}
+	// Robust fallback (mirrors add_data_table_row / GetFriendlyPropertyName): match by
+	// case-insensitive internal name, DisplayName metadata, OR the UserDefinedStruct
+	// "Field_N_GUID" -> "Field" stripped prefix. Without this, UDS fields are only
+	// reachable by their exact GUID-suffixed internal name, which made friendly names
+	// like "WeaponDamage" / "BowArmorSkeletalMesh" unresolvable.
 	for (TFieldIterator<FProperty> It(Struct); It; ++It)
 	{
-		if (It->GetName().Equals(Name, ESearchCase::IgnoreCase))
+		FProperty* Prop = *It;
+		const FString PropName = Prop->GetName();
+
+		// 1) Case-insensitive full internal name.
+		if (PropName.Equals(Name, ESearchCase::IgnoreCase))
 		{
-			return *It;
+			return Prop;
+		}
+
+#if WITH_EDITOR
+		// 2) Editor DisplayName metadata (critical for UserDefinedStructs).
+		const FString DisplayName = Prop->GetMetaData(TEXT("DisplayName"));
+		if (!DisplayName.IsEmpty() && DisplayName.Equals(Name, ESearchCase::IgnoreCase))
+		{
+			return Prop;
+		}
+#endif
+
+		// 3) UDS GUID-suffix strip: "Field_N_GUID" -> "Field" (only when the char after
+		//    the first underscore is a digit, i.e. the generated UDS naming pattern).
+		int32 FirstUnderscore = INDEX_NONE;
+		if (PropName.FindChar(TEXT('_'), FirstUnderscore) && FirstUnderscore + 1 < PropName.Len())
+		{
+			const TCHAR NextChar = PropName[FirstUnderscore + 1];
+			if (NextChar >= TEXT('0') && NextChar <= TEXT('9')
+				&& PropName.Left(FirstUnderscore).Equals(Name, ESearchCase::IgnoreCase))
+			{
+				return Prop;
+			}
 		}
 	}
 	return nullptr;
