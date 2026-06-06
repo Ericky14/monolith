@@ -52,8 +52,6 @@ namespace MonolithNiagaraTimingLocal
 	}
 }
 
-using namespace MonolithNiagaraTimingLocal;
-
 // ============================================================================
 //  Registration
 // ============================================================================
@@ -154,8 +152,8 @@ void FMonolithNiagaraTimingActions::RegisterActions(FMonolithToolRegistry& Regis
 
 FMonolithActionResult FMonolithNiagaraTimingActions::HandleGetSystemTiming(const TSharedPtr<FJsonObject>& Params)
 {
-	const FString SystemPath = GetAssetPath(Params);
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
@@ -174,12 +172,12 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleGetSystemTiming(const
 	}
 	R->SetBoolField(TEXT("require_current_frame_data"), bRequireCurrent);
 
-	return SuccessObj(R);
+	return MonolithNiagaraTimingLocal::SuccessObj(R);
 }
 
 FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetWarmupProfile(const TSharedPtr<FJsonObject>& Params)
 {
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 
 	// warmup_time required (per plan § Phase 1 spec)
 	TSharedPtr<FJsonValue> WarmupTimeJV = Params->TryGetField(TEXT("warmup_time"));
@@ -197,7 +195,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetWarmupProfile(cons
 		bHasTickDelta = true;
 	}
 
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "SetWarmupProfile", "Set Niagara Warmup Profile"));
@@ -235,12 +233,12 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetWarmupProfile(cons
 	R->SetNumberField(TEXT("warmup_time"), System->GetWarmupTime());
 	R->SetNumberField(TEXT("warmup_tick_count"), System->GetWarmupTickCount());
 	R->SetNumberField(TEXT("warmup_tick_delta"), System->GetWarmupTickDelta());
-	return SuccessObj(R);
+	return MonolithNiagaraTimingLocal::SuccessObj(R);
 }
 
 FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetFixedTickDelta(const TSharedPtr<FJsonObject>& Params)
 {
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 
 	// enabled required (bool)
 	TSharedPtr<FJsonValue> EnabledJV = Params->TryGetField(TEXT("enabled"));
@@ -258,7 +256,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetFixedTickDelta(con
 		bHasDeltaTime = true;
 	}
 
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	FBoolProperty* EnabledProp = FindFProperty<FBoolProperty>(UNiagaraSystem::StaticClass(), TEXT("bFixedTickDelta"));
@@ -298,19 +296,19 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetFixedTickDelta(con
 	R->SetStringField(TEXT("asset_path"), SystemPath);
 	R->SetBoolField(TEXT("fixed_tick_delta_enabled"), System->HasFixedTickDelta());
 	R->SetNumberField(TEXT("fixed_tick_delta_time"), System->GetFixedTickDeltaTime());
-	return SuccessObj(R);
+	return MonolithNiagaraTimingLocal::SuccessObj(R);
 }
 
 FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetRequireCurrentFrameData(const TSharedPtr<FJsonObject>& Params)
 {
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 
 	TSharedPtr<FJsonValue> RequireJV = Params->TryGetField(TEXT("require"));
 	if (!RequireJV.IsValid() || RequireJV->Type != EJson::Boolean)
 		return FMonolithActionResult::Error(TEXT("Missing required field: require (bool)"));
 	const bool bRequire = RequireJV->AsBool();
 
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	FBoolProperty* Prop = FindFProperty<FBoolProperty>(UNiagaraSystem::StaticClass(), TEXT("bRequireCurrentFrameData"));
@@ -333,7 +331,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetRequireCurrentFram
 	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
 	R->SetStringField(TEXT("asset_path"), SystemPath);
 	R->SetBoolField(TEXT("require_current_frame_data"), Prop->GetPropertyValue_InContainer(System));
-	return SuccessObj(R);
+	return MonolithNiagaraTimingLocal::SuccessObj(R);
 }
 
 // ============================================================================
@@ -759,7 +757,7 @@ namespace MonolithNiagaraTimingLocal
 		// UpdateContext destructor at scope exit triggers system re-init.
 		TSharedRef<FJsonObject> Resp = MakeShared<FJsonObject>();
 		Resp->SetBoolField(TEXT("success"), true);
-		Resp->SetStringField(TEXT("asset_path"), GetAssetPath(Params));
+		Resp->SetStringField(TEXT("asset_path"), MonolithNiagaraTimingLocal::GetAssetPath(Params));
 		Resp->SetStringField(TEXT("emitter"), Params->GetStringField(TEXT("emitter")));
 		Resp->SetBoolField(TEXT("stateless"), true);
 		Resp->SetArrayField(TEXT("warnings"), OutWarnings);
@@ -889,7 +887,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetEmitterLoopProfile
 {
 	using namespace MonolithNiagaraTimingLocal;
 
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 	if (SystemPath.IsEmpty())
 		return FMonolithActionResult::Error(TEXT("Missing required field: asset_path"));
 
@@ -938,7 +936,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetEmitterLoopProfile
 	if (Emitter.IsEmpty())
 		return FMonolithActionResult::Error(TEXT("Missing required field: emitter (string) — required when asset_path is a UNiagaraSystem"));
 
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	// Resolve emitter handle. Use the public list_emitters / set_module_input_value
@@ -1077,14 +1075,14 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetEmitterLoopProfile
 	Resp->SetStringField(TEXT("asset_path"), SystemPath);
 	Resp->SetStringField(TEXT("emitter"), Emitter);
 	Resp->SetArrayField(TEXT("warnings"), Warnings);
-	return SuccessObj(Resp);
+	return MonolithNiagaraTimingLocal::SuccessObj(Resp);
 }
 
 FMonolithActionResult FMonolithNiagaraTimingActions::HandleGetEmitterTimingSummary(const TSharedPtr<FJsonObject>& Params)
 {
 	using namespace MonolithNiagaraTimingLocal;
 
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 	if (SystemPath.IsEmpty())
 		return FMonolithActionResult::Error(TEXT("Missing required field: asset_path"));
 
@@ -1106,11 +1104,11 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleGetEmitterTimingSumma
 			TSharedRef<FJsonObject> Resp = MakeShared<FJsonObject>();
 			Resp->SetStringField(TEXT("asset_path"), SystemPath);
 			Resp->SetArrayField(TEXT("emitters"), EmittersArr);
-			return SuccessObj(Resp);
+			return MonolithNiagaraTimingLocal::SuccessObj(Resp);
 		}
 	}
 
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
@@ -1307,7 +1305,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleGetEmitterTimingSumma
 	TSharedRef<FJsonObject> Resp = MakeShared<FJsonObject>();
 	Resp->SetStringField(TEXT("asset_path"), SystemPath);
 	Resp->SetArrayField(TEXT("emitters"), EmittersArr);
-	return SuccessObj(Resp);
+	return MonolithNiagaraTimingLocal::SuccessObj(Resp);
 }
 
 // ----------------------------------------------------------------------------
@@ -1333,7 +1331,7 @@ namespace MonolithNiagaraTimingLocal
 	{
 		// Forward asset_path / system_path (canonical handler reads asset_path; the
 		// upstream GetAssetPath also accepts system_path so either works).
-		const FString SystemPath = GetAssetPath(Params);
+		const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 		if (SystemPath.IsEmpty())
 			return FMonolithActionResult::Error(TEXT("Missing required field: asset_path"));
 
@@ -1408,7 +1406,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetParticleLifetime(c
 {
 	using namespace MonolithNiagaraTimingLocal;
 
-	const FString SystemPath = GetAssetPath(Params);
+	const FString SystemPath = MonolithNiagaraTimingLocal::GetAssetPath(Params);
 	if (SystemPath.IsEmpty())
 		return FMonolithActionResult::Error(TEXT("Missing required field: asset_path"));
 
@@ -1427,7 +1425,7 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetParticleLifetime(c
 
 	// Validate emitter handle existence + stateless rejection up-front so we can
 	// produce a clean error without mid-dispatch partial-write side effects.
-	UNiagaraSystem* System = LoadSystem(SystemPath);
+	UNiagaraSystem* System = MonolithNiagaraTimingLocal::LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
 	int32 EIdx = INDEX_NONE;
@@ -1520,5 +1518,5 @@ FMonolithActionResult FMonolithNiagaraTimingActions::HandleSetParticleLifetime(c
 	{
 		Resp->SetNumberField(TEXT("lifetime"), MinValue);
 	}
-	return SuccessObj(Resp);
+	return MonolithNiagaraTimingLocal::SuccessObj(Resp);
 }

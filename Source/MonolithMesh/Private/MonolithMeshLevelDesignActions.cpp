@@ -186,6 +186,160 @@ namespace LevelDesignHelpers
 		Prop->ExportTextItem_Direct(ExportText, ValuePtr, nullptr, nullptr, PPF_None);
 		return MakeShared<FJsonValueString>(ExportText);
 	}
+
+	/** Set an FProperty value from a JSON value. Returns true on success. */
+	bool JsonToProperty(FProperty* Prop, void* ValuePtr, const TSharedPtr<FJsonValue>& JsonVal, FString& OutError)
+	{
+		if (!JsonVal.IsValid() || JsonVal->IsNull())
+		{
+			OutError = TEXT("null JSON value");
+			return false;
+		}
+
+		if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+		{
+			bool bVal;
+			if (JsonVal->TryGetBool(bVal)) { BoolProp->SetPropertyValue(ValuePtr, bVal); return true; }
+			OutError = TEXT("Expected bool"); return false;
+		}
+		if (FIntProperty* IntProp = CastField<FIntProperty>(Prop))
+		{
+			double Num;
+			if (JsonVal->TryGetNumber(Num)) { IntProp->SetPropertyValue(ValuePtr, (int32)Num); return true; }
+			OutError = TEXT("Expected number"); return false;
+		}
+		if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+		{
+			double Num;
+			if (JsonVal->TryGetNumber(Num)) { FloatProp->SetPropertyValue(ValuePtr, (float)Num); return true; }
+			OutError = TEXT("Expected number"); return false;
+		}
+		if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Prop))
+		{
+			double Num;
+			if (JsonVal->TryGetNumber(Num)) { DoubleProp->SetPropertyValue(ValuePtr, Num); return true; }
+			OutError = TEXT("Expected number"); return false;
+		}
+		if (FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+		{
+			FString Str;
+			if (JsonVal->TryGetString(Str)) { StrProp->SetPropertyValue(ValuePtr, Str); return true; }
+			OutError = TEXT("Expected string"); return false;
+		}
+		if (FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+		{
+			FString Str;
+			if (JsonVal->TryGetString(Str)) { NameProp->SetPropertyValue(ValuePtr, FName(*Str)); return true; }
+			OutError = TEXT("Expected string"); return false;
+		}
+		if (FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+		{
+			FString Str;
+			if (JsonVal->TryGetString(Str))
+			{
+				UEnum* Enum = EnumProp->GetEnum();
+				int64 Val = Enum ? Enum->GetValueByNameString(Str) : INDEX_NONE;
+				if (Val != INDEX_NONE)
+				{
+					EnumProp->GetUnderlyingProperty()->SetIntPropertyValue(ValuePtr, Val);
+					return true;
+				}
+				OutError = FString::Printf(TEXT("Unknown enum value '%s'"), *Str);
+				return false;
+			}
+			OutError = TEXT("Expected string for enum"); return false;
+		}
+		if (FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+		{
+			double Num;
+			if (JsonVal->TryGetNumber(Num)) { ByteProp->SetPropertyValue(ValuePtr, (uint8)Num); return true; }
+			OutError = TEXT("Expected number"); return false;
+		}
+		if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+		{
+			if (StructProp->Struct == TBaseStructure<FVector>::Get())
+			{
+				const TSharedPtr<FJsonObject>* Obj;
+				if (JsonVal->TryGetObject(Obj) && Obj)
+				{
+					FVector& Vec = *reinterpret_cast<FVector*>(ValuePtr);
+					Vec.X = (*Obj)->GetNumberField(TEXT("x"));
+					Vec.Y = (*Obj)->GetNumberField(TEXT("y"));
+					Vec.Z = (*Obj)->GetNumberField(TEXT("z"));
+					return true;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* Arr;
+				if (JsonVal->TryGetArray(Arr) && Arr && Arr->Num() >= 3)
+				{
+					FVector& Vec = *reinterpret_cast<FVector*>(ValuePtr);
+					Vec.X = (*Arr)[0]->AsNumber();
+					Vec.Y = (*Arr)[1]->AsNumber();
+					Vec.Z = (*Arr)[2]->AsNumber();
+					return true;
+				}
+				OutError = TEXT("Expected {x,y,z} or [x,y,z]"); return false;
+			}
+			if (StructProp->Struct == TBaseStructure<FRotator>::Get())
+			{
+				const TSharedPtr<FJsonObject>* Obj;
+				if (JsonVal->TryGetObject(Obj) && Obj)
+				{
+					FRotator& Rot = *reinterpret_cast<FRotator*>(ValuePtr);
+					Rot.Pitch = (*Obj)->GetNumberField(TEXT("pitch"));
+					Rot.Yaw = (*Obj)->GetNumberField(TEXT("yaw"));
+					Rot.Roll = (*Obj)->GetNumberField(TEXT("roll"));
+					return true;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* Arr;
+				if (JsonVal->TryGetArray(Arr) && Arr && Arr->Num() >= 3)
+				{
+					FRotator& Rot = *reinterpret_cast<FRotator*>(ValuePtr);
+					Rot.Pitch = (*Arr)[0]->AsNumber();
+					Rot.Yaw = (*Arr)[1]->AsNumber();
+					Rot.Roll = (*Arr)[2]->AsNumber();
+					return true;
+				}
+				OutError = TEXT("Expected {pitch,yaw,roll} or [p,y,r]"); return false;
+			}
+			if (StructProp->Struct == TBaseStructure<FLinearColor>::Get())
+			{
+				const TSharedPtr<FJsonObject>* Obj;
+				if (JsonVal->TryGetObject(Obj) && Obj)
+				{
+					FLinearColor& Col = *reinterpret_cast<FLinearColor*>(ValuePtr);
+					Col.R = (*Obj)->GetNumberField(TEXT("r"));
+					Col.G = (*Obj)->GetNumberField(TEXT("g"));
+					Col.B = (*Obj)->GetNumberField(TEXT("b"));
+					Col.A = (*Obj)->HasField(TEXT("a")) ? (*Obj)->GetNumberField(TEXT("a")) : 1.0f;
+					return true;
+				}
+				OutError = TEXT("Expected {r,g,b,a}"); return false;
+			}
+			// Fallback: try ImportText
+			FString Str;
+			if (JsonVal->TryGetString(Str))
+			{
+				const TCHAR* Buffer = *Str;
+				if (StructProp->ImportText_Direct(Buffer, ValuePtr, nullptr, PPF_None))
+				{
+					return true;
+				}
+			}
+			OutError = TEXT("Unsupported struct type"); return false;
+		}
+		// Fallback: ImportText for any other property type
+		FString Str;
+		if (JsonVal->TryGetString(Str))
+		{
+			const TCHAR* Buffer = *Str;
+			if (Prop->ImportText_Direct(Buffer, ValuePtr, nullptr, PPF_None))
+			{
+				return true;
+			}
+		}
+		OutError = FString::Printf(TEXT("Cannot convert JSON to property type '%s'"), *Prop->GetCPPType());
+		return false;
+	}
 }
 
 // ============================================================================

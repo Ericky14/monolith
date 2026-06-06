@@ -231,6 +231,7 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		},
+		{
 			"Name": "MonolithVoxel",
 			"Type": "Editor",
 			"LoadingPhase": "Default"

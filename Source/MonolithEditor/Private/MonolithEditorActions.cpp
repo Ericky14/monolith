@@ -66,6 +66,7 @@
 
 // start_pie needs the level-editor module + asset viewport to pin PIE to in-viewport mode
 #include "LevelEditor.h"
+#include "SLevelViewport.h"
 #include "IAssetViewport.h"
 #include "Modules/ModuleManager.h"
 #include "Editor/UnrealEdEngine.h"
