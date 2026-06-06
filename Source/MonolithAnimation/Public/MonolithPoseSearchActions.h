@@ -17,6 +17,7 @@ private:
 	static FMonolithActionResult HandleGetPoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetPoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddDatabaseSequence(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddDatabaseSequences(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveDatabaseSequence(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetDatabaseStats(const TSharedPtr<FJsonObject>& Params);
 

@@ -19,7 +19,10 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
 #include "UObject/UnrealType.h"
+#include "Dom/JsonValue.h"
+#include "EditorAssetLibrary.h"
 #include "Editor.h"
 
 // ---------------------------------------------------------------------------
@@ -49,6 +52,18 @@ void FMonolithPoseSearchActions::RegisterActions(FMonolithToolRegistry& Registry
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("PoseSearchDatabase asset path"))
 			.RequiredAssetPath(TEXT("anim_path"), TEXT("Animation asset to add"))
 			.Optional(TEXT("enabled"), TEXT("boolean"), TEXT("Enable for search (default true)"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("animation"), TEXT("add_database_sequences"),
+		TEXT("Bulk-add animations to a PoseSearch database from an array and/or a folder, then save the asset and request an async index rebuild. Use instead of many add_database_sequence calls. Skips duplicates."),
+		FMonolithActionHandler::CreateStatic(&HandleAddDatabaseSequences),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("PoseSearchDatabase asset path"))
+			.Optional(TEXT("anim_paths"), TEXT("array"), TEXT("Array of animation asset paths to add"))
+			.OptionalAssetPath(TEXT("folder"), TEXT("Content folder to add ALL AnimSequences from (recursive), e.g. /Game/.../Pistol/Walk"))
+			.Optional(TEXT("enabled"), TEXT("boolean"), TEXT("Enable added entries for search (default true)"))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the database package after adding (default true)"))
+			.Optional(TEXT("rebuild_index"), TEXT("boolean"), TEXT("Request async index rebuild after adding (default true)"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("animation"), TEXT("remove_database_sequence"),
@@ -321,6 +336,125 @@ FMonolithActionResult FMonolithPoseSearchActions::HandleAddDatabaseSequence(cons
 }
 
 // ---------------------------------------------------------------------------
+// add_database_sequences (bulk) — add many anims from an array and/or a folder,
+// save the asset, and request an async reindex. Avoids one-call-per-anim grind.
+// ---------------------------------------------------------------------------
+
+FMonolithActionResult FMonolithPoseSearchActions::HandleAddDatabaseSequences(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPoseSearchDatabase* Database = FMonolithAssetUtils::LoadAssetByPath<UPoseSearchDatabase>(AssetPath);
+	if (!Database)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("PoseSearchDatabase not found: %s"), *AssetPath));
+
+	bool bEnabled = true;
+	if (Params->HasField(TEXT("enabled"))) bEnabled = Params->GetBoolField(TEXT("enabled"));
+	bool bSave = true;
+	if (Params->HasField(TEXT("save"))) bSave = Params->GetBoolField(TEXT("save"));
+	bool bRebuild = true;
+	if (Params->HasField(TEXT("rebuild_index"))) bRebuild = Params->GetBoolField(TEXT("rebuild_index"));
+
+	// Collect candidate animation paths from anim_paths[] and/or folder (recursive AnimSequences).
+	TArray<FString> CandidatePaths;
+	const TArray<TSharedPtr<FJsonValue>>* AnimPathsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("anim_paths"), AnimPathsArr) && AnimPathsArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *AnimPathsArr)
+		{
+			FString S;
+			if (V.IsValid() && V->TryGetString(S) && !S.IsEmpty())
+			{
+				S.ReplaceInline(TEXT("\\"), TEXT("/"));
+				CandidatePaths.AddUnique(S);
+			}
+		}
+	}
+	if (Params->HasField(TEXT("folder")))
+	{
+		FString Folder = Params->GetStringField(TEXT("folder"));
+		Folder.ReplaceInline(TEXT("\\"), TEXT("/"));
+		Folder.RemoveFromEnd(TEXT("/"));
+		if (!Folder.IsEmpty())
+		{
+			FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+			FARFilter Filter;
+			Filter.bRecursivePaths = true;
+			Filter.PackagePaths.Add(FName(*Folder));
+			Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+			TArray<FAssetData> Found;
+			ARM.Get().GetAssets(Filter, Found);
+			for (const FAssetData& AD : Found)
+			{
+				CandidatePaths.AddUnique(AD.GetSoftObjectPath().ToString());
+			}
+		}
+	}
+
+	if (CandidatePaths.Num() == 0)
+		return FMonolithActionResult::Error(TEXT("No animations to add: provide 'anim_paths' (array) and/or 'folder'"));
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Add PoseSearch Database Animations (bulk)")));
+	Database->Modify();
+
+	int32 Added = 0;
+	int32 Skipped = 0;
+	TArray<TSharedPtr<FJsonValue>> ErrorList;
+	for (const FString& P : CandidatePaths)
+	{
+		UObject* AnimAsset = FMonolithAssetUtils::LoadAssetByPath<UObject>(P);
+		if (!AnimAsset)
+		{
+			ErrorList.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("not found: %s"), *P)));
+			continue;
+		}
+		if (Database->Contains(AnimAsset))
+		{
+			++Skipped;
+			continue;
+		}
+		FPoseSearchDatabaseAnimationAsset NewEntry;
+		NewEntry.AnimAsset = AnimAsset;
+#if WITH_EDITORONLY_DATA
+		NewEntry.bEnabled = bEnabled;
+#endif
+		Database->AddAnimationAsset(NewEntry);
+		++Added;
+	}
+
+	GEditor->EndTransaction();
+	Database->MarkPackageDirty();
+
+	bool bSaved = false;
+	if (bSave)
+	{
+		bSaved = UEditorAssetLibrary::SaveLoadedAsset(Database, /*bOnlyIfIsDirty=*/false);
+	}
+
+	if (bRebuild && Added > 0)
+	{
+		using namespace UE::PoseSearch;
+		// Fire-and-forget async reindex. IMPORTANT: do NOT read GetSearchIndex() here —
+		// it asserts while the index is still building (the old rebuild_pose_search_index crash).
+		FAsyncPoseSearchDatabasesManagement::RequestAsyncBuildIndex(Database, ERequestAsyncBuildFlag::NewRequest);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetNumberField(TEXT("added"), Added);
+	Root->SetNumberField(TEXT("skipped_duplicates"), Skipped);
+	Root->SetNumberField(TEXT("error_count"), ErrorList.Num());
+	if (ErrorList.Num() > 0) Root->SetArrayField(TEXT("errors"), ErrorList);
+	Root->SetNumberField(TEXT("new_count"), Database->GetNumAnimationAssets());
+	Root->SetBoolField(TEXT("saved"), bSaved);
+	Root->SetBoolField(TEXT("reindex_requested"), bRebuild && Added > 0);
+	return FMonolithActionResult::Success(Root);
+#else
+	return FMonolithActionResult::Error(TEXT("add_database_sequences is only available in editor builds"));
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // remove_database_sequence
 // ---------------------------------------------------------------------------
 
@@ -386,11 +520,30 @@ FMonolithActionResult FMonolithPoseSearchActions::HandleGetDatabaseStats(const T
 		Root->SetNumberField(TEXT("schema_cardinality"), Database->Schema->SchemaCardinality);
 	}
 
-	// Search index stats
-	const UE::PoseSearch::FSearchIndex& SearchIndex = Database->GetSearchIndex();
-	const int32 NumPoses = SearchIndex.GetNumPoses();
-	Root->SetNumberField(TEXT("total_pose_count"), NumPoses);
-	Root->SetBoolField(TEXT("is_valid"), NumPoses > 0);
+	// Search index stats. GetSearchIndex() asserts on an incomplete index, so ensure the index
+	// has associated data first (ContinueRequest builds if missing; WaitForCompletion blocks).
+#if WITH_EDITOR
+	{
+		using namespace UE::PoseSearch;
+		const EAsyncBuildIndexResult IdxState = FAsyncPoseSearchDatabasesManagement::RequestAsyncBuildIndex(
+			Database, ERequestAsyncBuildFlag::ContinueRequest | ERequestAsyncBuildFlag::WaitForCompletion);
+		if (IdxState == EAsyncBuildIndexResult::Success)
+		{
+			const UE::PoseSearch::FSearchIndex& SearchIndex = Database->GetSearchIndex();
+			const int32 NumPoses = SearchIndex.GetNumPoses();
+			Root->SetNumberField(TEXT("total_pose_count"), NumPoses);
+			Root->SetBoolField(TEXT("is_valid"), NumPoses > 0);
+		}
+		else
+		{
+			Root->SetNumberField(TEXT("total_pose_count"), -1);
+			Root->SetBoolField(TEXT("is_valid"), false);
+		}
+	}
+#else
+	Root->SetNumberField(TEXT("total_pose_count"), -1);
+	Root->SetBoolField(TEXT("is_valid"), false);
+#endif
 
 	// Search mode
 	FString SearchModeStr;
@@ -907,9 +1060,18 @@ FMonolithActionResult FMonolithPoseSearchActions::HandleRebuildPoseSearchIndex(c
 	Root->SetStringField(TEXT("result"), ResultStr);
 	Root->SetBoolField(TEXT("waited"), bWait);
 
-	// Report current index stats
-	const FSearchIndex& SearchIndex = Database->GetSearchIndex();
-	Root->SetNumberField(TEXT("total_poses"), SearchIndex.GetNumPoses());
+	// Report current index stats ONLY when the build actually completed. GetSearchIndex()
+	// asserts on an incomplete (async-in-progress) index — reading it eagerly here was the
+	// crash. When bWait=false the request returns InProgress, so we skip the read.
+	if (Result == EAsyncBuildIndexResult::Success)
+	{
+		const FSearchIndex& SearchIndex = Database->GetSearchIndex();
+		Root->SetNumberField(TEXT("total_poses"), SearchIndex.GetNumPoses());
+	}
+	else
+	{
+		Root->SetNumberField(TEXT("total_poses"), -1);
+	}
 
 	return FMonolithActionResult::Success(Root);
 #else
