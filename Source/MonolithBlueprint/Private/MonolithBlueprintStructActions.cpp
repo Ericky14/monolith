@@ -40,6 +40,14 @@ void FMonolithBlueprintStructActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Required(TEXT("values"),    TEXT("array"),  TEXT("Array of enumerator display name strings, e.g. [\"Idle\", \"Running\", \"Jumping\"]"))
 			.Build());
 
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("read_enum"),
+		TEXT("Read a UEnum's entries: index, value, internal name, and DISPLAY NAME. Works for UserDefinedEnum (Blueprint) assets via asset_path and for native enums by name. Skips the auto-generated _MAX sentinel unless include_hidden=true. Solves the gap where Blueprint enum display names live in a protected DisplayNameMap not reachable from the Python API."),
+		FMonolithActionHandler::CreateStatic(&HandleReadEnum),
+		FParamSchemaBuilder()
+			.Required(TEXT("asset_path"), TEXT("string"), TEXT("Enum asset path (e.g. /Game/.../E_MyEnum) OR a native enum name (e.g. ESlateVisibility)"))
+			.Optional(TEXT("include_hidden"), TEXT("boolean"), TEXT("Include hidden entries such as the auto-generated _MAX sentinel (default false)"), TEXT("false"))
+			.Build());
+
 	// DataTable actions (Phase 3C)
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("create_data_table"),
 		TEXT("Create a new DataTable asset backed by the specified row struct (UScriptStruct). The struct must already exist (native or user-defined)."),
@@ -363,6 +371,67 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateUserDefinedEn
 	Root->SetNumberField(TEXT("enumerator_count"), NumValues);
 	Root->SetArrayField(TEXT("values"), ValueResults);
 	Root->SetBoolField(TEXT("saved"), bSaved);
+	Root->SetBoolField(TEXT("success"), true);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  read_enum
+// ============================================================
+
+FMonolithActionResult FMonolithBlueprintStructActions::HandleReadEnum(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	if (AssetPath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: asset_path"));
+	}
+
+	bool bIncludeHidden = false;
+	Params->TryGetBoolField(TEXT("include_hidden"), bIncludeHidden);
+
+	// Prefer loading as an asset (UserDefinedEnum); fall back to a native enum lookup by name.
+	UEnum* Enum = FMonolithAssetUtils::LoadAssetByPath<UEnum>(AssetPath);
+	if (!Enum)
+	{
+		Enum = FindFirstObject<UEnum>(*AssetPath, EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!Enum)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Enum not found: '%s' (tried asset path and native enum lookup)."), *AssetPath));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Entries;
+	const int32 Num = Enum->NumEnums();
+	for (int32 i = 0; i < Num; ++i)
+	{
+		const bool bHidden = Enum->HasMetaData(TEXT("Hidden"), i);
+		if (bHidden && !bIncludeHidden)
+		{
+			continue; // skips the auto-appended _MAX sentinel on UserDefinedEnums
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("index"), i);
+		Entry->SetNumberField(TEXT("value"), static_cast<double>(Enum->GetValueByIndex(i)));
+		Entry->SetStringField(TEXT("name"), Enum->GetNameStringByIndex(i));
+		Entry->SetStringField(TEXT("full_name"), Enum->GetNameByIndex(i).ToString());
+		Entry->SetStringField(TEXT("display_name"), Enum->GetDisplayNameTextByIndex(i).ToString());
+		if (bHidden)
+		{
+			Entry->SetBoolField(TEXT("hidden"), true);
+		}
+		Entries.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("enum_path"), Enum->GetPathName());
+	Root->SetStringField(TEXT("enum_name"), Enum->GetName());
+	Root->SetStringField(TEXT("cpp_type"), Enum->CppType);
+	Root->SetBoolField(TEXT("is_user_defined"), Enum->IsA<UUserDefinedEnum>());
+	Root->SetNumberField(TEXT("entry_count"), Entries.Num());
+	Root->SetArrayField(TEXT("entries"), Entries);
 	Root->SetBoolField(TEXT("success"), true);
 	return FMonolithActionResult::Success(Root);
 }
