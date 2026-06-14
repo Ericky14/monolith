@@ -2,43 +2,49 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.14.10 (Beta)
+**Version:** 0.20.0 (Beta)
 
 ---
 
 ## MonolithBlueprint
 
-**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, BlueprintGraph, Json, JsonUtilities
+**Dependencies:** Core, CoreUObject, Engine, MonolithCore, UnrealEd, BlueprintGraph, EnhancedInput, Json, JsonUtilities
 
 ### Classes
 
 | Class | Responsibility |
 |-------|---------------|
-| `FMonolithBlueprintModule` | Registers 109 blueprint actions |
+| `FMonolithBlueprintModule` | Registers ~120 blueprint actions (count approximate — query `monolith_discover("blueprint")` for the live figure; includes the 2026-06-10 `find_variable_references`, Gap 5) |
 | `FMonolithBlueprintActions` | Static handlers. Uses `FMonolithAssetUtils::LoadAssetByPath<UBlueprint>` |
+| `FMonolithBlueprintContractActions` | Variable-contract reconciliation: `compare_class_variable_contract` (diff engine) + `promote_variables_to_parent`. Pin-type-aware descriptor extraction shared by both. |
 | `MonolithBlueprintInternal` | Helpers: AddGraphArray, FindGraphByName, PinTypeToString, SerializePin/Node, TraceExecFlow, FindEntryNode |
 
-### Actions (109 — namespace: "blueprint")
+> **Unity-safe file-local helpers (#68).** Internal-linkage helpers (anonymous-namespace functions/types, file-`static`s) must carry file-unique names or live in per-file named namespaces — matching the MonolithUI model — so they don't collide when adaptive/full unity concatenates same-module `.cpp`s into one translation unit. (The previously-global `InterpModeToString` in `MonolithBlueprintNodeActions.cpp` is now `NodeInterpModeToString`.)
+
+### Actions (~120 — namespace: "blueprint")
 
 > **Per-module baseline note (2026-05-23):** this file's baseline was 92 (it carries the 2026-05-22 `add_property_access` +1 but predates the Phase 2 `override_parent_function` / `save_dirty_assets` +2 that SPEC_CORE §12 already folded into its authoritative 94). Part B adds +17 (dataset ergonomics, below), so this file's count moves 92 → 109 while §12's authoritative `blueprint` row moves 94 → 111. The residual 2-action gap (this file's 109 vs §12's 111) is the pre-existing Phase 2 drift §12's reconciliation notes already track — deferred to the next holistic count-audit, not patched here.
 
-**Read Actions (14)**
+**Read Actions (15)**
 | Action | Params | Description |
 |--------|--------|-------------|
-| `list_graphs` | `asset_path` | List all graphs with name/type/node_count. Graph types: event_graph, function, macro, delegate_signature |
+| `list_graphs` | `asset_path` | List all graphs with name/type/node_count. Graph types: event_graph, function, macro, delegate_signature. **(2026-06-10, Gap 7):** also appends interface-implementation graphs (from `ImplementedInterfaces[].Graphs`) flagged `graph_type: interface`, each carrying an `interface` field naming the implemented interface for disambiguation. |
 | `get_graph_summary` | `asset_path`, `graph_name` | Lightweight graph overview: node id/class/title + exec connections only (~10KB vs 172KB for full data) |
-| `get_graph_data` | `asset_path`, `graph_name`, `node_class_filter` | Full graph with all nodes, pins (17+ type categories), connections, positions. Optional class filter |
+| `get_graph_data` | `asset_path`, `graph_name`, `node_class_filter` | Full graph with all nodes, pins (17+ type categories), connections, positions. Optional class filter. **(2026-06-10, Gap 7):** `graph_name` now also resolves against interface-implementation graphs (same fix in `export_graph`, which shares `FindGraphByName`), so an interface function graph is dumpable by name instead of returning "Graph not found". |
 | `get_variables` | `asset_path`, `include_bind_widgets?` | All NewVariables: name, type (with container prefix), default (from CDO), category, flags (editable, read_only, expose_on_spawn, replicated, transient). When `include_bind_widgets=true` (Phase 3, 2026-05-23) the response carries a `bind_widgets` array enumerating BOTH (a) C++ `BindWidget`/`BindWidgetOptional` references (`source=bind_widget_meta`, `is_bind_widget=true`) AND (b) pure-Blueprint tree widgets exposed as variables / `UWidget::bIsVariable==true` (`source=tree_variable`, `is_bind_widget=false`); entry fields are `name`, `widget_class`, `optional`, `category`, `source`, `is_bind_widget`. Deduped — a tree widget that is also a C++ BindWidget property is reported once as `bind_widget_meta`. |
 | `get_cdo_properties` | `asset_path`, `category_filter?`, `include_parent_defaults?`, `owner_class_filter?`, `name_pattern?`, `exclude_categories?` | Reflects all CDO properties of a Blueprint class with current default values. Optional filters compose: `category_filter` (case-insensitive substring on `Category` metadata), `include_parent_defaults` (bool, walks parent CDO chain), `owner_class_filter` (case-insensitive substring on owner class name — skips inherited `AActor`/`APawn`/`ACharacter` in one parameter, PR #57), `name_pattern` (case-insensitive substring on property name, PR #57), `exclude_categories` (string array, case-insensitive exact match against `Category` — e.g. `["Replication", "Cooking", "HLOD"]`, PR #57). All filter params default to `null`/empty (no-op). Cuts JSON payload by ~90% in typical AActor-subclass inspection flows. |
 | `get_execution_flow` | `asset_path`, `entry_point` | Linearized exec trace from entry point. Handles branching (multiple exec outputs). MaxDepth=100 |
 | `search_nodes` | `asset_path`, `query` | Case-insensitive search by title, class name, or function name |
 | `get_components` | `asset_path` | List all components in the component hierarchy |
-| `get_component_details` | `asset_path`, `component_name` | Full property reflection for a named component |
+| `get_component_details` | `asset_path`, `component_name` | Full property reflection for a named component. When the component is not an SCS node, **falls back to the inherited native component** off the parent-class CDO subobject (same `GetComponents()` enumeration as `get_components`) and reflects its defaults — including `skeletal_mesh`, `anim_class`, `animation_mode`, and `is_inherited_native` for `USkeletalMeshComponent`-derived natives (2026-06-07). Previously returned nothing for inherited natives (e.g. a data-only child's inherited `Mesh`). |
 | `get_functions` | `asset_path` | List all functions with signatures, access, and purity flags |
 | `get_event_dispatchers` | `asset_path` | List all event dispatchers with parameter signatures |
 | `get_parent_class` | `asset_path` | Return the parent class of the Blueprint |
 | `get_interfaces` | `asset_path` | List all implemented interfaces |
 | `get_construction_script` | `asset_path` | Get the construction script graph |
+| `find_variable_references` | `asset_path`, `variable_name`, `include_inherited?` | **(2026-06-10, Gap 5):** Find every graph node that reads or writes a Blueprint member variable. Walks all graphs (event graphs, functions, macros, delegate signatures, and interface-implementation graphs) and calls the engine's `UK2Node::ReferencesVariable` against the generated class. Per match, `access` is classified: `read` (a VariableGet), `write` (a VariableSet), `read` for a thread-safe Property Access node whose path resolves to the variable, or `other` (transition rules, split-struct pins, etc.). Each entry returns `graph`, `graph_type`, `node_id`, `node_title`, `access`; Property Access matches additionally carry a `property_access` path block. A `summary` object reports total/reads/writes/other counts. `include_inherited=true` also matches the variable where it is scoped to a parent class (default false). v1 covers member variables only — local function variables are out of scope. |
+
+> **PropertyAccess node paths in the read serializers (2026-06-10, Gap 1).** The shared K2 node serializer (`MonolithBlueprintInternal::SerializeNode`, used by `get_node_details` / `get_graph_data` / `export_graph`) and the anim-graph serializer (`animation::get_nodes` `include_anim_graph` path) now emit an additive `property_access` block on `K2Node_PropertyAccess` nodes: the resolved `path` array + dotted `text_path`, plus `context_id` and the resolved pin type. The node class is engine-private (`MinimalAPI`, unlinkable), so the fields are read via `FProperty` reflection — the read-side mirror of the existing `add_property_access` write — and degrade gracefully (`resolved: false` / omitted fields) if the engine layout changes. No new action.
 
 **Variable CRUD (7)**
 | Action | Params | Description |
@@ -51,6 +57,15 @@
 | `add_local_variable` | `asset_path`, `function_name`, `variable_name`, `variable_type` | Add a local variable inside a function graph |
 | `remove_local_variable` | `asset_path`, `function_name`, `variable_name` | Remove a local variable from a function graph |
 
+**Variable Contract Reconciliation (2) — `MonolithBlueprintContractActions.cpp`**
+
+Reconcile the member-variable surface of one class against another by name + type + container kind + enum/struct subtype. Aimed at Blueprint→C++ migration, where a variable set must be promoted onto a native parent contract without breaking the bindings the AnimGraph / chooser / PropertyAccess pins compare against.
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `compare_class_variable_contract` | `left`, `right`, `include_inherited?`, `variables?` | Pure read/report diff of two classes' variable contracts. Each side is a Blueprint asset path (`/Game/...` → `GeneratedClass`) or a native class name (resolved as-is, with U/A prefix added/stripped, or a full `/Script/...` path). Per-variable descriptor reports `base_type`, `container` (`scalar`/`Array`/`Set`/`Map`), `enum_subtype` (UEnum path), `struct_subtype` (UScriptStruct path), `object_class`, `map_value_type`, and presence on each side; the `mismatch` classification is one of `ok`, `missing-on-left`, `missing-on-right`, `type-mismatch`, `container-mismatch`, `enum-subtype-mismatch`, `struct-subtype-mismatch`. For a Blueprint side, descriptors are sourced from the **authoritative `FEdGraphPinType`** of `NewVariables` (overlaying the compiled-FProperty walk) — the KismetCompiler can lower a UserDefinedEnum pin to a plain `FIntProperty` on the generated class, and a BP variable that shadows a native parent property does not materialize as a direct generated-class property; the pin-type overlay catches both. Struct/enum identity is compared by `GetPathName()` (BP pins compare struct types by exact `UScriptStruct` pointer identity). Mutates nothing. |
+| `promote_variables_to_parent` | `asset_path`, `variables`, `mode?` (`verify` default / `remove_shadowed`) | Reconcile a Blueprint's named local variables against its **native parent class** contract (the parent is resolved by walking up the `ClassGeneratedBy` chain to the first native class). `verify`: per-variable `status` = `parent-satisfies` (parent already declares a name+type+container+enum/struct-compatible counterpart) / `parent-declares-but-mismatch` / `parent-missing`. Authors no C++ — it produces the authoritative delta that a hand-written/native header must satisfy, then re-verifies post-build. `remove_shadowed`: deletes the now-redundant BP-local duplicate (`FBlueprintEditorUtils::RemoveMemberVariable`) ONLY for variables that pass parity AND are genuinely BP-local member variables (present in `NewVariables`); never removes a variable the parent lacks or declares incompatibly. Reports `will_remove` / `remove_skipped_reason` per variable and a `summary{requested,parent_satisfies,not_satisfied,removed_shadowed}`. |
+
 **Component CRUD (6)**
 | Action | Params | Description |
 |--------|--------|-------------|
@@ -58,7 +73,7 @@
 | `remove_component` | `asset_path`, `component_name` | Remove a component by name |
 | `rename_component` | `asset_path`, `old_name`, `new_name` | Rename a component |
 | `reparent_component` | `asset_path`, `component_name`, `new_parent` | Change a component's parent in the hierarchy |
-| `set_component_property` | `asset_path`, `component_name`, `property_name`, `value` | Set a property on a component via reflection |
+| `set_component_property` | `asset_path`, `component_name`, `property_name`, `value` | Set a property on a component via reflection. As of 2026-06-07, when the target is an inherited native component (CDO subobject, no SCS node) it uses the structural-modify + `CompileBlueprint` persistence handshake so the override survives reload; SCS-template writes keep the lighter `MarkBlueprintAsModified` path. |
 | `duplicate_component` | `asset_path`, `component_name`, `new_name` | Duplicate a component with all its settings |
 
 **Graph Management (10)**
@@ -111,6 +126,20 @@
 | `spawn_blueprint_actor` | `blueprint`, `location`?, `rotation`?, `scale`?, `label`?, `folder`?, `properties`?, `tags`?, `sublevel`?, `mobility`?, `select`? | Spawn a Blueprint actor into the editor world with full transform, property reflection, tags, sublevel targeting, and mobility control. Uses `GEditor->AddActor` for proper editor integration (undo/redo). Default folder: `"Blueprints"` |
 | `batch_spawn_blueprint_actors` | `blueprint`, `count`, `pattern`?, `origin`?, `spacing`?, `columns`?, `direction`?, `rotation`?, `scale`?, `label_prefix`?, `folder`?, `properties`?, `tags`?, `sublevel`?, `mobility`?, `select`? | Spawn multiple Blueprint actors in a grid or linear pattern. Partial failure semantics — continues on per-actor failure, reports successes and failures separately. Single undo transaction. Max 1000 |
 
+**Motion Matching scaffolding (6 — 2026-06-07)** — high-level Blueprint authoring for a Motion-Matching-driven character, the BP-side companion to the `animation` Motion Matching action pack.
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `set_anim_class` | `asset_path`, `anim_class` | Set the `AnimClass` (Anim Blueprint) on a character/pawn Blueprint's skeletal mesh component (SCS or inherited native), resolving the class from a path/name. As of 2026-06-07 uses `BP->Modify()` + `MarkBlueprintAsStructurallyModified` + `CompileBlueprint` so the CDO override on an inherited native component persists across reload. |
+| `apply_movement_preset` | `asset_path`, `preset` | Apply a named `UCharacterMovementComponent` tuning preset (bulk CDO write of the movement-component defaults). |
+| `add_engine_component_typed` | `asset_path`, `component_class`, `component_name` | Add an engine-typed component to a Blueprint, resolving `component_class` from a path/name (the typed companion to `add_component`). |
+| `scaffold_locomotion_input` | `asset_path`, ... | Scaffold locomotion Enhanced Input wiring (input action / mapping references) on a character Blueprint. |
+| `validate_animbp_variable_contract` | `asset_path`, ... | Validate that a character Blueprint's Anim Blueprint exposes the variables the locomotion/motion-matching graph expects (the variable contract), reporting missing/mismatched entries. Read-only. |
+| `scaffold_motion_matching_character` | `asset_path`, ... | Composite: assemble a Motion-Matching-ready character Blueprint — anim class, movement preset, components, locomotion input, and the variable contract — in one call. The `mesh` option now writes the skeletal mesh via `SetSkeletalMeshAsset` with the structural-modify + compile persistence handshake. |
+| `get_inherited_component_override` | `bp_path`, `component`, `property_name` (opt) | READ-ONLY: report the effective value(s) of a component override on a child Blueprint, resolving the effective template (CDO subobject for inherited native, ICH for SCS-inherited), and classifying `source` (`cdo_native` / `ich` / `scs`). Default property set: AnimClass, SkeletalMesh, AnimationMode. |
+
+> **`EnhancedInput` dep (2026-06-07)** added to `MonolithBlueprint.Build.cs` for `scaffold_locomotion_input` (Enhanced Input action / mapping-context resolution).
+
 **CDO Bulk Fill / Describe (Phase 1 of bulk_fill framework — 2)**
 | Action | Params | Description |
 |--------|--------|-------------|
@@ -139,7 +168,14 @@
 *DataAsset (1)*
 | Action | Params | Description |
 |--------|--------|-------------|
-| `seed_data_asset` | `save_path`, `class_name`, `tree` (nested JSON), `dry_run`?, `strict`?, `skip_save`? | Create a DataAsset AND populate it from a nested `tree` in one atomic call — sugar over `create_data_asset` + `bulk_fill apply`. Create body reuses `HandleCreateDataAsset`; fill reuses `FMonolithReflectionWalker::WriteTree`. Returns `asset_path`, `actual_class`, `field_writes[]`, `errors`, `saved`. (For populating an *existing* DataAsset, use `bulk_fill_query("apply")` / `set_cdo_properties` instead — this action is for the create-then-populate scaffold case.) |
+| `seed_data_asset` | `save_path`, `class_name`, `tree` (nested JSON), `dry_run`?, `strict`?, `skip_save`?, `read_back_values`? | Create a DataAsset AND populate it from a nested `tree` in one atomic call — sugar over `create_data_asset` + `bulk_fill apply`. Create body reuses `HandleCreateDataAsset`; fill reuses `FMonolithReflectionWalker::WriteTree`. Returns `asset_path`, `actual_class`, `field_writes[]`, `errors`, `saved`. **`read_back_values` (default false, 2026-06-07):** after the write transaction completes, re-walk the written top-level props through `FMonolithReflectionReader` (the read-side serializer in `MonolithCore`) and attach `values: { field: <json> }` to the success payload — inline verify-after-write in the same call. The readback runs *after* the transaction and never re-opens it or dirties the package. (For populating an *existing* DataAsset, use `bulk_fill_query("apply")` / `set_cdo_properties` instead — this action is for the create-then-populate scaffold case.) |
+
+> **Verifying a DataAsset's live field values (two paths, 2026-06-07).** There are two ways to read a DataAsset's live values — use the right one:
+> - **`seed_data_asset` with `read_back_values:true`** — verify *inline with the write* (one round trip; confirms exactly what was just written, in the same call).
+> - **`get_cdo_properties`** — the canonical verify path for a *standalone or pre-existing* DataAsset you did NOT just write through `seed_data_asset` (independent live read of any DataAsset's values; routes through the same shared `FMonolithReflectionReader` serializer).
+> - `project.get_asset_details` is **neither** — it is the stale indexed snapshot, not a live verify, and should not be used to confirm a write.
+
+> **Inherited native component count (2026-06-07).** `get_blueprint_info` now reports `native_component_count` alongside the existing SCS-node `component_count` — a data-only child of a C++ `ACharacter`-like parent (no SCS nodes) previously reported `component_count: 0` despite inheriting native components. Pairs with `get_component_details`' inherited-native fallback above.
 
 *CurveTable (5) — first CurveTable surface in Monolith*
 | Action | Params | Description |

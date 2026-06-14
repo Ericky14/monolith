@@ -18,7 +18,8 @@ namespace MonolithBulkFillActionsInternal
 	{
 		return FParamSchemaBuilder()
 			.Required(TEXT("target_namespace"), TEXT("string"),
-				TEXT("Adapter namespace ('blueprint', 'gas', 'inventory', 'ui', 'ai', 'niagara', 'material', 'audio', 'mesh', 'animation', 'logicdriver', 'combograph')."))
+				TEXT("Adapter namespace ('blueprint', 'gas', 'inventory', 'ui', 'ai', 'niagara', 'material', 'audio', 'mesh', 'animation', 'logicdriver', 'combograph'). Alias: `namespace`."),
+				{ TEXT("namespace") })
 			.Required(TEXT("target"), TEXT("string"),
 				TEXT("Asset path or adapter-defined target identifier (e.g. '/Game/Items/DA_HealingPotion')."))
 			.Required(TEXT("tree"), TEXT("object"),
@@ -41,9 +42,11 @@ namespace MonolithBulkFillActionsInternal
 	{
 		return FParamSchemaBuilder()
 			.Required(TEXT("target_namespace"), TEXT("string"),
-				TEXT("Adapter namespace whose schema should be introspected."))
+				TEXT("Adapter namespace whose schema should be introspected. Alias: `namespace`."),
+				{ TEXT("namespace") })
 			.Required(TEXT("target"), TEXT("string"),
-				TEXT("Asset path or action name to describe."))
+				TEXT("Asset path or action name to describe. Alias: `action`."),
+				{ TEXT("action") })
 			.Build();
 	}
 
@@ -51,7 +54,8 @@ namespace MonolithBulkFillActionsInternal
 	{
 		return FParamSchemaBuilder()
 			.Required(TEXT("target_namespace"), TEXT("string"),
-				TEXT("Adapter namespace whose introspection inventory should be listed."))
+				TEXT("Adapter namespace whose introspection inventory should be listed. Alias: `namespace`."),
+				{ TEXT("namespace") })
 			.Build();
 	}
 
@@ -216,7 +220,9 @@ namespace MonolithBulkFillActionsInternal
 		// ApplyAliases pass rewrites `action` → `target_action` before
 		// the required-param check fires.
 		return FParamSchemaBuilder()
-			.Required(TEXT("target_namespace"), TEXT("string"), TEXT("Namespace that owns the action (e.g. \"blueprint\", \"ui\")"))
+			.Required(TEXT("target_namespace"), TEXT("string"),
+				TEXT("Namespace that owns the action (e.g. \"blueprint\", \"ui\"). Alias: `namespace`."),
+				{ TEXT("namespace") })
 			.Required(TEXT("target_action"), TEXT("string"),
 				TEXT("Action name whose param schema to return (e.g. \"add_nodes_bulk\"). Alias: `action`."),
 				{ TEXT("action") })

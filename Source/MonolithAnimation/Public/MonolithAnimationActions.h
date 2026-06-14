@@ -26,10 +26,14 @@ public:
 	static FMonolithActionResult HandleSetSectionNext(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetSectionTime(const TSharedPtr<FJsonObject>& Params);
 
-	// --- BlendSpace Samples (3) ---
+	// --- BlendSpace Samples (5) ---
 	static FMonolithActionResult HandleAddBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleEditBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
+	// Standalone resample+dirty for already-broken / externally-authored blend spaces.
+	static FMonolithActionResult HandleBakeBlendSpace(const TSharedPtr<FJsonObject>& Params);
+	// Sets bInterpolateUsingGrid + PreferredTriangulationDirection, then rebakes.
+	static FMonolithActionResult HandleSetBlendSpaceInterpolation(const TSharedPtr<FJsonObject>& Params);
 
 	// --- ABP Graph Reading (7) ---
 	static FMonolithActionResult HandleGetStateMachines(const TSharedPtr<FJsonObject>& Params);
@@ -39,6 +43,9 @@ public:
 	static FMonolithActionResult HandleGetLinkedLayers(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetGraphs(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetNodes(const TSharedPtr<FJsonObject>& Params);
+	// Enumerate AnimGraph EvaluateChooser (v1/v2) nodes + reflectively-resolved chooser asset;
+	// optional recursive nested-tree expansion via the Phase-2 MonolithChooserTreeCollector.
+	static FMonolithActionResult HandleGetAnimGraphChoosers(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Notify Editing (2) ---
 	static FMonolithActionResult HandleSetNotifyTime(const TSharedPtr<FJsonObject>& Params);
@@ -115,9 +122,10 @@ public:
 	static FMonolithActionResult HandleAddCompositeSegment(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveCompositeSegment(const TSharedPtr<FJsonObject>& Params);
 
-	// --- Wave 8a: IKRig (4) ---
+	// --- Wave 8a: IKRig (5) ---
 	static FMonolithActionResult HandleGetIKRigInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddIKSolver(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemoveIKSolver(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetRetargeterInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetRetargetChainMapping(const TSharedPtr<FJsonObject>& Params);
 
@@ -142,8 +150,27 @@ public:
 
 	// --- Wave 10: ABP Write Experimental (3) ---
 	static FMonolithActionResult HandleAddStateToMachine(const TSharedPtr<FJsonObject>& Params);
+	// add_conduit — spawn a UAnimStateConduitNode (a transition hub) into a state
+	// machine. Its BoundGraph is a transition-logic graph, NOT an anim/pose graph.
+	static FMonolithActionResult HandleAddConduit(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddTransition(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetTransitionRule(const TSharedPtr<FJsonObject>& Params);
+	// Phase 6 — read back a transition's authored rule (kind + operands + comparison).
+	static FMonolithActionResult HandleGetTransitionRule(const TSharedPtr<FJsonObject>& Params);
+
+	// --- State-machine editing: removal + entry re-point ---
+	// State/transition nodes own a BoundGraph, so removal routes through
+	// FBlueprintEditorUtils::RemoveNode -> DestroyNode (tears down the inner graph)
+	// rather than a bare UEdGraph::RemoveNode.
+	static FMonolithActionResult HandleRemoveAnimState(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetAnimEntryState(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemoveAnimTransition(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Wave 16: State Machine Authoring (#13/#14) ---
+	// create_state_machine — spawn a UAnimGraphNode_StateMachine into an ABP's anim graph.
+	// build_state_machine  — declarative builder composing create + add states/transitions/rules.
+	static FMonolithActionResult HandleCreateStateMachine(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleBuildStateMachine(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 14: Notify Properties (1) ---
 	static FMonolithActionResult HandleSetNotifyProperties(const TSharedPtr<FJsonObject>& Params);
@@ -155,6 +182,16 @@ public:
 	static FMonolithActionResult HandleAddRetargetChain(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveRetargetChain(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetRetargetChainBones(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Retarget CREATE/RUN pack (4) ---
+	// Creates the IK Rig + IK Retargeter assets and runs a cross-skeleton batch
+	// retarget. Complements the existing IK Rig / retargeter MUTATION actions
+	// (get_ikrig_info, add_ik_solver, get_retargeter_info, set_retarget_chain_mapping,
+	// add/remove/set_retarget_chain*) which only operate on assets that already exist.
+	static FMonolithActionResult HandleCreateIKRig(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleCreateIKRetargeter(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetRetargeterRigs(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleBatchRetargetAnimations(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 11: Asset Creation + Setup (7 in this file) ---
 	static FMonolithActionResult HandleCreateBlendSpace(const TSharedPtr<FJsonObject>& Params);
@@ -173,6 +210,17 @@ public:
 	static FMonolithActionResult HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveSyncMarker(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRenameSyncMarker(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Anim-node bindings: function (Gap 2) + pin property (Gap 12) ---
+	// Function bindings live on UAnimGraphNode_Base's public FMemberReference
+	// UPROPERTYs (InitialUpdate/BecomeRelevant/Update Function). Pin property
+	// bindings live in the node's UAnimGraphNodeBinding_Base::PropertyBindings map
+	// (unlinkable class — reached via FProperty reflection). Setters mirror the
+	// engine's own validate-then-recompile handshake.
+	static FMonolithActionResult HandleGetAnimNodeFunctionBindings(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetAnimNodeFunctionBinding(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetAnimNodePinBindings(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetAnimNodePinBinding(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 13: Batch Ops + Montage Completion (6) ---
 	static FMonolithActionResult HandleBatchExecute(const TSharedPtr<FJsonObject>& Params);

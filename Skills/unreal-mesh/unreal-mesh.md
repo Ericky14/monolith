@@ -364,6 +364,13 @@ Monolith.Label:Counter_North     -- human-readable label
 - **Debug building:** `toggle_section_view -> toggle_ceiling_visibility -> capture_floor_plan -> highlight_room`
 - **Architectural details:** `create_balcony / create_porch / create_fire_escape / create_ramp_connector -> apply_horror_damage`
 
+## AI Preview & Tech-Art Overlays (editor:: actions)
+
+- `editor_query("capture_scene_preview", { asset_path, asset_type: "static_mesh" })` or `asset_type: "skeletal_mesh"` -- preview render of a mesh asset (skeletal-mesh variant accepts optional `animation_path` + `seek_time` for a posed frame).
+- `editor_query("capture_with_overlay", { asset_path, mode })` -- single static-mesh capture under one of 5 engine debug-view modes: `wireframe`, `normals`, `uv_density`, `lightmap_density`, `shader_complexity`. Use for tech-art audits (texel density, UV stretch, complexity hotspots).
+
+See `monolith_guide(section="recipes")` entry "Visual introspection -- going beyond thumbnails".
+
 ## Gotchas
 
 - `spawn_actor` does NOT spawn `ABlockingVolume` -- use the editor

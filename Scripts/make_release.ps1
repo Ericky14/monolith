@@ -82,7 +82,7 @@ if ($StrippedModules.Count -gt 0) {
 $OutputZip = Join-Path $ProjectDir "Monolith-v$Version.zip"
 $TempDir = Join-Path $env:TEMP "Monolith_Release_$Version"
 $UBT = 'C:\Program Files (x86)\UE_5.7\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe'
-$UProject = Join-Path $ProjectDir "Leviathan.uproject"
+$UProject = Join-Path $ProjectDir "Monolith.uproject"
 
 Write-Host "Building Monolith v$Version release zip..." -ForegroundColor Cyan
 
@@ -97,7 +97,7 @@ if (-not $SkipBuild) {
     try {
         # Non-unity build catches missing includes and unity-only symbol collisions
         # before they reach public releases (feedback_non_unity_build_releases.md).
-        & $UBT LeviathanEditor Win64 Development "-Project=$UProject" -waitmutex -DisableUnity
+        & $UBT MonolithEditor Win64 Development "-Project=$UProject" -waitmutex -DisableUnity
         if ($LASTEXITCODE -ne 0) {
             throw "UBT failed with exit code $LASTEXITCODE. Is the editor closed?"
         }
@@ -111,6 +111,134 @@ if (-not $SkipBuild) {
 } else {
     Write-Host "`n  [1/4] Skipping build (-SkipBuild flag)" -ForegroundColor DarkGray
     Write-Host "    WARNING: Ensure you built with MONOLITH_RELEASE_BUILD=1" -ForegroundColor Red
+}
+
+# --- Step 1a: Full-unity collision gate (issue #68 defense) ---
+# The -DisableUnity build above compiles every .cpp as its own translation unit.
+# That catches missing includes but is STRUCTURALLY BLIND to duplicate file-local
+# symbols: anonymous-namespace functions or file-static functions/vars sharing a
+# name across two+ .cpp files in one module. With no concatenation they never
+# collide, so -DisableUnity cannot see them. That is exactly how issue #68 shipped.
+#
+# End users build with DEFAULT adaptive unity. On a fresh clone the adaptive
+# working set is empty, so everything concatenates (effectively full unity) and
+# they hit the collision on first compile. To catch this class against the EXACT
+# release configuration, we run a SECOND pass under FORCED full unity.
+#
+# We force full unity by temporarily flipping bUseAdaptiveUnityBuild=false in the
+# UBT BuildConfiguration.xml, then ALWAYS restore the original (back it up first,
+# restore in finally). We do NOT pass -DisableUnity here -- we WANT concatenation.
+# We do NOT pass -Clean: flipping the adaptive flag already invalidates the
+# makefile so UBT rebuilds the affected unity blobs, and a clean would wipe the
+# precompiled Plugins/RLPlugin/Binaries/Win64/UnrealEditor-RLPlugin.dll (requiring
+# a dv restore afterward).
+#
+# A whole-project full-unity build also surfaces the host project's own latent
+# collisions. Those are NOT Monolith's concern -- we filter the captured log to
+# Plugins\Monolith\ paths only. Only Monolith-path collision errors ship-block.
+if (-not $SkipBuild) {
+    Write-Host "`n  [1a] Full-unity collision gate (issue #68 defense)..." -ForegroundColor Yellow
+
+    $BuildConfigDir = Join-Path $env:APPDATA "Unreal Engine\UnrealBuildTool"
+    $BuildConfigXml = Join-Path $BuildConfigDir "BuildConfiguration.xml"
+    $BuildConfigBackup = "$BuildConfigXml.monolith-release-bak"
+    $HadBuildConfig = Test-Path $BuildConfigXml
+    $UnityLog = Join-Path $env:TEMP "Monolith_FullUnity_$Version.log"
+
+    # Collision error codes that full-unity concatenation surfaces but -DisableUnity
+    # cannot: redefinition / multiple-definition / ambiguous-overload classes.
+    #   C2084 - function already has a body
+    #   C2011 - type redefinition
+    #   C2086 - identifier redefinition
+    #   C2027 - use of undefined type (often a downstream of conflicting decls)
+    #   C2374 - redefinition / multiple initialization
+    #   C2668 - ambiguous call to overloaded function
+    $CollisionCodes = @("C2084", "C2011", "C2086", "C2027", "C2374", "C2668")
+
+    $env:MONOLITH_RELEASE_BUILD = "1"
+    Write-Host "    MONOLITH_RELEASE_BUILD=1 (release config)" -ForegroundColor DarkGray
+
+    try {
+        # Back up the existing BuildConfiguration.xml (if any) so we can restore it
+        # verbatim in finally. Then write one that forces full unity.
+        if (-not (Test-Path $BuildConfigDir)) {
+            New-Item -ItemType Directory -Path $BuildConfigDir -Force | Out-Null
+        }
+        if ($HadBuildConfig) {
+            Copy-Item $BuildConfigXml $BuildConfigBackup -Force
+            Write-Host "    Backed up existing BuildConfiguration.xml" -ForegroundColor DarkGray
+        }
+
+        $ForceUnityXml = @"
+<?xml version="1.0" encoding="utf-8" ?>
+<Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
+  <BuildConfiguration>
+    <bUseAdaptiveUnityBuild>false</bUseAdaptiveUnityBuild>
+  </BuildConfiguration>
+</Configuration>
+"@
+        Set-Content -Path $BuildConfigXml -Value $ForceUnityXml -Encoding utf8
+        Write-Host "    Forced bUseAdaptiveUnityBuild=false (full unity)" -ForegroundColor DarkGray
+        Write-Host "    Building (no -DisableUnity, no -Clean -- RLPlugin hazard)..." -ForegroundColor DarkGray
+
+        # Capture the full UBT output so we can scan it for Monolith-path collisions.
+        # We do NOT throw on a non-zero UBT exit here directly -- a collision is
+        # itself a non-zero exit, and we want the filtered diagnostic, not a bare
+        # "exit code" message. The collision scan below is the real ship-gate.
+        & $UBT MonolithEditor Win64 Development "-Project=$UProject" -waitmutex 2>&1 |
+            Tee-Object -FilePath $UnityLog | Out-Null
+        $unityExit = $LASTEXITCODE
+
+        # Scan the captured log for collision error codes on Plugins\Monolith\ paths.
+        # MSVC emits errors like:
+        #   D:\...\Plugins\Monolith\Source\...\Foo.cpp(42): error C2084: ...
+        $logLines = if (Test-Path $UnityLog) { Get-Content $UnityLog } else { @() }
+        $codeAlt = ($CollisionCodes -join "|")
+        $monolithCollisions = @($logLines | Where-Object {
+            $_ -match "Plugins\\Monolith\\" -and $_ -match "error\s+($codeAlt)\b"
+        })
+
+        if ($monolithCollisions.Count -gt 0) {
+            Write-Host "`n  [FAIL] Full-unity gate found $($monolithCollisions.Count) Monolith-path collision error(s):" -ForegroundColor Red
+            $monolithCollisions | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+            Write-Host "`n  This is the issue #68 failure mode: duplicate file-local symbols" -ForegroundColor Red
+            Write-Host "  (anonymous-namespace or file-static names shared across .cpp files in" -ForegroundColor Red
+            Write-Host "  one module) that -DisableUnity cannot see. End users build with adaptive" -ForegroundColor Red
+            Write-Host "  unity and hit this on a fresh clone. Rename or hoist the colliding symbols" -ForegroundColor Red
+            Write-Host "  before shipping. Refusing to publish v$Version." -ForegroundColor Red
+            throw "Full-unity collision gate failed: $($monolithCollisions.Count) Monolith-path collision(s)."
+        }
+
+        # No Monolith-path collisions. If UBT still failed, surface that -- a release
+        # build that does not compile under full unity is not shippable either.
+        if ($unityExit -ne 0) {
+            Write-Host "`n  [FAIL] Full-unity build exited $unityExit (no Monolith-path collisions, but build failed)." -ForegroundColor Red
+            Write-Host "    See full log: $UnityLog" -ForegroundColor Yellow
+            throw "Full-unity build failed with exit code $unityExit. Is the editor closed? See $UnityLog."
+        }
+
+        Write-Host "    Full-unity gate passed (no Monolith-path collisions)" -ForegroundColor Green
+    }
+    finally {
+        # ALWAYS restore the BuildConfiguration.xml to its original state, even on
+        # failure -- otherwise the dev's next build silently runs under full unity.
+        if ($HadBuildConfig) {
+            if (Test-Path $BuildConfigBackup) {
+                Copy-Item $BuildConfigBackup $BuildConfigXml -Force
+                Remove-Item $BuildConfigBackup -Force -ErrorAction SilentlyContinue
+                Write-Host "    Restored original BuildConfiguration.xml" -ForegroundColor DarkGray
+            }
+        } else {
+            # There was no BuildConfiguration.xml before -- remove the one we wrote.
+            Remove-Item $BuildConfigXml -Force -ErrorAction SilentlyContinue
+            Write-Host "    Removed temporary BuildConfiguration.xml (none existed before)" -ForegroundColor DarkGray
+        }
+        Remove-Item Env:\MONOLITH_RELEASE_BUILD -ErrorAction SilentlyContinue
+        Remove-Item $UnityLog -Force -ErrorAction SilentlyContinue
+        Write-Host "    MONOLITH_RELEASE_BUILD unset" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host "`n  [1a] Skipping full-unity collision gate (-SkipBuild flag)" -ForegroundColor DarkGray
 }
 
 # --- Step 1b: Build the offline CLI fresh + hard-gate offline parity ---
@@ -146,15 +274,43 @@ if (-not (Test-Path $VcVars)) {
 # build.bat copies the freshly built exe to Plugins/Monolith/Binaries/ (the same
 # Binaries dir the copy step below picks up), so the exe is staged before [3/4].
 Write-Host "    Using VS at $VsInstallPath" -ForegroundColor DarkGray
+# Three robustness measures, learned the hard way during the v0.18.0 release:
+#   1. Prepend the VS *Installer* dir to PATH. vcvars64.bat calls 'vswhere' by bare
+#      name (expecting it on PATH); where the Installer dir is NOT on PATH it prints
+#      "'vswhere.exe' is not recognized" to STDERR. vcvars still recovers and inits
+#      x64 fine -- but that stray STDERR line is what bites under measure #3.
+#   2. Redirect the cmd subprocess STDERR into STDOUT (2>&1) and capture to a log so any
+#      real build failure is diagnosable from the captured tail.
+#   3. THE ACTUAL FIX: relax $ErrorActionPreference to 'Continue' around the native call.
+#      This script runs under EAP='Stop'. Under Stop, PS 5.1 promotes ANY native-command
+#      STDERR to a TERMINATING error -- EVEN through a 2>&1 merge (verified: Stop throws on
+#      the vswhere line, Continue exits 0) -- aborting the release BEFORE the $LASTEXITCODE
+#      gate, even though build.bat itself exits 0. Foreground/interactive hosts default to
+#      Continue, which masked this for every prior release. With EAP relaxed, the exit code
+#      is the sole arbiter; restore the prior preference immediately after.
+$VsInstallerDir = Split-Path $VsWhere -Parent
+$CliBuildLog = Join-Path $env:TEMP "Monolith_OfflineCLIBuild_$Version.log"
+$PrevEAP = $ErrorActionPreference
 Push-Location $ToolDir
 try {
-    & cmd.exe /c "call `"$VcVars`" >nul && call `"$ToolBuildBat`""
-    if ($LASTEXITCODE -ne 0) {
-        throw "Offline CLI build failed with exit code $LASTEXITCODE. Inspect Tools\MonolithQuery\build.bat output."
+    $env:PATH = "$VsInstallerDir;$env:PATH"
+    $ErrorActionPreference = 'Continue'
+    & cmd.exe /c "call `"$VcVars`" && call `"$ToolBuildBat`"" 2>&1 |
+        Tee-Object -FilePath $CliBuildLog | Out-Null
+    $CliExit = $LASTEXITCODE
+    $ErrorActionPreference = $PrevEAP
+    if ($CliExit -ne 0) {
+        if (Test-Path $CliBuildLog) {
+            Write-Host "    --- offline CLI build log (tail) ---" -ForegroundColor Yellow
+            Get-Content $CliBuildLog -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        }
+        throw "Offline CLI build failed with exit code $CliExit. See $CliBuildLog."
     }
 }
 finally {
+    $ErrorActionPreference = $PrevEAP
     Pop-Location
+    Remove-Item $CliBuildLog -Force -ErrorAction SilentlyContinue
 }
 Write-Host "    Offline CLI built (fresh exe staged in Binaries/)" -ForegroundColor Green
 
@@ -223,8 +379,12 @@ if (Test-Path $binDir) {
     $binStripCount = 0
     # Build a regex that matches any stripped module's binary.
     $stripModuleRegex = "(" + (($StrippedModules | ForEach-Object { [regex]::Escape($_) }) -join "|") + ")"
+    # Exclude gitignored dot-directories (e.g. .claude) that may exist physically under
+    # Binaries/. git ls-files never tracks them, but the Binaries copy below walks the
+    # physical directory -- without this guard such a directory and its contents could ship
+    # in the public zip. No legitimate Binaries content lives under a dot-directory.
     Get-ChildItem $binDir -Recurse -File |
-        Where-Object { $_.Extension -ne '.pdb' -and $_.Name -notmatch '\.patch_' } |
+        Where-Object { $_.Extension -ne '.pdb' -and $_.Name -notmatch '\.patch_' -and $_.FullName -notmatch '[\\/]\.claude[\\/]' } |
         ForEach-Object {
             if ($_.Name -match "UnrealEditor-$stripModuleRegex\.") {
                 $binStripCount++

@@ -5,7 +5,7 @@ description: Use when writing or debugging Unreal Engine C++ code via Monolith M
 
 # Unreal C++ Development Workflows
 
-**11 source actions** via `source_query()`, **6 config actions** via `config_query()`.
+**~18+ source actions** via `source_query()`, **6 config actions** via `config_query()`.
 
 ```
 monolith_discover({ namespace: "source" })
@@ -25,6 +25,14 @@ monolith_discover({ namespace: "config" })
 | `get_module_info` | `symbol` | Module dependencies, build type |
 | `get_symbol_context` | `symbol` | Definition + surrounding context |
 | `read_file` | `file_path` | Raw engine source file |
+| `get_include_path` | `symbol` | Canonical `#include` for a symbol (Public/Classes/Internal includable; Private warns) |
+| `get_signature` | `symbol` | Exact overload signature(s) — declaration-read, body-free |
+| `check_deprecations` | `symbols` | Batch deprecation status (version/message/kind) from the deprecation index |
+| `verify_symbols` | `symbols` | Batch pre-flight: existence + include + signature + deprecation per symbol in one call |
+| `find_example_usage` | `symbol` | Ranked real call-site examples (±3 context lines), `prefer` engine/project, cursor-paged |
+| `suggest_build_cs_deps` | `file_path` | Required Build.cs modules + missing deps for a file (works on uncommitted files) |
+| `lint_header` | `file_path` | Regex UHT-gotcha lint of a header (works on UNINDEXED files); findings `{rule_id, line, message, severity}` |
+| `generate_class_stub` | `parent`, `class_name`, `module` | UCLASS-derived `.h`/`.cpp` stub pair as TEXT (never writes; generated.h last, `<MODULE>_API`) |
 | `trigger_reindex` | -- | Full engine source re-index |
 | `trigger_project_reindex` | -- | Incremental project-only re-index |
 
@@ -88,4 +96,4 @@ Call `list_class_specifiers` first to learn what `find_class_specifier` can matc
 - `cppreflect_query` for the structural reflected view; `source_query` for symbol-level source
 - `cppreflect` `source_line` is `0` (UHT drops it) — round-trip through `source_query("search_source")` for real line numbers
 - Use `config_query("explain_setting")` before changing unfamiliar CVars
-- Non-existent actions: `get_include_path`, `get_function_signature`, `get_deprecation_warnings`
+- `check_deprecations` needs a full `source.trigger_reindex` once for engine deprecation rows; before that it returns `index_state: "empty"`

@@ -8,12 +8,16 @@
 #include "Actions/ProjectGetAssetDetailsAction.h"
 #include "Actions/ProjectListGameplayTagsAction.h"
 #include "Actions/ProjectSearchGameplayTagsAction.h"
+#include "Actions/ProjectRefreshAssetsAction.h"
+#include "Actions/ProjectGetSavedAssetStateAction.h"
+#include "Actions/ProjectCleanupGeneratedAssetsAction.h"
+#include "Actions/ProjectExportAssetTextAction.h"
 
 #define LOCTEXT_NAMESPACE "FMonolithIndexModule"
 
 void FMonolithIndexModule::StartupModule()
 {
-	UE_LOG(LogMonolithIndex, Verbose, TEXT("Monolith -- Index module loaded (7 actions, SQLite+FTS5)"));
+	UE_LOG(LogMonolithIndex, Verbose, TEXT("Monolith -- Index module loaded (10 actions, SQLite+FTS5)"));
 
 	FMonolithToolRegistry& Registry = FMonolithToolRegistry::Get();
 
@@ -51,6 +55,26 @@ void FMonolithIndexModule::StartupModule()
 		FProjectSearchGameplayTagsAction::GetDescription(),
 		FMonolithActionHandler::CreateStatic(&FProjectSearchGameplayTagsAction::Execute),
 		FProjectSearchGameplayTagsAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectRefreshAssetsAction::GetName(),
+		FProjectRefreshAssetsAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectRefreshAssetsAction::Execute),
+		FProjectRefreshAssetsAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectGetSavedAssetStateAction::GetName(),
+		FProjectGetSavedAssetStateAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectGetSavedAssetStateAction::Execute),
+		FProjectGetSavedAssetStateAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectCleanupGeneratedAssetsAction::GetName(),
+		FProjectCleanupGeneratedAssetsAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectCleanupGeneratedAssetsAction::Execute),
+		FProjectCleanupGeneratedAssetsAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectExportAssetTextAction::GetName(),
+		FProjectExportAssetTextAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectExportAssetTextAction::Execute),
+		FProjectExportAssetTextAction::GetSchema());
 }
 
 void FMonolithIndexModule::ShutdownModule()

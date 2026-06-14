@@ -41,3 +41,9 @@ Scripts/score_history.py
 Scripts/__pycache__/
 TrainingMemory/
 .claude/agent-memory/
+
+# Release housekeeping — internal planning scrolls + transient release-rite debris (never shipped)
+Docs/pcg/
+release_body*.md
+pr*.diff
+make_release*.log

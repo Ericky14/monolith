@@ -32,4 +32,9 @@ private:
 	static FMonolithActionResult HandleSetChannelWeight(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRebuildPoseSearchIndex(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetDatabaseSearchMode(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Motion Matching Pack Sprint 1: NormalizationSet + DB entry tags (3 class-member) ---
+	static FMonolithActionResult HandleCreateNormalizationSet(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddDatabaseToNormalizationSet(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetDatabaseEntryTags(const TSharedPtr<FJsonObject>& Params);
 };

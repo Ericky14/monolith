@@ -100,7 +100,7 @@ int32 GetGEComponentCount(UGameplayEffect* GE)
  * GE component edits qualify as structural (subobject collection changes), so the structural
  * variant is required; the non-structural call would skip dependent compile passes.
  */
-void MarkModified(UBlueprint* BP)
+void MarkModified_Effect(UBlueprint* BP)
 {
 	if (!BP)
 	{
@@ -1316,7 +1316,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddModifier(const TShared
 	NewMod.ModifierMagnitude = Magnitude;
 
 	GE->Modifiers.Add(NewMod);
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	int32 NewIndex = GE->Modifiers.Num() - 1;
 
@@ -1392,7 +1392,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetModifier(const TShared
 		Mod.ModifierMagnitude = NewMag;
 	}
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Updated modifier at index %d"), Index));
@@ -1460,7 +1460,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleRemoveModifier(const TSha
 
 	FString RemovedAttr = AttributeToString(GE->Modifiers[RemoveIndex].Attribute);
 	GE->Modifiers.RemoveAt(RemoveIndex);
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Removed modifier at index %d (%s)"), RemoveIndex, *RemovedAttr));
@@ -1630,7 +1630,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddGEComponent(const TSha
 	}
 	// immunity, remove_other, custom_can_apply: skeleton creation is enough, detailed config via BP
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Added %s component"), *ComponentType));
@@ -1794,7 +1794,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetGEComponent(const TSha
 		}
 	}
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Updated %s component at index %d"), *ComponentType, TargetIndex));
@@ -1913,7 +1913,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetEffectStacking(const T
 		}
 	}
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath, TEXT("Stacking configuration updated"));
 	Result->SetStringField(TEXT("stacking_type"), StackTypeStr);
@@ -1955,7 +1955,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetDuration(const TShared
 		GE->DurationMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(DurationValue));
 	}
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath, TEXT("Duration updated"));
 	Result->SetStringField(TEXT("duration_policy"), DurationPolicyToString(DurationPolicy));
@@ -1991,7 +1991,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleSetPeriod(const TSharedPt
 		GE->bExecutePeriodicEffectOnApplication = Params->GetBoolField(TEXT("execute_on_application"));
 	}
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath, TEXT("Period updated"));
 	Result->SetNumberField(TEXT("period"), PeriodValue);
@@ -2526,7 +2526,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleCreateEffectFromTemplate(
 	// Configure stacking
 	ConfigureStacking(GE, Def.StackingType, Def.StackLimit);
 
-	MarkModified(NewBP);
+	MarkModified_Effect(NewBP);
 	bool bSaved = SaveGEPackage(NewBP, SavePath);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -2745,7 +2745,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleBuildEffectFromSpec(const
 	TArray<FString> TargetTags = MonolithGAS::ParseStringArray(Spec, TEXT("target_tags"));
 	if (TargetTags.Num() > 0) AddTargetTagsComponent(GE, TargetTags);
 
-	MarkModified(NewBP);
+	MarkModified_Effect(NewBP);
 	bool bSaved = SaveGEPackage(NewBP, SavePath);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -2941,7 +2941,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleAddExecution(const TShare
 	}
 
 	GE->Executions.Add(ExecDef);
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MonolithGAS::MakeAssetResult(AssetPath,
 		FString::Printf(TEXT("Added execution calculation: %s"), *CalcClass->GetName()));
@@ -3061,7 +3061,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleDuplicateGameplayEffect(c
 		}
 	}
 
-	MarkModified(DestBP);
+	MarkModified_Effect(DestBP);
 	bool bSaved = SaveGEPackage(DestBP, DestPath);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -3547,7 +3547,7 @@ FMonolithActionResult FMonolithGASEffectActions::HandleRemoveGEComponent(const T
 
 	CompToRemove->MarkAsGarbage();
 
-	MarkModified(BP);
+	MarkModified_Effect(BP);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("asset_path"), AssetPath);

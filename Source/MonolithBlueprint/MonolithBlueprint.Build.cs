@@ -23,6 +23,7 @@ public class MonolithBlueprint : ModuleRules
 			"Kismet",
 			"KismetCompiler",
 			"EditorScriptingUtilities",
+			"EnhancedInput",
 			"Json",
 			"JsonUtilities"
 			// (Historical: StructUtils was added here by PR #40 but is deprecated

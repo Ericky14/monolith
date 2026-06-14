@@ -22,6 +22,8 @@
 #include <filesystem>
 #include <ctime>
 #include <cstdint>
+#include <regex>
+#include <cctype>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -364,6 +366,13 @@ static Args parse_args(int argc, char* argv[]) {
                   << "  get_module_info <module_name>\n"
                   << "  get_symbol_context <symbol> [--context-lines=N]\n"
                   << "  read_file <file_path> [--start=N] [--end=N]\n"
+                  << "  get_include_path <symbol>\n"
+                  << "  get_signature <symbol> [--limit=N]\n"
+                  << "  check_deprecations <symbol> [<symbol> ...]\n"
+                  << "  verify_symbols <symbol> [<symbol> ...]\n"
+                  << "  find_example_usage <symbol> [--prefer=engine|project] [--limit=N]\n"
+                  << "  lint_header <file_path>\n"
+                  << "  generate_class_stub <parent> <class_name> <module>\n"
                   << "\nProject actions:\n"
                   << "  search <query> [--limit=N]\n"
                   << "  find_by_type <asset_class> [--limit=N] [--offset=N]\n"
@@ -415,6 +424,8 @@ static Args parse_args(int argc, char* argv[]) {
         "min_confidence", "status", "max_age_days", "since_unix", "repo_tag",
         "macro_filter", "specifier_name", "interface_name", "decision_id",
         "file_path",
+        // source.find_example_usage
+        "prefer",
         // db overrides
         "db", "source_db", "project_db",
     };
@@ -969,6 +980,800 @@ public:
 
         std::cout << "--- " << short_path(resolved) << " (lines " << start << "-" << end << ") ---\n";
         std::cout << read_file_lines(resolved, start, end) << std::endl;
+    }
+
+    // ============================================================
+    // Phase 1 — LLM C++ authoring ergonomics (items 1-3). Mirrors the live
+    // FMonolithSourceActions handlers' content[].text rendering for parity.
+    // ============================================================
+
+    // Mirror of FMonolithSourceActions::DeriveIncludePath.
+    static std::string derive_include_path(const std::string& indexed_path,
+                                           bool& out_includable, std::string& out_warning,
+                                           const std::string& module_name) {
+        out_includable = true;
+        out_warning.clear();
+
+        std::string path = indexed_path;
+        std::replace(path.begin(), path.end(), '\\', '/');
+
+        auto rfind_ci = [](const std::string& hay, const std::string& needle) -> size_t {
+            return hay.rfind(needle);
+        };
+
+        static const char* roots[] = { "/Public/", "/Classes/", "/Internal/" };
+        for (const char* root : roots) {
+            size_t idx = rfind_ci(path, root);
+            if (idx != std::string::npos) {
+                out_includable = true;
+                return path.substr(idx + std::string(root).size());
+            }
+        }
+
+        size_t pidx = rfind_ci(path, "/Private/");
+        if (pidx != std::string::npos) {
+            out_includable = false;
+            out_warning = "Private header -- not includable outside "
+                + (module_name.empty() ? std::string("its module") : module_name)
+                + "; same-module include shown";
+            return path.substr(pidx + std::string("/Private/").size());
+        }
+
+        // basename fallback
+        size_t slash = path.find_last_of('/');
+        out_includable = true;
+        return (slash == std::string::npos) ? path : path.substr(slash + 1);
+    }
+
+    // Resolve a symbol (or Class::Method) to its owning file row.
+    Row resolve_symbol_row(const std::string& symbol, bool& found) {
+        found = false;
+        std::string lookup = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) lookup = symbol.substr(0, scope);
+
+        auto rows = query(db,
+            "SELECT id, name, file_id FROM symbols WHERE name = ? ORDER BY (line_end > line_start) DESC",
+            {lookup});
+        if (rows.empty()) {
+            std::string fts_q = escape_fts(lookup);
+            rows = query(db,
+                "SELECT s.id, s.name, s.file_id FROM symbols_fts f JOIN symbols s ON s.id = f.rowid "
+                "WHERE symbols_fts MATCH ? LIMIT 5", {fts_q});
+        }
+        if (rows.empty()) return Row{};
+        found = true;
+        return rows[0];
+    }
+
+    // --- get_include_path ---
+    void get_include_path(const Args& args) {
+        if (args.positional.empty()) die("get_include_path requires a symbol argument");
+        std::string symbol = args.positional[0];
+
+        bool found = false;
+        Row sym = resolve_symbol_row(symbol, found);
+        if (!found) die("No symbol found matching '" + symbol + "'.");
+
+        int file_id = sym.get_int("file_id");
+
+        // Prefer a header file among same-name rows.
+        std::string lookup = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) lookup = symbol.substr(0, scope);
+        auto allrows = query(db,
+            "SELECT s.file_id, f.path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ?",
+            {lookup});
+        std::string file_path = get_file_path(file_id);
+        for (auto& r : allrows) {
+            std::string p = r.get("path");
+            if (p.size() >= 2 && p.substr(p.size() - 2) == ".h") {
+                file_id = r.get_int("file_id");
+                file_path = p;
+                break;
+            }
+        }
+
+        // Module + build_cs_path
+        auto mrows = query(db,
+            "SELECT m.name, m.build_cs_path FROM files f JOIN modules m ON m.id = f.module_id WHERE f.id = ?",
+            {std::to_string(file_id)});
+        std::string module_name = mrows.empty() ? "" : mrows[0].get("name");
+        std::string build_cs = mrows.empty() ? "" : mrows[0].get("build_cs_path");
+
+        bool includable = true;
+        std::string warning;
+        std::string include = derive_include_path(file_path, includable, warning, module_name);
+
+        std::string build_cs_note;
+        if (!module_name.empty()) {
+            if (!build_cs.empty()) {
+                size_t s = build_cs.find_last_of("/\\");
+                std::string base = (s == std::string::npos) ? build_cs : build_cs.substr(s + 1);
+                build_cs_note = "Module '" + module_name + "' -- add to your Build.cs deps (" + base + ")";
+            } else {
+                build_cs_note = "Module '" + module_name + "' -- add to your Build.cs deps";
+            }
+        }
+
+        std::cout << "#include \"" << include << "\"";
+        if (!module_name.empty()) std::cout << "\nModule: " << module_name;
+        if (!build_cs_note.empty()) std::cout << "\n" << build_cs_note;
+        if (!warning.empty()) std::cout << "\nWARNING: " << warning;
+        std::cout << std::endl;
+    }
+
+    // Mirror of FMonolithSourceActions::CompactDeclaration.
+    static std::string compact_declaration(const std::vector<std::string>& lines, int start_idx) {
+        std::string accum;
+        int paren_depth = 0;
+        bool saw_open = false;
+        for (int i = start_idx; i < (int)lines.size() && i < start_idx + 12; ++i) {
+            std::string line = lines[i];
+            // trim trailing ws
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            if (!line.empty() && line.back() == '\\') {
+                line.pop_back();
+                while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+            }
+            bool done = false;
+            for (size_t c = 0; c < line.size(); ++c) {
+                char ch = line[c];
+                if (ch == '(') { paren_depth++; saw_open = true; }
+                else if (ch == ')') { paren_depth = std::max(0, paren_depth - 1); }
+                else if (paren_depth == 0 && saw_open && (ch == '{' || ch == ';')) {
+                    // Prefix already accumulated char-by-char above; just stop
+                    // (re-appending line.substr(0,c) duplicated the tail).
+                    done = true;
+                    break;
+                }
+                accum += ch;
+            }
+            if (done) break;
+            accum += " ";
+        }
+        // collapse whitespace
+        std::string out;
+        bool prev_space = false;
+        for (char ch : accum) {
+            if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+                if (!prev_space) out += ' ';
+                prev_space = true;
+            } else { out += ch; prev_space = false; }
+        }
+        // trim
+        size_t b = out.find_first_not_of(' ');
+        size_t e = out.find_last_not_of(' ');
+        return (b == std::string::npos) ? "" : out.substr(b, e - b + 1);
+    }
+
+    // --- get_signature ---
+    void get_signature(const Args& args) {
+        if (args.positional.empty()) die("get_signature requires a symbol argument");
+        std::string symbol = args.positional[0];
+        int limit = args.opt_int("limit", 10);
+
+        std::string method = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) method = symbol.substr(scope + 2);
+
+        struct Overload { std::string sig, source, file; int line = 0; };
+        std::vector<Overload> overloads;
+
+        // Fast path: body-free signature column.
+        auto fnrows = query(db,
+            "SELECT signature, file_id, line_start FROM symbols WHERE name = ? AND kind = 'function'",
+            {method});
+        for (auto& r : fnrows) {
+            if ((int)overloads.size() >= limit) break;
+            std::string sig = r.get("signature");
+            if (sig.empty()) continue;
+            if (sig.find('{') != std::string::npos || sig.find('\\') != std::string::npos) continue;
+            // trim
+            size_t b = sig.find_first_not_of(" \t\r\n");
+            size_t e = sig.find_last_not_of(" \t\r\n");
+            sig = (b == std::string::npos) ? "" : sig.substr(b, e - b + 1);
+            overloads.push_back({sig, "column", short_path(get_file_path(r.get_int("file_id"))), r.get_int("line_start")});
+        }
+
+        // Primary: declaration-read via source_fts.
+        if (overloads.empty()) {
+            std::string fts_q = escape_fts(symbol);
+            auto chunks = query(db,
+                "SELECT file_id, line_number, text FROM source_fts WHERE source_fts MATCH ? "
+                "ORDER BY bm25(source_fts) LIMIT 50", {fts_q});
+            std::set<std::string> seen;
+            std::string needle = method + "(";
+            for (auto& ch : chunks) {
+                if ((int)overloads.size() >= limit) break;
+                std::string fp = get_file_path(ch.get_int("file_id"));
+                std::ifstream f(fp);
+                if (!f.is_open()) continue;
+                std::vector<std::string> file_lines;
+                std::string l;
+                while (std::getline(f, l)) file_lines.push_back(l);
+                int win_start = std::max(0, ch.get_int("line_number") - 1);
+                int win_end = std::min((int)file_lines.size(), win_start + 10);
+                for (int i = win_start; i < win_end; ++i) {
+                    if ((int)overloads.size() >= limit) break;
+                    const std::string& line = file_lines[i];
+                    size_t didx = line.find(needle);
+                    if (didx == std::string::npos) continue;
+                    if (didx > 0) {
+                        char prev = line[didx - 1];
+                        if (std::isalnum((unsigned char)prev) || prev == '_') continue;
+                    }
+                    std::string sig = compact_declaration(file_lines, i);
+                    if (sig.empty() || sig.find(needle) == std::string::npos) continue;
+                    if (seen.count(sig)) continue;
+                    seen.insert(sig);
+                    overloads.push_back({sig, "declaration_read", short_path(fp), i + 1});
+                }
+            }
+        }
+
+        if (overloads.empty()) die("No signature found for '" + symbol + "'.");
+
+        for (size_t i = 0; i < overloads.size(); ++i) {
+            if (i > 0) std::cout << "\n";
+            std::cout << overloads[i].sig << "\n  // " << overloads[i].source
+                      << " @ " << overloads[i].file << ":" << overloads[i].line;
+        }
+        std::cout << std::endl;
+    }
+
+    // --- check_deprecations ---
+    void check_deprecations(const Args& args) {
+        if (args.positional.empty()) die("check_deprecations requires one or more symbol arguments");
+
+        // Empty index -> clean "empty" state (Decision 3).
+        auto cnt = query(db, "SELECT COUNT(*) as c FROM symbol_deprecations", {});
+        int total = cnt.empty() ? 0 : cnt[0].get_int("c");
+        if (total == 0) {
+            std::cout << "Deprecation index is empty (schema v2 landed but not yet populated). "
+                         "Run source.trigger_reindex to populate it." << std::endl;
+            return;
+        }
+
+        std::vector<std::string> lines;
+        for (const auto& name : args.positional) {
+            auto rows = query(db,
+                "SELECT version, message, kind FROM symbol_deprecations WHERE symbol_name = ? LIMIT 1",
+                {name});
+            if (!rows.empty()) {
+                lines.push_back(name + ": DEPRECATED (" + rows[0].get("version") + ") ["
+                    + rows[0].get("kind") + "] " + rows[0].get("message"));
+            } else {
+                lines.push_back(name + ": not deprecated");
+            }
+        }
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (i > 0) std::cout << "\n";
+            std::cout << lines[i];
+        }
+        std::cout << std::endl;
+    }
+
+    // Shared composition: does Class::Method (or plain symbol) EXIST? Class-row +
+    // source_fts declaration hit, NEVER the method's own symbols row (Step-0).
+    bool symbol_exists(const std::string& symbol) {
+        std::string lookup = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) lookup = symbol.substr(0, scope);
+
+        if (!query(db, "SELECT id FROM symbols WHERE name = ? LIMIT 1", {lookup}).empty())
+            return true;
+        // FTS class-row fallback.
+        {
+            std::string fts_q = escape_fts(lookup);
+            if (!query(db, "SELECT s.id FROM symbols_fts f JOIN symbols s ON s.id = f.rowid "
+                           "WHERE symbols_fts MATCH ? LIMIT 1", {fts_q}).empty())
+                return true;
+        }
+        // Source-line declaration hit for `Name(`.
+        std::string method = symbol;
+        if (scope != std::string::npos) method = symbol.substr(scope + 2);
+        std::string needle = method + "(";
+        std::string fts_q = escape_fts(symbol);
+        auto chunks = query(db,
+            "SELECT file_id, line_number FROM source_fts WHERE source_fts MATCH ? "
+            "ORDER BY bm25(source_fts) LIMIT 25", {fts_q});
+        for (auto& ch : chunks) {
+            std::ifstream f(get_file_path(ch.get_int("file_id")));
+            if (!f.is_open()) continue;
+            std::vector<std::string> fl; std::string l;
+            while (std::getline(f, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); fl.push_back(l); }
+            int ws = std::max(0, ch.get_int("line_number") - 1);
+            int we = std::min((int)fl.size(), ws + 10);
+            for (int i = ws; i < we; ++i) {
+                size_t di = fl[i].find(needle);
+                if (di == std::string::npos) continue;
+                if (di > 0) { char p = fl[i][di - 1]; if (std::isalnum((unsigned char)p) || p == '_') continue; }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // First declaration signature: body-free column fast path, else declaration_read.
+    bool first_signature(const std::string& symbol, std::string& out_sig, std::string& out_source) {
+        std::string method = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) method = symbol.substr(scope + 2);
+        auto fnrows = query(db,
+            "SELECT signature, file_id, line_start FROM symbols WHERE name = ? AND kind = 'function'",
+            {method});
+        for (auto& r : fnrows) {
+            std::string sig = r.get("signature");
+            if (sig.empty()) continue;
+            if (sig.find('{') != std::string::npos || sig.find('\\') != std::string::npos) continue;
+            size_t b = sig.find_first_not_of(" \t\r\n");
+            size_t e = sig.find_last_not_of(" \t\r\n");
+            out_sig = (b == std::string::npos) ? "" : sig.substr(b, e - b + 1);
+            out_source = "column";
+            return true;
+        }
+        std::string fts_q = escape_fts(symbol);
+        auto chunks = query(db,
+            "SELECT file_id, line_number FROM source_fts WHERE source_fts MATCH ? "
+            "ORDER BY bm25(source_fts) LIMIT 50", {fts_q});
+        std::string needle = method + "(";
+        for (auto& ch : chunks) {
+            std::ifstream f(get_file_path(ch.get_int("file_id")));
+            if (!f.is_open()) continue;
+            std::vector<std::string> fl; std::string l;
+            while (std::getline(f, l)) fl.push_back(l);
+            int ws = std::max(0, ch.get_int("line_number") - 1);
+            int we = std::min((int)fl.size(), ws + 10);
+            for (int i = ws; i < we; ++i) {
+                size_t di = fl[i].find(needle);
+                if (di == std::string::npos) continue;
+                if (di > 0) { char p = fl[i][di - 1]; if (std::isalnum((unsigned char)p) || p == '_') continue; }
+                std::string sig = compact_declaration(fl, i);
+                if (sig.empty() || sig.find(needle) == std::string::npos) continue;
+                out_sig = sig; out_source = "declaration_read";
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // --- verify_symbols (item 4) ---
+    void verify_symbols(const Args& args) {
+        if (args.positional.empty()) die("verify_symbols requires one or more symbol arguments");
+
+        auto cnt = query(db, "SELECT COUNT(*) as c FROM symbol_deprecations", {});
+        bool dep_empty = cnt.empty() || cnt[0].get_int("c") == 0;
+
+        std::vector<std::string> lines;
+        for (const auto& symbol : args.positional) {
+            bool exists = symbol_exists(symbol);
+            if (!exists) { lines.push_back(symbol + ": NOT FOUND"); continue; }
+
+            std::string line = symbol + ": exists";
+
+            // include
+            bool found = false;
+            Row sym = resolve_symbol_row(symbol, found);
+            std::string include, module_name, warning; bool includable = true;
+            if (found) {
+                std::string lookup = symbol;
+                size_t scope = symbol.rfind("::");
+                if (scope != std::string::npos) lookup = symbol.substr(0, scope);
+                auto allrows = query(db,
+                    "SELECT s.file_id, f.path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ?",
+                    {lookup});
+                int file_id = sym.get_int("file_id");
+                std::string file_path = get_file_path(file_id);
+                for (auto& r : allrows) {
+                    std::string p = r.get("path");
+                    if (p.size() >= 2 && p.substr(p.size() - 2) == ".h") { file_id = r.get_int("file_id"); file_path = p; break; }
+                }
+                auto mrows = query(db,
+                    "SELECT m.name FROM files f JOIN modules m ON m.id = f.module_id WHERE f.id = ?",
+                    {std::to_string(file_id)});
+                module_name = mrows.empty() ? "" : mrows[0].get("name");
+                include = derive_include_path(file_path, includable, warning, module_name);
+            }
+            if (!include.empty())
+                line += " | #include \"" + include + "\"" + (includable ? "" : " (NOT includable)");
+
+            // signature
+            std::string sig, sig_src;
+            if (first_signature(symbol, sig, sig_src) && !sig.empty())
+                line += " | " + sig;
+
+            // deprecation
+            if (!dep_empty) {
+                std::string method = symbol;
+                size_t scope = symbol.rfind("::");
+                if (scope != std::string::npos) method = symbol.substr(scope + 2);
+                auto drows = query(db,
+                    "SELECT version FROM symbol_deprecations WHERE symbol_name = ? LIMIT 1", {method});
+                if (!drows.empty()) line += " | DEPRECATED";
+            }
+            lines.push_back(line);
+        }
+        for (size_t i = 0; i < lines.size(); ++i) { if (i > 0) std::cout << "\n"; std::cout << lines[i]; }
+        std::cout << std::endl;
+    }
+
+    // --- find_example_usage (item 5) ---
+    void find_example_usage(const Args& args) {
+        if (args.positional.empty()) die("find_example_usage requires a symbol argument");
+        std::string symbol = args.positional[0];
+        std::string prefer = args.opt("prefer", "engine");
+        std::transform(prefer.begin(), prefer.end(), prefer.begin(), ::tolower);
+        bool prefer_project = (prefer == "project");
+        int limit = std::max(1, args.opt_int("limit", 10));
+        const int HARD_CAP = 500, FTS_FETCH = 400;
+
+        std::string method = symbol;
+        size_t scope = symbol.rfind("::");
+        if (scope != std::string::npos) method = symbol.substr(scope + 2);
+        std::string needle = method + "(";
+
+        struct Usage { std::string file; int line; std::string context; int rank; std::string sort_path; };
+        std::vector<Usage> usages;
+        std::set<std::string> seen;
+
+        std::string fts_q = escape_fts(symbol);
+        auto chunks = query(db,
+            "SELECT file_id, line_number FROM source_fts WHERE source_fts MATCH ? "
+            "ORDER BY bm25(source_fts) LIMIT " + std::to_string(FTS_FETCH), {fts_q});
+        for (auto& ch : chunks) {
+            std::string fp = get_file_path(ch.get_int("file_id"));
+            std::ifstream f(fp);
+            if (!f.is_open()) continue;
+            std::vector<std::string> fl; std::string l;
+            while (std::getline(f, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); fl.push_back(l); }
+            int ws = std::max(0, ch.get_int("line_number") - 1);
+            int we = std::min((int)fl.size(), ws + 10);
+            for (int i = ws; i < we; ++i) {
+                size_t hi = fl[i].find(needle);
+                if (hi == std::string::npos) continue;
+                if (hi > 0) { char p = fl[i][hi - 1]; if (std::isalnum((unsigned char)p) || p == '_') continue; }
+                std::string key = std::to_string(ch.get_int("file_id")) + "_" + std::to_string(i + 1);
+                if (seen.count(key)) continue;
+                seen.insert(key);
+
+                int cs = std::max(0, i - 3), ce = std::min((int)fl.size() - 1, i + 3);
+                std::ostringstream ctx;
+                for (int c = cs; c <= ce; ++c) {
+                    char buf[16]; std::snprintf(buf, sizeof(buf), "%5d", c + 1);
+                    ctx << buf << " | " << fl[c];
+                    if (c < ce) ctx << "\n";
+                }
+                // engine-vs-project + Runtime classification. PARITY: identical
+                // rule across live / exe / py — classify on the forward-slashed raw
+                // stored path via the `Engine/Source/` (engine) + `/Source/Runtime/`
+                // (runtime) substrings. An engine plugin path (Engine/Plugins/.../
+                // Source/) lacks `Engine/Source/` and so ranks as project in all three.
+                std::string norm = fp;
+                for (auto& ch2 : norm) if (ch2 == '\\') ch2 = '/';
+                bool is_engine = norm.find("Engine/Source/") != std::string::npos;
+                bool is_runtime = norm.find("/Source/Runtime/") != std::string::npos;
+                int rank = is_engine ? (is_runtime ? 0 : 1) : 2;
+                usages.push_back({short_path(fp), i + 1, ctx.str(), rank, fp});
+            }
+        }
+
+        auto rank_key = [&](const Usage& x) -> int {
+            if (!prefer_project) return x.rank;
+            switch (x.rank) { case 2: return 0; case 0: return 1; default: return 2; }
+        };
+        std::stable_sort(usages.begin(), usages.end(), [&](const Usage& a, const Usage& b) {
+            int ka = rank_key(a), kb = rank_key(b);
+            if (ka != kb) return ka < kb;
+            if (a.sort_path != b.sort_path) return a.sort_path < b.sort_path;
+            return a.line < b.line;
+        });
+
+        int total = (int)usages.size();
+        int slice_end = std::min(std::min(limit, total), HARD_CAP);
+        if (total == 0) { std::cout << "No call-site examples found for '" << symbol << "'." << std::endl; return; }
+        // PARITY: emit ONLY the rendered snippets (no total_estimate / next_cursor).
+        // Those are structured-JSON fields the live handler sets on its result
+        // object, not on content[].text. The text byte-compare runs against the
+        // live content[].text, which likewise omits both. Do NOT add them here.
+        std::ostringstream out;
+        for (int i = 0; i < slice_end; ++i) {
+            if (i > 0) out << "\n\n";
+            out << "--- " << usages[i].file << ":" << usages[i].line << " ---\n" << usages[i].context;
+        }
+        std::cout << out.str() << std::endl;
+    }
+
+    // --- lint_header (item 7) ---
+    // Mirror of FMonolithSourceActions::LintHeaderLines with an ALWAYS-EMPTY
+    // specifier vocabulary (the offline tool cannot reach the RI registry, so the
+    // invalid-specifier rule is always skipped — matching the live handler's
+    // "degrade gracefully when RI unavailable" path). Text output is byte-identical
+    // to the live content[].text: one "[sev] Lnn (rule): msg" per finding, or the
+    // "Clean -- no lint findings." line. NOTE: live uses an em-dash ("Clean —");
+    // ASCII files keep this ASCII -- the parity case uses a file that yields >=1
+    // finding so the clean-line spelling is never compared.
+    struct LintFinding { std::string rule_id; int line; std::string message; std::string severity; };
+
+    static std::string derive_module_from_path(const std::string& file_path) {
+        std::string p = file_path;
+        for (auto& c : p) if (c == '\\') c = '/';
+        size_t src = p.rfind("/Source/");
+        if (src == std::string::npos) return "";
+        std::string after = p.substr(src + 8);
+        size_t slash = after.find('/');
+        if (slash == std::string::npos) return "";
+        return after.substr(0, slash);
+    }
+    static std::string to_upper(std::string s) { for (auto& c : s) c = (char)std::toupper((unsigned char)c); return s; }
+    static std::string trim(const std::string& s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
+    }
+    static std::string base_filename(const std::string& path) {
+        std::string p = path; for (auto& c : p) if (c == '\\') c = '/';
+        size_t slash = p.find_last_of('/');
+        std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
+        size_t dot = name.rfind('.');
+        return (dot == std::string::npos) ? name : name.substr(0, dot);
+    }
+    static std::string clean_filename(const std::string& path) {
+        std::string p = path; for (auto& c : p) if (c == '\\') c = '/';
+        size_t slash = p.find_last_of('/');
+        return (slash == std::string::npos) ? p : p.substr(slash + 1);
+    }
+    // Strip block comments threading state through in_block.
+    static std::string strip_block_comments(const std::string& line, bool& in_block) {
+        std::string result, work = line;
+        while (true) {
+            if (in_block) {
+                size_t end = work.find("*/");
+                if (end == std::string::npos) return result;
+                work = work.substr(end + 2);
+                in_block = false;
+            }
+            size_t open = work.find("/*");
+            if (open == std::string::npos) { result += work; return result; }
+            result += work.substr(0, open);
+            work = work.substr(open + 2);
+            in_block = true;
+        }
+    }
+    static std::string strip_line_comment(const std::string& line) {
+        size_t lc = line.find("//");
+        return (lc == std::string::npos) ? line : line.substr(0, lc);
+    }
+    static bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+    static bool ends_with(const std::string& s, const std::string& suf) {
+        return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    }
+
+    void lint_header(const Args& args) {
+        if (args.positional.empty()) die("lint_header requires a file_path argument");
+        std::string file_path = args.positional[0];
+        std::ifstream f(file_path);
+        if (!f.is_open()) die("Could not read header file: " + file_path);
+        std::vector<std::string> lines; std::string l;
+        while (std::getline(f, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); lines.push_back(l); }
+
+        std::string module = derive_module_from_path(file_path);
+        std::string api_macro = module.empty() ? "" : to_upper(module) + "_API";
+
+        bool in_block = false, has_gen_body = false, any_reflected = false;
+        int gen_body_line = 0, last_inc_line = 0, gen_h_line = 0;
+        std::string last_inc_path;
+        std::string gen_h_path;   // the ACTUAL *.generated.h include (NOT the last include — fixes rule-c false positive)
+        struct RT { int decl_line; std::string name; bool has_api; };
+        std::vector<RT> reflected;
+        bool pending = false; int pending_line = 0;
+
+        std::vector<LintFinding> findings;
+
+        std::regex inc_re("^\\s*#\\s*include\\s+[\"<]([^\">]+)[\">]");
+        std::regex decl_re("^\\s*(?:class|struct)\\s+(?:[A-Z][A-Z0-9_]*_API\\s+)?([A-Za-z_][A-Za-z0-9_]*)");
+        std::regex api_re("\\b([A-Z][A-Z0-9_]*_API)\\b");
+
+        for (size_t i = 0; i < lines.size(); ++i) {
+            std::string scan = strip_block_comments(lines[i], in_block);
+            std::string code = strip_line_comment(scan);
+            std::string trimmed = trim(code);
+            if (trimmed.empty()) continue;
+
+            std::smatch m;
+            if (std::regex_search(code, m, inc_re)) {
+                std::string inc = m[1].str();
+                last_inc_line = (int)i + 1; last_inc_path = inc;
+                if (ends_with(inc, ".generated.h")) { gen_h_line = (int)i + 1; gen_h_path = inc; }
+                continue;
+            }
+            if (trimmed.find("GENERATED_BODY") != std::string::npos ||
+                trimmed.find("GENERATED_UCLASS_BODY") != std::string::npos) {
+                has_gen_body = true;
+                if (gen_body_line == 0) gen_body_line = (int)i + 1;
+            }
+            if (starts_with(trimmed, "UCLASS") || starts_with(trimmed, "USTRUCT") ||
+                starts_with(trimmed, "UENUM") || starts_with(trimmed, "UINTERFACE")) {
+                any_reflected = true;
+                if (starts_with(trimmed, "UCLASS")) { pending = true; pending_line = (int)i + 1; }
+            }
+            if (pending) {
+                std::smatch dm;
+                if (std::regex_search(code, dm, decl_re)) {
+                    RT rt; rt.decl_line = (int)i + 1; rt.name = dm[1].str();
+                    std::smatch am; rt.has_api = std::regex_search(code, am, api_re);
+                    reflected.push_back(rt);
+                    pending = false;
+                    (void)pending_line;
+                }
+            }
+            // Invalid-specifier rule SKIPPED offline (empty vocabulary).
+        }
+
+        // (a) missing GENERATED_BODY.
+        if (any_reflected && !has_gen_body) {
+            findings.push_back({"missing_generated_body",
+                reflected.empty() ? 0 : reflected[0].decl_line,
+                "Reflected type (UCLASS/USTRUCT) is missing a GENERATED_BODY() macro.", "error"});
+        }
+        // (b) generated.h not last.
+        if (gen_h_line != 0 && last_inc_line != 0 && gen_h_line != last_inc_line) {
+            std::ostringstream msg;
+            msg << "'*.generated.h' must be the LAST #include (an include at line "
+                << last_inc_line << " follows it: \"" << last_inc_path << "\").";
+            findings.push_back({"generated_h_not_last", gen_h_line, msg.str(), "error"});
+        } else if (any_reflected && has_gen_body && gen_h_line == 0) {
+            findings.push_back({"missing_generated_h_include", gen_body_line,
+                "Reflected type uses GENERATED_BODY() but no '*.generated.h' include is present (must be last).", "error"});
+        }
+        // (d) missing <MODULE>_API.
+        std::string header_base = base_filename(file_path);
+        for (auto& rt : reflected) {
+            if (!api_macro.empty() && !rt.has_api) {
+                std::ostringstream msg;
+                msg << "UCLASS-declared type '" << rt.name << "' is missing the '" << api_macro
+                    << "' export macro (class " << rt.name << " ...).";
+                findings.push_back({"missing_api_macro", rt.decl_line, msg.str(), "warning"});
+            }
+        }
+        // (c) generated.h name mismatch. Use the ACTUAL generated.h include
+        // (gen_h_path), NOT the last include -- when generated.h is not last
+        // (rule-b case) the last include is some other header and would fire a
+        // bogus mismatch. Gate on the captured include ending in `.generated.h`.
+        if (gen_h_line != 0 && !header_base.empty() && ends_with(gen_h_path, ".generated.h")) {
+            std::string gen_base = clean_filename(gen_h_path);
+            gen_base = gen_base.substr(0, gen_base.size() - std::string(".generated.h").size());
+            if (!gen_base.empty() && gen_base != header_base) {
+                std::ostringstream msg;
+                msg << "'" << gen_base << ".generated.h' does not match the header file name '"
+                    << header_base << ".h' -- the GENERATED_BODY pairing requires \""
+                    << header_base << ".generated.h\".";
+                findings.push_back({"generated_h_name_mismatch", gen_h_line, msg.str(), "error"});
+            }
+        }
+        // (e) UPROPERTY/UFUNCTION in non-reflected file.
+        if (!any_reflected) {
+            bool ib = false;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                std::string scan = strip_block_comments(lines[i], ib);
+                std::string trimmed = trim(strip_line_comment(scan));
+                if (starts_with(trimmed, "UPROPERTY") || starts_with(trimmed, "UFUNCTION")) {
+                    findings.push_back({"reflected_member_in_non_reflected_type", (int)i + 1,
+                        "UPROPERTY/UFUNCTION found but the file declares no reflected type (UCLASS/USTRUCT) -- the macro will not be processed by UHT.", "error"});
+                }
+            }
+        }
+
+        std::stable_sort(findings.begin(), findings.end(), [](const LintFinding& a, const LintFinding& b) {
+            if (a.line != b.line) return a.line < b.line;
+            return a.rule_id < b.rule_id;
+        });
+
+        if (findings.empty()) {
+            // ASCII tools cannot emit the live em-dash; the parity case never lints
+            // a clean file, so this spelling is never byte-compared.
+            std::cout << "Clean -- no lint findings." << std::endl;
+            return;
+        }
+        std::ostringstream out;
+        for (size_t i = 0; i < findings.size(); ++i) {
+            if (i > 0) out << "\n";
+            out << "[" << findings[i].severity << "] L" << findings[i].line << " ("
+                << findings[i].rule_id << "): " << findings[i].message;
+        }
+        std::cout << out.str() << std::endl;
+    }
+
+    // --- generate_class_stub (item 9, TEXT-RETURN-ONLY, offline-served) ---
+    void generate_class_stub(const Args& args) {
+        std::string parent = args.opt("parent", "");
+        std::string class_name = args.opt("class_name", "");
+        std::string module = args.opt("module", "");
+        // Positional fallback: parent class_name module.
+        if (parent.empty() && args.positional.size() >= 1) parent = args.positional[0];
+        if (class_name.empty() && args.positional.size() >= 2) class_name = args.positional[1];
+        if (module.empty() && args.positional.size() >= 3) module = args.positional[2];
+        if (parent.empty() || class_name.empty() || module.empty())
+            die("generate_class_stub requires parent, class_name, and module");
+
+        bool found = false;
+        Row sym = resolve_symbol_row(parent, found);
+        if (!found) die("Parent class '" + parent + "' not found in the source index. Run source.trigger_reindex if it is a project type.");
+
+        // UCLASS-derived gate: U/A prefix is the engine convention.
+        bool looks_uclass = (parent[0] == 'U' || parent[0] == 'A');
+        if (!looks_uclass)
+            die("Parent '" + parent + "' is not a UCLASS-derived type. generate_class_stub v1 supports UCLASS-derived parents only (no USTRUCT/UENUM/UINTERFACE).");
+
+        // Resolve parent header include (prefer a .h row).
+        auto allrows = query(db,
+            "SELECT s.file_id, f.path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ?",
+            {parent});
+        std::string parent_path = get_file_path(sym.get_int("file_id"));
+        for (auto& r : allrows) {
+            std::string p = r.get("path");
+            if (p.size() >= 2 && p.substr(p.size() - 2) == ".h") { parent_path = p; break; }
+        }
+        bool includable = true; std::string warning;
+        std::string parent_module = derive_module_from_path(parent_path);
+        std::string parent_include = derive_include_path(parent_path, includable, warning, parent_module);
+
+        // Constructor convention: plain default unless the parent ctor requires
+        // FObjectInitializer& (and has no plain alternative).
+        bool needs_obj_init = false;
+        {
+            auto ctors = query(db,
+                "SELECT signature FROM symbols WHERE name = ? AND kind = 'function'", {parent});
+            bool saw_any = false, saw_plain = false, saw_obj = false;
+            std::string ctor_open = parent + "(";
+            for (auto& r : ctors) {
+                std::string s = r.get("signature");
+                if (s.empty() || s.find(ctor_open) == std::string::npos) continue;
+                saw_any = true;
+                if (s.find("FObjectInitializer") != std::string::npos) saw_obj = true;
+                else saw_plain = true;
+            }
+            needs_obj_init = saw_any && saw_obj && !saw_plain;
+        }
+
+        std::string api_macro = to_upper(module) + "_API";
+        // UE "Add C++ Class" file-naming: drop the U/A UCLASS-derived prefix from the
+        // FILE names (class UMyComp -> MyComp.h/.cpp/.generated.h). class_name is
+        // validated UCLASS-derived, so strip a leading U/A only when followed by an
+        // uppercase letter; else use the raw name. The class IDENTIFIER is unchanged.
+        std::string file_base = class_name;
+        if (class_name.size() >= 2 && (class_name[0] == 'U' || class_name[0] == 'A')
+            && std::isupper((unsigned char)class_name[1])) {
+            file_base = class_name.substr(1);
+        }
+        std::string gen_inc = file_base + ".generated.h";
+
+        std::ostringstream h;
+        h << "#pragma once\n\n";
+        h << "#include \"CoreMinimal.h\"\n";
+        if (!parent_include.empty()) h << "#include \"" << parent_include << "\"\n";
+        h << "#include \"" << gen_inc << "\"\n\n";
+        h << "UCLASS()\n";
+        h << "class " << api_macro << " " << class_name << " : public " << parent << "\n";
+        h << "{\n\tGENERATED_BODY()\n\npublic:\n";
+        if (needs_obj_init)
+            h << "\t" << class_name << "(const FObjectInitializer& ObjectInitializer);\n";
+        else
+            h << "\t" << class_name << "();\n";
+        h << "};\n";
+
+        std::ostringstream c;
+        c << "#include \"" << file_base << ".h\"\n\n";
+        if (needs_obj_init) {
+            c << class_name << "::" << class_name << "(const FObjectInitializer& ObjectInitializer)\n";
+            c << "\t: Super(ObjectInitializer)\n{\n}\n";
+        } else {
+            c << class_name << "::" << class_name << "()\n{\n}\n";
+        }
+
+        std::cout << "// === " << file_base << ".h ===\n" << h.str()
+                  << "\n// === " << file_base << ".cpp ===\n" << c.str() << std::endl;
     }
 };
 
@@ -2941,6 +3746,13 @@ int main(int argc, char* argv[]) {
             {"get_module_info",     [](SourceActions& s, const Args& a) { s.get_module_info(a); }},
             {"get_symbol_context",  [](SourceActions& s, const Args& a) { s.get_symbol_context(a); }},
             {"read_file",           [](SourceActions& s, const Args& a) { s.read_file(a); }},
+            {"get_include_path",    [](SourceActions& s, const Args& a) { s.get_include_path(a); }},
+            {"get_signature",       [](SourceActions& s, const Args& a) { s.get_signature(a); }},
+            {"check_deprecations",  [](SourceActions& s, const Args& a) { s.check_deprecations(a); }},
+            {"verify_symbols",      [](SourceActions& s, const Args& a) { s.verify_symbols(a); }},
+            {"find_example_usage",  [](SourceActions& s, const Args& a) { s.find_example_usage(a); }},
+            {"lint_header",         [](SourceActions& s, const Args& a) { s.lint_header(a); }},
+            {"generate_class_stub", [](SourceActions& s, const Args& a) { s.generate_class_stub(a); }},
         };
 
         auto it = actions.find(args.action);

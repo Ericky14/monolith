@@ -42,6 +42,8 @@ public:
 	static FMonolithActionResult HandleGetOrderedModules(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetModuleInputs(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetModuleGraph(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetCustomHLSLText(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetCustomHLSLText(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddModule(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveModule(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleMoveModule(const TSharedPtr<FJsonObject>& Params);
@@ -194,6 +196,18 @@ public:
 	static FMonolithActionResult HandleGetEmitterParent(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRenameUserParameter(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Tranche 2 (#64): read-only Search & Discovery + per-system DI (7 new) ---
+	// All asset-registry / per-system traversal, no mutation. Backs the BP wrapper nodes in
+	// UMonolithNiagaraQueryLibrary (SearchNiagaraByParameter / ByDataInterface / ByMaterial,
+	// QueryNiagara, FindSimilarNiagaraSystems, FindNiagaraReferences, GetNiagaraDataInterfaces).
+	static FMonolithActionResult HandleSearchByParameter(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSearchByDataInterface(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleQueryNiagara(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleFindSimilarSystems(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSearchByMaterial(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleFindNiagaraReferences(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleListSystemDataInterfaces(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Helpers (public for use by free functions) ---
 	static FString SerializeParameterValue(const FNiagaraVariable& Variable, const FNiagaraParameterStore& Store);
 
@@ -202,10 +216,20 @@ private:
 	static UNiagaraSystem* LoadSystem(const FString& SystemPath);
 	static int32 FindEmitterHandleIndex(UNiagaraSystem* System, const FString& HandleIdOrName);
 	static bool ResolveScriptUsage(const FString& UsageString, ENiagaraScriptUsage& OutUsage);
+	static bool IsSimulationStageUsageString(const FString& UsageString);
+	static bool IsParticleEventUsageString(const FString& UsageString);
+	static bool ResolveSimulationStageSelector(UNiagaraSystem* System, const FString& EmitterHandleId,
+		const TSharedPtr<FJsonObject>& Params, FGuid& OutUsageId, FString* OutStageName = nullptr,
+		FString* OutError = nullptr);
+	static bool ResolveEventHandlerSelector(UNiagaraSystem* System, const FString& EmitterHandleId,
+		const TSharedPtr<FJsonObject>& Params, FGuid& OutUsageId, FString* OutEventName = nullptr,
+		FString* OutError = nullptr);
 	static FString UsageToString(ENiagaraScriptUsage Usage);
 	static UNiagaraGraph* GetGraphForUsage(UNiagaraSystem* System, const FString& EmitterHandleId, ENiagaraScriptUsage Usage);
-	static UNiagaraNodeOutput* FindOutputNode(UNiagaraSystem* System, const FString& EmitterHandleId, ENiagaraScriptUsage Usage);
-	static UNiagaraNodeFunctionCall* FindModuleNode(UNiagaraSystem* System, const FString& EmitterHandleId, const FString& NodeGuidStr, ENiagaraScriptUsage* OutUsage = nullptr);
+	static UNiagaraNodeOutput* FindOutputNode(UNiagaraSystem* System, const FString& EmitterHandleId,
+		ENiagaraScriptUsage Usage, const FGuid& UsageId = FGuid());
+	static UNiagaraNodeFunctionCall* FindModuleNode(UNiagaraSystem* System, const FString& EmitterHandleId,
+		const FString& NodeGuidStr, ENiagaraScriptUsage* OutUsage = nullptr, FGuid* OutUsageId = nullptr);
 	static UNiagaraNodeFunctionCall* FindFunctionCallNode(UNiagaraSystem* System, const FString& EmitterHandleId, const FString& NodeGuidStr);
 	static UClass* ResolveRendererClass(const FString& RendererClass);
 	static UNiagaraRendererProperties* GetRenderer(UNiagaraSystem* System, const FString& EmitterHandleId, int32 RendererIndex, FVersionedNiagaraEmitterData** OutEmitterData = nullptr);
@@ -214,6 +238,9 @@ private:
 	static FString JsonObjectToString(const TSharedRef<FJsonObject>& JsonObj);
 	static FString JsonArrayToString(const TArray<TSharedPtr<FJsonValue>>& JsonArray);
 	static FString JsonValueToString(const TSharedPtr<FJsonValue>& Value);
+	static UEnum* TryGetStaticSwitchEnum(UEdGraphPin* SwitchPin, UNiagaraNodeFunctionCall* ModuleNode);
+	static bool ResolveStaticSwitchEnumValue(UEnum* Enum, const FString& RequestedValue, FString& OutRawValue, FString* OutDisplayValue = nullptr);
+	static void AddStaticSwitchEnumMetadata(TSharedRef<FJsonObject> JsonObj, UEnum* Enum, const FString& RawValue);
 
 	// DI override resolution helper — walks override pin upstream to find the DI UObject
 	static UNiagaraDataInterface* FindDIFromOverridePin(UNiagaraNodeFunctionCall* ModuleNode, const FName& MatchedFullName, const FNiagaraTypeDefinition& InputType);
