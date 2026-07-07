@@ -2476,24 +2476,42 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		TSharedPtr<FAdvancedPreviewScene> PreviewScene =
 			MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
 		PreviewScene->SetFloorVisibility(false);
+		// Hide the bright HDRI backdrop so auto-exposure meters the SUBJECT, then key
+		// light from the camera side + sky fill so the form reads clearly (not black).
+		PreviewScene->SetEnvironmentVisibility(false);
+		PreviewScene->SetLightDirection(FRotator(-40.0f, CameraRotation.Yaw, 0.0f));
+		PreviewScene->SetLightBrightness(8.0f);
+		PreviewScene->SetSkyBrightness(3.0f);
 
 		USkeletalMeshComponent* SkelMeshComp = NewObject<USkeletalMeshComponent>(
 			GetTransientPackage(), NAME_None, RF_Transient);
 		SkelMeshComp->SetSkeletalMesh(SkelMesh);
 
+		// Editor preview worlds are NOT game worlds, so the component skips all
+		// animation evaluation unless told to update in-editor + always tick pose and
+		// refresh bones. Without these it renders the reference pose for any seek.
+#if WITH_EDITOR
+		SkelMeshComp->SetUpdateAnimationInEditor(true);
+#endif
+		SkelMeshComp->VisibilityBasedAnimTickOption =
+			EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+
+		// Register BEFORE seeking: the single-node anim instance that SetPosition
+		// drives is created on registration, so seeking earlier silently no-ops.
+		PreviewScene->AddComponent(SkelMeshComp, SkelMeshComp->GetRelativeTransform());
+		UWorld* World = PreviewScene->GetWorld();
+
 		if (AnimSeq)
 		{
-			// Pair-and-evaluate posing per UE 5.7 contract: PlayAnimation puts the
-			// component into single-node-instance mode + assigns the asset, then
-			// SetPosition forces evaluation at the target time without ticking.
-			SkelMeshComp->PlayAnimation(AnimSeq, /*bLooping=*/false);
+			SkelMeshComp->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+			SkelMeshComp->SetAnimation(AnimSeq);
 			SkelMeshComp->SetPosition(SeekTime, /*bFireNotifies=*/false);
+			// Evaluate the single-node graph at the seeked time and build the
+			// component-space bone transforms the scene capture will read.
+			SkelMeshComp->TickAnimation(0.0f, /*bNeedsValidRootMotion=*/false);
+			SkelMeshComp->RefreshBoneTransforms();
 		}
 
-		PreviewScene->AddComponent(SkelMeshComp, SkelMeshComp->GetRelativeTransform());
-
-		// Tick the world once so the pose evaluation lands before capture.
-		UWorld* World = PreviewScene->GetWorld();
 		if (World)
 		{
 			World->Tick(ELevelTick::LEVELTICK_PauseTick, 0.0f);
@@ -3097,17 +3115,44 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureAnimFrames(
 	FString FilenamePrefix = TEXT("frame");
 	Params->TryGetStringField(TEXT("filename_prefix"), FilenamePrefix);
 
-	// --- Build the preview scene + debug skel mesh component (reuses the proven
-	// skeletal_mesh capture path; UDebugSkelMeshComponent is a USkeletalMeshComponent). ---
+	// --- Build the preview scene + skel mesh component. Use a PLAIN
+	// USkeletalMeshComponent (matching the proven capture_scene_preview path), NOT
+	// UDebugSkelMeshComponent: the latter drives animation through a Persona
+	// PreviewInstance that ignores SetAnimation/SetPosition, so every sample renders
+	// the reference pose. ---
 	TSharedPtr<FAdvancedPreviewScene> PreviewScene =
 		MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
 	PreviewScene->SetFloorVisibility(false);
+	// Hide the bright HDRI backdrop so auto-exposure meters the SUBJECT (not the sky)
+	// — otherwise the lit character reads as a near-black silhouette. Key light from
+	// the camera side (down from above) + a sky fill so the form reads clearly.
+	PreviewScene->SetEnvironmentVisibility(false);
+	PreviewScene->SetLightDirection(FRotator(-40.0f, CameraRotation.Yaw, 0.0f));
+	PreviewScene->SetLightBrightness(8.0f);
+	PreviewScene->SetSkyBrightness(3.0f);
 
-	UDebugSkelMeshComponent* SkelComp = NewObject<UDebugSkelMeshComponent>(
+	USkeletalMeshComponent* SkelComp = NewObject<USkeletalMeshComponent>(
 		GetTransientPackage(), NAME_None, RF_Transient);
 	SkelComp->SetSkeletalMesh(PreviewMesh);
 
-	// Configure the animation source per asset kind.
+	// Editor preview worlds are NOT game worlds, so a skeletal mesh component skips
+	// all animation evaluation unless it's told to update in-editor and to always
+	// tick pose + refresh bones. Without these the component renders its reference
+	// pose for every sample (SetPosition / the ABP tick are ignored at render time).
+#if WITH_EDITOR
+	SkelComp->SetUpdateAnimationInEditor(true);
+#endif
+	SkelComp->VisibilityBasedAnimTickOption =
+		EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+
+	// Register BEFORE assigning the animation source: the anim instance (single-node
+	// or ABP) is created on registration, and assigning the asset/mode beforehand
+	// does not survive into an evaluable instance in a preview scene — every sample
+	// would render the reference pose. (capture_scene_preview proves this ordering.)
+	PreviewScene->AddComponent(SkelComp, SkelComp->GetRelativeTransform());
+	UWorld* World = PreviewScene->GetWorld();
+
+	// Configure the animation source per asset kind (post-registration).
 	if (AnimBP)
 	{
 		UClass* AnimClass = AnimBP->GeneratedClass;
@@ -3132,9 +3177,6 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureAnimFrames(
 			}
 		}
 	}
-
-	PreviewScene->AddComponent(SkelComp, SkelComp->GetRelativeTransform());
-	UWorld* World = PreviewScene->GetWorld();
 
 	const double StartTime = FPlatformTime::Seconds();
 	TArray<TSharedPtr<FJsonValue>> FrameResults;
@@ -3162,6 +3204,10 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureAnimFrames(
 				}
 			}
 			SkelComp->SetPosition(T, /*bFireNotifies=*/false);
+			// Evaluate the single-node graph at the absolute time and build the
+			// component-space bone transforms before the capture reads the scene.
+			SkelComp->TickAnimation(0.0f, /*bNeedsValidRootMotion=*/false);
+			SkelComp->RefreshBoneTransforms();
 			if (World) { World->Tick(ELevelTick::LEVELTICK_PauseTick, 0.0f); }
 			SkelComp->TickComponent(0.0f, ELevelTick::LEVELTICK_All, nullptr);
 		}
