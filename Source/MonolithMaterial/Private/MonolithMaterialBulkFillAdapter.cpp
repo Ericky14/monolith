@@ -104,7 +104,7 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*ScalarsObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				if (LooksLikeLayeredParam(FString(KV.Key)))
 				{
 					RecordField(FString::Printf(TEXT("scalars[%s]"), *KV.Key),
 						TEXT("(layered param)"), false,
@@ -135,7 +135,7 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*VectorsObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				if (LooksLikeLayeredParam(FString(KV.Key)))
 				{
 					RecordField(FString::Printf(TEXT("vectors[%s]"), *KV.Key),
 						TEXT("(layered param)"), false,
@@ -171,7 +171,7 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*TexturesObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				if (LooksLikeLayeredParam(FString(KV.Key)))
 				{
 					RecordField(FString::Printf(TEXT("textures[%s]"), *KV.Key),
 						TEXT("(layered param)"), false,
@@ -208,7 +208,7 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*SwitchesObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				if (LooksLikeLayeredParam(FString(KV.Key)))
 				{
 					RecordField(FString::Printf(TEXT("switches[%s]"), *KV.Key),
 						TEXT("(layered param)"), false,

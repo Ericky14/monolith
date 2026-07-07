@@ -86,7 +86,7 @@ namespace MonolithDataTableInternal
 		TSharedPtr<FJsonObject> Tree = MakeShared<FJsonObject>();
 		for (const auto& Pair : FriendlyValues->Values)
 		{
-			if (FProperty* Prop = ResolveRowProperty(RowStruct, Pair.Key))
+			if (FProperty* Prop = ResolveRowProperty(RowStruct, FString(Pair.Key)))
 			{
 				Tree->SetField(Prop->GetName(), Pair.Value);
 			}

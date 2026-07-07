@@ -9757,7 +9757,7 @@ FMonolithActionResult FMonolithAnimationActions::HandleSetNotifyProperties(const
 
 	for (auto& Pair : (*PropsPtr)->Values)
 	{
-		const FString& PropName = Pair.Key;
+		const FString PropName(Pair.Key);
 		FString ValueStr = Pair.Value->AsString();
 
 		TSharedPtr<FJsonObject> PropResult = MakeShared<FJsonObject>();

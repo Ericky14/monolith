@@ -201,7 +201,7 @@ namespace MonolithResponseShapingDetail
 		{
 			if (IsArrayOfObjects(Pair.Value))
 			{
-				ListPayloadKeys.Add(Pair.Key);
+				ListPayloadKeys.Add(FString(Pair.Key));
 			}
 		}
 
@@ -246,7 +246,11 @@ namespace MonolithResponseShapingDetail
 			TSharedPtr<FJsonObject> RowObj = *RowObjPtr;
 
 			TArray<FString> ExistingKeys;
-			RowObj->Values.GetKeys(ExistingKeys);
+			ExistingKeys.Reserve(RowObj->Values.Num());
+			for (const auto& RowPair : RowObj->Values)
+			{
+				ExistingKeys.Add(FString(RowPair.Key));
+			}
 			for (const FString& K : ExistingKeys)
 			{
 				UnionKeys.Add(K);
@@ -417,7 +421,11 @@ namespace MonolithResponseShapingDetail
 		if (!bAnyPathResolved)
 		{
 			TArray<FString> TopLevelKeys;
-			Response->Values.GetKeys(TopLevelKeys);
+			TopLevelKeys.Reserve(Response->Values.Num());
+			for (const auto& Pair : Response->Values)
+			{
+				TopLevelKeys.Add(FString(Pair.Key));
+			}
 			TopLevelKeys.Sort();
 			Warnings.Add(FString::Printf(
 				TEXT("_path_fields matched no paths; top-level keys available: [%s]"),
@@ -528,7 +536,11 @@ void ApplyResponseShaping(
 	if (bHasFields)
 	{
 		TArray<FString> Existing;
-		Response->Values.GetKeys(Existing);
+		Existing.Reserve(Response->Values.Num());
+		for (const auto& Pair : Response->Values)
+		{
+			Existing.Add(FString(Pair.Key));
+		}
 		for (const FString& K : Existing)
 		{
 			if (!FieldsSet.Contains(K))
@@ -567,7 +579,11 @@ void ApplyResponseShaping(
 	if (bCompact)
 	{
 		TArray<FString> Existing;
-		Response->Values.GetKeys(Existing);
+		Existing.Reserve(Response->Values.Num());
+		for (const auto& Pair : Response->Values)
+		{
+			Existing.Add(FString(Pair.Key));
+		}
 		for (const FString& K : Existing)
 		{
 			const TSharedPtr<FJsonValue> Val = Response->TryGetField(K);

@@ -5291,7 +5291,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 			bool bHadCurveFields = false;
 			for (const auto& Pair : DIConfig->Values)
 			{
-				if (CurveFieldNames.Contains(Pair.Key)) { bHadCurveFields = true; break; }
+				if (CurveFieldNames.Contains(FString(Pair.Key))) { bHadCurveFields = true; break; }
 			}
 			if (bHadCurveFields)
 			{
@@ -5323,8 +5323,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 
 		for (auto& Pair : DIConfig->Values)
 		{
-			if (bIsCurveDI && CurveKeys.Contains(Pair.Key)) continue;
-			if (bIsGridDI && GridKeys.Contains(Pair.Key)) continue;
+			if (bIsCurveDI && CurveKeys.Contains(FString(Pair.Key))) continue;
+			if (bIsGridDI && GridKeys.Contains(FString(Pair.Key))) continue;
 
 			FProperty* Prop = DIUClass->FindPropertyByName(FName(*Pair.Key));
 			if (!Prop) continue;
@@ -8923,7 +8923,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 	for (auto& Pair : Properties->Values)
 	{
 		FProperty* Prop = DI->GetClass()->FindPropertyByName(FName(*Pair.Key));
-		if (!Prop) { PropsNotFound.Add(Pair.Key); continue; }
+		if (!Prop) { PropsNotFound.Add(FString(Pair.Key)); continue; }
 		void* Addr = Prop->ContainerPtrToValuePtr<void>(DI);
 
 		// Build value string — handle JSON arrays → UE array syntax, JSON objects → UE struct syntax
@@ -8959,7 +8959,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 				{
 					if (!bFirst) ValStr += TEXT(",");
 					bFirst = false;
-					ValStr += KV.Key + TEXT("=") + KV.Value->AsString();
+					ValStr += FString(KV.Key) + TEXT("=") + KV.Value->AsString();
 				}
 				ValStr += TEXT(")");
 			}
@@ -8971,7 +8971,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 
 		if (Prop->ImportText_Direct(*ValStr, Addr, DI, PPF_None))
 		{
-			PropsSet.Add(Pair.Key);
+			PropsSet.Add(FString(Pair.Key));
 		}
 		else
 		{
@@ -10624,7 +10624,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetSpawnShape(const TShared
 		for (const auto& Pair : (*ShapeParamsObj)->Values)
 		{
 			// Map friendly param names to module input display names
-			FString InputName = Pair.Key;
+			FString InputName(Pair.Key);
 			if (InputName == TEXT("radius"))
 			{
 				if      (Shape == TEXT("cylinder")) InputName = TEXT("Cylinder Radius");
@@ -10651,7 +10651,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetSpawnShape(const TShared
 
 			FMonolithActionResult SetResult = HandleSetModuleInputValue(SetParams);
 			if (SetResult.bSuccess)
-				ParamsSet.Add(Pair.Key);
+				ParamsSet.Add(FString(Pair.Key));
 			else
 				Warnings.Add(FString::Printf(TEXT("Failed to set param '%s': %s"), *Pair.Key, *SetResult.ErrorMessage));
 		}
@@ -13481,8 +13481,8 @@ static TSharedRef<FJsonObject> DiffJsonObjects(const TSharedPtr<FJsonObject>& A,
 
 	// Collect all keys from both
 	TSet<FString> AllKeys;
-	for (auto& Pair : A->Values) AllKeys.Add(Pair.Key);
-	for (auto& Pair : B->Values) AllKeys.Add(Pair.Key);
+	for (auto& Pair : A->Values) AllKeys.Add(FString(Pair.Key));
+	for (auto& Pair : B->Values) AllKeys.Add(FString(Pair.Key));
 
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	for (const FString& Key : AllKeys)

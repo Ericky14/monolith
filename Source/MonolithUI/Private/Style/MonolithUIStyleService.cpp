@@ -65,7 +65,7 @@ namespace
         Keys.Reserve(Object->Values.Num());
         for (const auto& Pair : Object->Values)
         {
-            Keys.Add(Pair.Key);
+            Keys.Add(FString(Pair.Key));
         }
         Keys.Sort();
 
@@ -77,7 +77,7 @@ namespace
             Out.Append(Keys[i]);
             Out.Append(TEXT("\":"));
 
-            const TSharedPtr<FJsonValue>& Field = Object->Values.FindChecked(Keys[i]);
+            const TSharedPtr<FJsonValue>& Field = Object->Values.FindChecked(UE::FSharedString(Keys[i]));
             AppendCanonical(Out, Field);
         }
         Out.Append(TEXT("}"));

@@ -1189,11 +1189,11 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleSetAttributeDefaults(c
 			}
 
 			// Find the property
-			FProperty* Prop = FindAttributeProperty(SetClass, Pair.Key);
+			FProperty* Prop = FindAttributeProperty(SetClass, FString(Pair.Key));
 			FStructProperty* StructProp = CastField<FStructProperty>(Prop);
 			if (!StructProp || !StructProp->Struct || !StructProp->Struct->IsChildOf(AttrDataStruct))
 			{
-				NotFound.Add(Pair.Key);
+				NotFound.Add(FString(Pair.Key));
 				continue;
 			}
 

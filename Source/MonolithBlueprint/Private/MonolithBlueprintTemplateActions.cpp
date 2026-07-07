@@ -69,15 +69,15 @@ namespace
 			{
 				if (Pair.Value->Type == EJson::String)
 				{
-					Result.Add(Pair.Key, Pair.Value->AsString());
+					Result.Add(FString(Pair.Key), Pair.Value->AsString());
 				}
 				else if (Pair.Value->Type == EJson::Number)
 				{
-					Result.Add(Pair.Key, FString::SanitizeFloat(Pair.Value->AsNumber()));
+					Result.Add(FString(Pair.Key), FString::SanitizeFloat(Pair.Value->AsNumber()));
 				}
 				else if (Pair.Value->Type == EJson::Boolean)
 				{
-					Result.Add(Pair.Key, Pair.Value->AsBool() ? TEXT("true") : TEXT("false"));
+					Result.Add(FString(Pair.Key), Pair.Value->AsBool() ? TEXT("true") : TEXT("false"));
 				}
 			}
 		}

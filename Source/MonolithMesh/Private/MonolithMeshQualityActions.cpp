@@ -189,7 +189,7 @@ FMonolithActionResult FMonolithMeshQualityActions::ValidateNamingConventions(con
 			FString Prefix;
 			if (Pair.Value->TryGetString(Prefix))
 			{
-				PrefixRules.Add(Pair.Key, Prefix);
+				PrefixRules.Add(FString(Pair.Key), Prefix);
 			}
 		}
 	}
@@ -498,7 +498,7 @@ FMonolithActionResult FMonolithMeshQualityActions::GenerateProxyMesh(const TShar
 	MergeSettings.bMergeMeshSockets = true;
 	MergeSettings.bMergePhysicsData = true;
 	MergeSettings.bBakeVertexDataToMesh = false;
-	MergeSettings.bPivotPointAtZero = false;
+	MergeSettings.PivotType = EMeshMergePivotType::Automatic;
 
 	if (bMergeMaterials)
 	{

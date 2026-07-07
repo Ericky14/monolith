@@ -9,7 +9,7 @@
 #include "RigVMModel/RigVMLink.h"
 #include "RigVMModel/RigVMController.h"
 #include "RigVMModel/RigVMClient.h"
-#include "RigVMAsset.h"
+#include "RigVMEditorAsset.h"
 #include "RigVMModel/Nodes/RigVMUnitNode.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -346,7 +346,7 @@ FMonolithActionResult FMonolithControlRigWriteActions::HandleAddControlRigNode(c
 				// For objects/arrays, serialize to string
 				FString JsonStr;
 				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonStr);
-				FJsonSerializer::Serialize(KV.Value, KV.Key, Writer);
+				FJsonSerializer::Serialize(KV.Value, FString(KV.Key), Writer);
 				Value = JsonStr;
 			}
 

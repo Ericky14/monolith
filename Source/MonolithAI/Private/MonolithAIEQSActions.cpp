@@ -207,7 +207,7 @@ namespace
 		for (const auto& Pair : PropsObj->Values)
 		{
 			FString Error;
-			if (!SetEQSPropertyValue(Obj, Pair.Key, Pair.Value, Error))
+			if (!SetEQSPropertyValue(Obj, FString(Pair.Key), Pair.Value, Error))
 			{
 				OutErrors.Add(Error);
 			}

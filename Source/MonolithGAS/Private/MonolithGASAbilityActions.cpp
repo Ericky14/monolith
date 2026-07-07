@@ -2408,7 +2408,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleDuplicateAbility(const T
 			TMap<FString, FString> RenameMap;
 			for (const auto& Pair : (*RenameTagsObj)->Values)
 			{
-				RenameMap.Add(Pair.Key, Pair.Value->AsString());
+				RenameMap.Add(FString(Pair.Key), Pair.Value->AsString());
 			}
 
 			// Apply to all tag containers
