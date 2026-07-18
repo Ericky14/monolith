@@ -4938,7 +4938,17 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputValue(const T
 	}
 	else ValStr = JsonValueToString(JV);
 
+	TargetPin->Modify();
 	TargetPin->DefaultValue = ValStr;
+
+	// Mark the pin's owning node dirty so RequestCompile actually recompiles — otherwise the new
+	// value only takes effect after a separate forced compile (matches the engine's stack pattern:
+	// OverridePin->DefaultValue = ...; OwningNode->MarkNodeRequiresSynchronization(..., true)).
+	if (UNiagaraNode* OwningNode = Cast<UNiagaraNode>(TargetPin->GetOwningNode()))
+	{
+		OwningNode->MarkNodeRequiresSynchronization(TEXT("Monolith: module input value changed"), /*bRaiseGraphNeedsRecompile*/ true);
+	}
+
 	GEditor->EndTransaction();
 	System->RequestCompile(false);
 
@@ -8167,7 +8177,16 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetStaticSwitchValue(const 
 		DisplayValue = ResolvedDisplayValue.IsEmpty() ? ResolvedRawValue : ResolvedDisplayValue;
 	}
 
+	SwitchPin->Modify();
 	SwitchPin->DefaultValue = ValStr;
+
+	// A static switch selects graph traversal at compile time (which code path — and thus which
+	// downstream write, e.g. "Sprite Size Mode" -> Particles.SpriteSize — gets baked in). Setting
+	// the pin DefaultValue alone is NOT enough: the node must re-resolve its switches and be marked
+	// dirty, or RequestCompile is a no-op and the change never takes (matches the engine's stack:
+	// NiagaraStackFunctionInput.cpp — RefreshFromExternalChanges + MarkNodeRequiresSynchronization).
+	MN->RefreshFromExternalChanges();
+	MN->MarkNodeRequiresSynchronization(TEXT("Monolith: static switch value changed"), /*bRaiseGraphNeedsRecompile*/ true);
 
 	GEditor->EndTransaction();
 	System->RequestCompile(false);
