@@ -41,6 +41,17 @@
 #include "Graphs/VoxelHeightGraphStampRef.h"  // FVoxelHeightGraphStampRef
 #include "Graphs/VoxelHeightGraphStamp_K2.h"  // UVoxelHeightGraphStamp_K2::Make
 #include "VoxelHeightLayer.h"                  // UVoxelHeightLayer        - VERIFY: path
+
+// Static-heightmap import + stamp path (Phase 2):
+#include "Engine/Texture2D.h"                          // UTexture2D, TSF_G16
+#include "Misc/FileHelper.h"                           // FFileHelper::LoadFileToArray
+#include "UObject/Package.h"                           // CreatePackage
+#include "AssetRegistry/AssetRegistryModule.h"         // FAssetRegistryModule::AssetCreated
+#include "Heightmap/VoxelHeightmap.h"                  // UVoxelHeightmap
+#include "Heightmap/VoxelHeightmap_Height.h"           // UVoxelHeightmap_Height, EVoxelTextureChannel
+#include "Heightmap/VoxelHeightmapStamp.h"             // FVoxelHeightmapStamp, FVoxelHeightmapStampWeightmapSurfaceType
+#include "Heightmap/VoxelHeightmapStampRef.h"          // FVoxelHeightmapStampRef
+#include "Heightmap/VoxelHeightmapStamp_K2.h"          // UVoxelHeightmapStamp_K2::Make
 #endif
 
 #if WITH_EDITOR
@@ -365,6 +376,179 @@ static FMonolithActionResult HandleSetStampParameter(const TSharedPtr<FJsonObjec
 #endif
 }
 
+// --- import_heightmap (Phase 2: static 16-bit heightmap -> UVoxelHeightmap) ---
+//
+// Reads a raw little-endian unsigned 16-bit square heightmap (.r16) from disk, builds a G16
+// grayscale UTexture2D asset, then a UVoxelHeightmap asset that references it with the given
+// XY/Z scaling. This is the deterministic, re-runnable equivalent of the editor's
+// "import RAW heightmap -> make Voxel Heightmap" flow. PNG 16-bit is also supported if it
+// decodes to a square grayscale image, but .r16 is preferred (trivial, no decode).
+
+static FMonolithActionResult HandleImportHeightmap(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+    const FString RawPath = Params->GetStringField(TEXT("raw_path"));
+    const FString DestPackage = Params->GetStringField(TEXT("dest_package"));
+    const FString Name = Params->GetStringField(TEXT("name"));
+    if (RawPath.IsEmpty() || DestPackage.IsEmpty() || Name.IsEmpty())
+        return FMonolithActionResult::Error(TEXT("raw_path, dest_package, and name are required"));
+
+    TArray<uint8> Bytes;
+    if (!FFileHelper::LoadFileToArray(Bytes, *RawPath))
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to read raw file: %s"), *RawPath));
+    if (Bytes.Num() % 2 != 0)
+        return FMonolithActionResult::Error(TEXT("Raw file size is not a multiple of 2 (expected 16-bit R16)"));
+
+    const int64 NumPixels = Bytes.Num() / 2;
+    int32 Size = 0;
+    Params->TryGetNumberField(TEXT("size"), Size);
+    if (Size <= 0)
+        Size = FMath::TruncToInt(FMath::Sqrt(double(NumPixels)));
+    if (int64(Size) * int64(Size) != NumPixels)
+        return FMonolithActionResult::Error(FString::Printf(
+            TEXT("Raw file is not a square 16-bit heightmap (pixels=%lld, size=%d)"), NumPixels, Size));
+
+    double ScaleXY = 100.0, ScaleZ = 40000.0, OffsetZ = 0.0;
+    Params->TryGetNumberField(TEXT("scale_xy"), ScaleXY);
+    Params->TryGetNumberField(TEXT("scale_z"), ScaleZ);
+    Params->TryGetNumberField(TEXT("offset_z"), OffsetZ);
+
+    // 1) G16 grayscale texture asset (mirrors UVoxelHeightmapRawFactory).
+    FString TexName = Params->GetStringField(TEXT("texture_name"));
+    if (TexName.IsEmpty())
+        TexName = FString::Printf(TEXT("T_%s_Height"), *Name);
+    const FString TexPkgPath = DestPackage / TexName;
+    UPackage* TexPackage = CreatePackage(*TexPkgPath);
+    if (!TexPackage)
+        return FMonolithActionResult::Error(TEXT("Failed to create texture package"));
+    UTexture2D* Texture = NewObject<UTexture2D>(TexPackage, *TexName, RF_Public | RF_Standalone);
+    Texture->Source.Init(Size, Size, /*NumSlices*/ 1, /*NumMips*/ 1, TSF_G16, Bytes.GetData());
+    Texture->SRGB = false;
+    Texture->CompressionSettings = TC_Grayscale;
+    Texture->MipGenSettings = TMGS_NoMipmaps;
+    Texture->NeverStream = true;
+    Texture->PostEditChange();
+    Texture->UpdateResource();
+    FAssetRegistryModule::AssetCreated(Texture);
+    Texture->MarkPackageDirty();
+
+    // 2) UVoxelHeightmap asset referencing the texture.
+    const FString HmPkgPath = DestPackage / Name;
+    UPackage* HmPackage = CreatePackage(*HmPkgPath);
+    if (!HmPackage)
+        return FMonolithActionResult::Error(TEXT("Failed to create heightmap package"));
+    UVoxelHeightmap* Heightmap = NewObject<UVoxelHeightmap>(HmPackage, *Name, RF_Public | RF_Standalone);
+    Heightmap->ScaleXY = float(ScaleXY);
+
+    UVoxelHeightmap_Height* Height = Heightmap->Height; // created as a default subobject in the ctor
+    if (!Height)
+        return FMonolithActionResult::Error(TEXT("UVoxelHeightmap has no Height subobject"));
+    Height->Texture = Texture;
+    Height->TextureChannel = EVoxelTextureChannel::R; // G16 single channel maps to R
+    Height->ScaleZ = float(ScaleZ);
+    Height->OffsetZ = float(OffsetZ);
+    Height->bUseBicubic = true;
+
+    // Force the height data to build now so it serializes with real RawData.
+    Height->GetData();
+    Heightmap->PostEditChange();
+    FAssetRegistryModule::AssetCreated(Heightmap);
+    Heightmap->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("heightmap"), Heightmap->GetPathName());
+    Root->SetStringField(TEXT("texture"), Texture->GetPathName());
+    Root->SetNumberField(TEXT("size"), Size);
+    Root->SetNumberField(TEXT("scale_xy"), ScaleXY);
+    Root->SetNumberField(TEXT("scale_z"), ScaleZ);
+    Root->SetNumberField(TEXT("offset_z"), OffsetZ);
+    Root->SetNumberField(TEXT("world_size_m"), (Size * ScaleXY) / 100.0);
+    Root->SetStringField(TEXT("note"), TEXT("Not saved to disk yet - use editor.save_packages on both packages, then voxel.add_heightmap_stamp."));
+    return FMonolithActionResult::Success(Root);
+#else
+    return FMonolithActionResult::Error(TEXT("Requires editor build"));
+#endif
+}
+
+// --- add_heightmap_stamp (Phase 2: place a static-heightmap stamp) ---
+
+static FMonolithActionResult HandleAddHeightmapStamp(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+    using namespace MonolithVoxelTerrainInternal;
+    UWorld* World = GetEditorWorld();
+    if (!World)
+        return FMonolithActionResult::Error(TEXT("No editor world"));
+
+    const FString HeightmapPath = Params->GetStringField(TEXT("heightmap_path"));
+    if (HeightmapPath.IsEmpty())
+        return FMonolithActionResult::Error(TEXT("heightmap_path is required (a UVoxelHeightmap)"));
+
+    UVoxelHeightmap* Heightmap = FMonolithAssetUtils::LoadAssetByPath<UVoxelHeightmap>(HeightmapPath);
+    if (!Heightmap)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Heightmap not found: %s"), *HeightmapPath));
+
+    const FString LayerPath = Params->GetStringField(TEXT("layer_path")).IsEmpty()
+        ? TEXT("/Voxel/Default/DefaultHeightLayer.DefaultHeightLayer")
+        : Params->GetStringField(TEXT("layer_path"));
+    UVoxelHeightLayer* Layer = FMonolithAssetUtils::LoadAssetByPath<UVoxelHeightLayer>(LayerPath);
+
+    double PX = 0, PY = 0, PZ = 0;
+    Params->TryGetNumberField(TEXT("x"), PX);
+    Params->TryGetNumberField(TEXT("y"), PY);
+    Params->TryGetNumberField(TEXT("z"), PZ);
+    const FTransform StampTransform(FVector(PX, PY, PZ));
+
+    int32 Priority = 0;
+    Params->TryGetNumberField(TEXT("priority"), Priority);
+    double Smoothness = 100.0;
+    Params->TryGetNumberField(TEXT("smoothness"), Smoothness);
+
+    FVoxelHeightmapStampRef StampRef;
+    UVoxelHeightmapStamp_K2::Make(
+        StampRef,
+        Heightmap,
+        /*DefaultSurfaceType*/ nullptr,
+        /*WeightmapSurfaceTypes*/ {},
+        Layer,
+        EVoxelHeightBlendMode::Override,   // this stamp defines the terrain here
+        /*AdditionalLayers*/ {},
+        /*HeightPaddingMultiplier*/ 0.1f,
+        StampTransform,
+        EVoxelStampBehavior::AffectAll,
+        Priority,
+        float(Smoothness),
+        /*MetadataOverrides*/ FVoxelMetadataOverrides(),
+        /*StampSeed*/ FVoxelExposedSeed(),
+        /*LODRange*/ FInt32Interval(0, 32),
+        /*bDisableStampSelection*/ false,
+        /*bApplyOnVoid*/ true);
+
+    if (!StampRef.IsValid())
+        return FMonolithActionResult::Error(TEXT("Failed to build heightmap stamp"));
+
+    AVoxelStampActor* StampActor = World->SpawnActor<AVoxelStampActor>(AVoxelStampActor::StaticClass(), StampTransform);
+    if (!StampActor)
+        return FMonolithActionResult::Error(TEXT("Failed to spawn AVoxelStampActor"));
+
+    const FString Label = Params->GetStringField(TEXT("label"));
+    if (!Label.IsEmpty())
+        StampActor->SetActorLabel(Label);
+
+    StampActor->SetStamp(FVoxelStampRef(StampRef));
+    StampActor->UpdateStamp();
+    StampActor->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("actor"), StampActor->GetActorLabel());
+    Root->SetStringField(TEXT("actor_name"), StampActor->GetName());
+    Root->SetStringField(TEXT("heightmap"), Heightmap->GetPathName());
+    return FMonolithActionResult::Success(Root);
+#else
+    return FMonolithActionResult::Error(TEXT("Requires editor build"));
+#endif
+}
+
 // --- Registration (called from FMonolithVoxelActions::RegisterActions) ---
 
 void FMonolithVoxelActions::RegisterTerrainActions()
@@ -419,5 +603,33 @@ void FMonolithVoxelActions::RegisterTerrainActions()
             .Required(TEXT("actor"), TEXT("string"), TEXT("Stamp actor label or name"))
             .Required(TEXT("name"), TEXT("string"), TEXT("Exposed parameter name (see voxel.get_parameters)"))
             .Required(TEXT("value"), TEXT("any"), TEXT("Value: number, boolean, or {x,y,z}"))
+            .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("import_heightmap"),
+        TEXT("Import a raw 16-bit square heightmap (.r16, little-endian unsigned) into a G16 UTexture2D + a UVoxelHeightmap asset. Deterministic, re-runnable. Then save + add_heightmap_stamp."),
+        FMonolithActionHandler::CreateStatic(&HandleImportHeightmap),
+        FParamSchemaBuilder()
+            .Required(TEXT("raw_path"), TEXT("string"), TEXT("Absolute path to the .r16 file on disk"))
+            .Required(TEXT("dest_package"), TEXT("string"), TEXT("Destination package folder, e.g. /Game/Aetherkin/World/Lumenhollow/Terrain"))
+            .Required(TEXT("name"), TEXT("string"), TEXT("New UVoxelHeightmap asset name, e.g. VH_Lumenhollow"))
+            .Optional(TEXT("texture_name"), TEXT("string"), TEXT("G16 texture asset name (default T_<name>_Height)"))
+            .Optional(TEXT("size"), TEXT("number"), TEXT("Heightmap side length in px (default: inferred as sqrt(bytes/2))"))
+            .Optional(TEXT("scale_xy"), TEXT("number"), TEXT("cm per pixel (default 100 = 1 m/px)"))
+            .Optional(TEXT("scale_z"), TEXT("number"), TEXT("cm at normalized height 1.0 (default 40000 = 400 m)"))
+            .Optional(TEXT("offset_z"), TEXT("number"), TEXT("Z offset in cm (default 0)"))
+            .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("add_heightmap_stamp"),
+        TEXT("Spawn an AVoxelStampActor from a static UVoxelHeightmap (import_heightmap output). Terrain generates where the stamp is placed."),
+        FMonolithActionHandler::CreateStatic(&HandleAddHeightmapStamp),
+        FParamSchemaBuilder()
+            .Required(TEXT("heightmap_path"), TEXT("string"), TEXT("UVoxelHeightmap asset path"))
+            .Optional(TEXT("label"), TEXT("string"), TEXT("Stamp actor label"))
+            .Optional(TEXT("layer_path"), TEXT("string"), TEXT("UVoxelHeightLayer (default: DefaultHeightLayer)"))
+            .Optional(TEXT("x"), TEXT("number"), TEXT("Stamp X location"))
+            .Optional(TEXT("y"), TEXT("number"), TEXT("Stamp Y location"))
+            .Optional(TEXT("z"), TEXT("number"), TEXT("Stamp Z location (raise/lower terrain)"))
+            .Optional(TEXT("priority"), TEXT("number"), TEXT("Blend priority within the layer"))
+            .Optional(TEXT("smoothness"), TEXT("number"), TEXT("Blend smoothness (default 100)"))
             .Build());
 }

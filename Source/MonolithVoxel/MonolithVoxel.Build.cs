@@ -21,6 +21,7 @@ public class MonolithVoxel : ModuleRules
             "AssetTools",   // IAssetTools::DuplicateAsset (duplicate_graph_template)
             "Json",
             "JsonUtilities",
+            "VoxelCore",
             "Voxel",
             "VoxelGraph",
             "VoxelGraphEditor"
