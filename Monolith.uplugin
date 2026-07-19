@@ -192,6 +192,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "MonolithVoxel",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "MonolithComboGraph",
 			"Type": "Editor",
 			"LoadingPhase": "Default"

@@ -173,6 +173,9 @@ void FMonolithVoxelActions::RegisterActions()
                                 .Required(TEXT("asset_path"), TEXT("string"), TEXT("Voxel graph asset path"))
                                 .Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID (from get_graph_data or search_nodes)"))
                                 .Build());
+
+    // Phase 1 terrain-authoring (mutation) actions - see MonolithVoxelTerrainActions.cpp
+    RegisterTerrainActions();
 }
 
 // --- Helpers ---

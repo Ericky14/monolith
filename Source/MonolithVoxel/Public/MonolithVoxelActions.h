@@ -8,6 +8,10 @@ class FMonolithVoxelActions
 public:
     static void RegisterActions();
 
+    // Terrain-authoring (mutation) actions, defined in MonolithVoxelTerrainActions.cpp.
+    // Called from RegisterActions().
+    static void RegisterTerrainActions();
+
     // --- Graph Queries ---
     static FMonolithActionResult HandleGetGraphInfo(const TSharedPtr<FJsonObject> &Params);
     static FMonolithActionResult HandleListTerminalGraphs(const TSharedPtr<FJsonObject> &Params);
