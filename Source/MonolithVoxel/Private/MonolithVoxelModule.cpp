@@ -12,7 +12,7 @@ void FMonolithVoxelModule::StartupModule()
         return;
 
     FMonolithVoxelActions::RegisterActions();
-    UE_LOG(LogMonolith, Log, TEXT("Monolith — Voxel module loaded (7 actions)"));
+    UE_LOG(LogMonolith, Log, TEXT("MonolithVoxel: registered 12 actions (7 inspect + 5 authoring)"));
 }
 
 void FMonolithVoxelModule::ShutdownModule()
