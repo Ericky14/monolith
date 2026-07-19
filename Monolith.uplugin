@@ -123,11 +123,6 @@
 		{
 			"Name": "PythonScriptPlugin",
 			"Enabled": true
-		},
-		{
-			"Name": "Voxel",
-			"Enabled": true,
-			"Optional": true
 		}
 	],
 	"Modules": [
@@ -228,11 +223,6 @@
 		},
 		{
 			"Name": "MonolithReflectionIntel",
-			"Type": "Editor",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "MonolithVoxel",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		}
