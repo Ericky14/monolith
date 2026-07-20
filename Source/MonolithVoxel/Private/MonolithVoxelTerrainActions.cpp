@@ -54,6 +54,12 @@
 #include "Heightmap/VoxelHeightmapStampRef.h"          // FVoxelHeightmapStampRef
 #include "Heightmap/VoxelHeightmapStamp_K2.h"          // UVoxelHeightmapStamp_K2::Make
 #include "Surface/VoxelSurfaceTypeInterface.h"         // UVoxelSurfaceTypeInterface
+
+// Instanced-mesh scatter (foliage/rocks/props) — the saveable HISM path Python can't do:
+#include "Engine/StaticMesh.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Serialization/JsonSerializer.h"              // FJsonSerializer + TJsonReaderFactory
+#include "GameFramework/Actor.h"
 #endif
 
 #if WITH_EDITOR
@@ -609,6 +615,101 @@ static FMonolithActionResult HandleAddHeightmapWeight(const TSharedPtr<FJsonObje
 #endif
 }
 
+// --- scatter_instanced (instanced foliage/props via a saveable HISM) ---
+//
+// Builds a UHierarchicalInstancedStaticMeshComponent from a JSON file of transforms and
+// bulk-adds all instances. This is the correct C++ component lifecycle (NewObject ->
+// SetRootComponent -> RegisterComponent -> AddInstanceComponent -> AddInstances) that the
+// editor Python API does NOT expose (no RegisterComponent/AddInstanceComponent/add_component_
+// by_class), so dense instanced scatter (grass, flowers, rocks) can only be done here.
+// transforms_path -> JSON array of {x,y,z, yaw?, pitch?, roll?, s? | sx,sy,sz?}. World-space.
+
+static FMonolithActionResult HandleScatterInstanced(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+    using namespace MonolithVoxelTerrainInternal;
+    UWorld* World = GetEditorWorld();
+    if (!World)
+        return FMonolithActionResult::Error(TEXT("No editor world"));
+
+    const FString MeshPath = Params->GetStringField(TEXT("mesh_path"));
+    const FString TransformsPath = Params->GetStringField(TEXT("transforms_path"));
+    if (MeshPath.IsEmpty() || TransformsPath.IsEmpty())
+        return FMonolithActionResult::Error(TEXT("mesh_path and transforms_path are required"));
+
+    UStaticMesh* Mesh = FMonolithAssetUtils::LoadAssetByPath<UStaticMesh>(MeshPath);
+    if (!Mesh)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Static mesh not found: %s"), *MeshPath));
+
+    FString JsonStr;
+    if (!FFileHelper::LoadFileToString(JsonStr, *TransformsPath))
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Cannot read transforms_path: %s"), *TransformsPath));
+
+    TArray<TSharedPtr<FJsonValue>> Arr;
+    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
+    if (!FJsonSerializer::Deserialize(Reader, Arr))
+        return FMonolithActionResult::Error(TEXT("transforms_path must be a JSON array of {x,y,z,...}"));
+
+    TArray<FTransform> Instances;
+    Instances.Reserve(Arr.Num());
+    for (const TSharedPtr<FJsonValue>& V : Arr)
+    {
+        const TSharedPtr<FJsonObject>* Obj;
+        if (!V.IsValid() || !V->TryGetObject(Obj))
+            continue;
+        double X = 0, Y = 0, Z = 0, Yaw = 0, Pitch = 0, Roll = 0, S = 1, Sx = 0, Sy = 0, Sz = 0;
+        (*Obj)->TryGetNumberField(TEXT("x"), X);
+        (*Obj)->TryGetNumberField(TEXT("y"), Y);
+        (*Obj)->TryGetNumberField(TEXT("z"), Z);
+        (*Obj)->TryGetNumberField(TEXT("yaw"), Yaw);
+        (*Obj)->TryGetNumberField(TEXT("pitch"), Pitch);
+        (*Obj)->TryGetNumberField(TEXT("roll"), Roll);
+        (*Obj)->TryGetNumberField(TEXT("s"), S);
+        const bool bNonUniform = (*Obj)->TryGetNumberField(TEXT("sx"), Sx) && (*Obj)->TryGetNumberField(TEXT("sy"), Sy) && (*Obj)->TryGetNumberField(TEXT("sz"), Sz);
+        const FVector Scale = bNonUniform ? FVector(Sx, Sy, Sz) : FVector(S, S, S);
+        Instances.Add(FTransform(FRotator(Pitch, Yaw, Roll), FVector(X, Y, Z), Scale));
+    }
+    if (Instances.Num() == 0)
+        return FMonolithActionResult::Error(TEXT("No transforms parsed from JSON"));
+
+    AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity);
+    if (!Actor)
+        return FMonolithActionResult::Error(TEXT("Failed to spawn scatter actor"));
+
+    UHierarchicalInstancedStaticMeshComponent* HISM =
+        NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor, TEXT("ScatterHISM"));
+    HISM->SetStaticMesh(Mesh);
+
+    bool bCollision = false;
+    Params->TryGetBoolField(TEXT("collision"), bCollision);
+    HISM->SetCollisionEnabled(bCollision ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+    bool bCastShadow = true;
+    Params->TryGetBoolField(TEXT("cast_shadow"), bCastShadow);
+    HISM->SetCastShadow(bCastShadow);
+
+    Actor->SetRootComponent(HISM);
+    HISM->OnComponentCreated();
+    HISM->RegisterComponent();
+    Actor->AddInstanceComponent(HISM);
+
+    HISM->AddInstances(Instances, /*bShouldReturnIndices*/ false, /*bWorldSpace*/ true);
+
+    const FString Label = Params->GetStringField(TEXT("label"));
+    if (!Label.IsEmpty())
+        Actor->SetActorLabel(Label);
+    Actor->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("actor"), Actor->GetActorLabel());
+    Root->SetStringField(TEXT("actor_name"), Actor->GetName());
+    Root->SetNumberField(TEXT("instances"), HISM->GetInstanceCount());
+    Root->SetStringField(TEXT("mesh"), Mesh->GetPathName());
+    return FMonolithActionResult::Success(Root);
+#else
+    return FMonolithActionResult::Error(TEXT("Requires editor build"));
+#endif
+}
+
 // --- Registration (called from FMonolithVoxelActions::RegisterActions) ---
 
 void FMonolithVoxelActions::RegisterTerrainActions()
@@ -691,6 +792,17 @@ void FMonolithVoxelActions::RegisterTerrainActions()
             .Optional(TEXT("z"), TEXT("number"), TEXT("Stamp Z location (raise/lower terrain)"))
             .Optional(TEXT("priority"), TEXT("number"), TEXT("Blend priority within the layer"))
             .Optional(TEXT("smoothness"), TEXT("number"), TEXT("Blend smoothness (default 100)"))
+            .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("scatter_instanced"),
+        TEXT("Build a saveable HierarchicalInstancedStaticMeshComponent from a JSON file of world-space transforms (bulk instances). The instanced-mesh scatter path editor Python can't do. transforms_path JSON = array of {x,y,z, yaw?, pitch?, roll?, s? | sx,sy,sz?}."),
+        FMonolithActionHandler::CreateStatic(&HandleScatterInstanced),
+        FParamSchemaBuilder()
+            .Required(TEXT("mesh_path"), TEXT("string"), TEXT("UStaticMesh asset path to instance"))
+            .Required(TEXT("transforms_path"), TEXT("string"), TEXT("Absolute path to a JSON array file of instance transforms (world-space)"))
+            .Optional(TEXT("label"), TEXT("string"), TEXT("Scatter actor label"))
+            .Optional(TEXT("collision"), TEXT("boolean"), TEXT("Query collision on instances (default false)"))
+            .Optional(TEXT("cast_shadow"), TEXT("boolean"), TEXT("Instances cast shadows (default true)"))
             .Build());
 
     Registry.RegisterAction(TEXT("voxel"), TEXT("add_heightmap_weight"),
