@@ -49,9 +49,11 @@
 #include "AssetRegistry/AssetRegistryModule.h"         // FAssetRegistryModule::AssetCreated
 #include "Heightmap/VoxelHeightmap.h"                  // UVoxelHeightmap
 #include "Heightmap/VoxelHeightmap_Height.h"           // UVoxelHeightmap_Height, EVoxelTextureChannel
+#include "Heightmap/VoxelHeightmap_Weight.h"           // UVoxelHeightmap_Weight
 #include "Heightmap/VoxelHeightmapStamp.h"             // FVoxelHeightmapStamp, FVoxelHeightmapStampWeightmapSurfaceType
 #include "Heightmap/VoxelHeightmapStampRef.h"          // FVoxelHeightmapStampRef
 #include "Heightmap/VoxelHeightmapStamp_K2.h"          // UVoxelHeightmapStamp_K2::Make
+#include "Surface/VoxelSurfaceTypeInterface.h"         // UVoxelSurfaceTypeInterface
 #endif
 
 #if WITH_EDITOR
@@ -549,6 +551,64 @@ static FMonolithActionResult HandleAddHeightmapStamp(const TSharedPtr<FJsonObjec
 #endif
 }
 
+// --- add_heightmap_weight (Phase 2: mask -> surface-type weightmap layer) ---
+//
+// Appends a UVoxelHeightmap_Weight to a UVoxelHeightmap: a grayscale mask texture that
+// paints a Surface Type onto the terrain where the mask is white (AlphaBlended over the
+// base DefaultSurfaceType). This is how the Lumenhollow 13 control masks drive per-zone
+// materials (cliff rock, road cobble, wet bank). Weights is a public but non-EditAnywhere
+// UPROPERTY, so it can only be populated from C++ (not editor Python).
+
+static FMonolithActionResult HandleAddHeightmapWeight(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+    const FString HmPath = Params->GetStringField(TEXT("heightmap_path"));
+    const FString MaskPath = Params->GetStringField(TEXT("mask_texture_path"));
+    const FString StPath = Params->GetStringField(TEXT("surface_type_path"));
+    if (HmPath.IsEmpty() || MaskPath.IsEmpty() || StPath.IsEmpty())
+        return FMonolithActionResult::Error(TEXT("heightmap_path, mask_texture_path, and surface_type_path are required"));
+
+    UVoxelHeightmap* Hm = FMonolithAssetUtils::LoadAssetByPath<UVoxelHeightmap>(HmPath);
+    if (!Hm)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Heightmap not found: %s"), *HmPath));
+    UTexture2D* Mask = FMonolithAssetUtils::LoadAssetByPath<UTexture2D>(MaskPath);
+    if (!Mask)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Mask texture not found: %s"), *MaskPath));
+    UVoxelSurfaceTypeInterface* St = FMonolithAssetUtils::LoadAssetByPath<UVoxelSurfaceTypeInterface>(StPath);
+    if (!St)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Surface type not found: %s"), *StPath));
+
+    bool bClear = false;
+    if (Params->TryGetBoolField(TEXT("clear_existing"), bClear) && bClear)
+        Hm->Weights.Reset();
+
+    double Strength = 1.0;
+    Params->TryGetNumberField(TEXT("strength"), Strength);
+    bool bBicubic = false;
+    Params->TryGetBoolField(TEXT("use_bicubic"), bBicubic);
+
+    UVoxelHeightmap_Weight* W = NewObject<UVoxelHeightmap_Weight>(Hm);
+    W->Texture = Mask;
+    W->TextureChannel = EVoxelTextureChannel::R;
+    W->SurfaceType = St;
+    W->Strength = float(Strength);
+    W->bUseBicubic = bBicubic;
+    W->GetData(); // force-build so weight data serializes
+
+    Hm->Weights.Add(W);
+    Hm->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetNumberField(TEXT("weight_index"), Hm->Weights.Num() - 1);
+    Root->SetNumberField(TEXT("total_weights"), Hm->Weights.Num());
+    Root->SetStringField(TEXT("surface_type"), St->GetName());
+    Root->SetStringField(TEXT("note"), TEXT("Not saved yet - editor.save_packages the heightmap, then voxel.recreate_runtime."));
+    return FMonolithActionResult::Success(Root);
+#else
+    return FMonolithActionResult::Error(TEXT("Requires editor build"));
+#endif
+}
+
 // --- Registration (called from FMonolithVoxelActions::RegisterActions) ---
 
 void FMonolithVoxelActions::RegisterTerrainActions()
@@ -631,5 +691,17 @@ void FMonolithVoxelActions::RegisterTerrainActions()
             .Optional(TEXT("z"), TEXT("number"), TEXT("Stamp Z location (raise/lower terrain)"))
             .Optional(TEXT("priority"), TEXT("number"), TEXT("Blend priority within the layer"))
             .Optional(TEXT("smoothness"), TEXT("number"), TEXT("Blend smoothness (default 100)"))
+            .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("add_heightmap_weight"),
+        TEXT("Append a weightmap layer to a UVoxelHeightmap: a grayscale mask texture that paints a Surface Type onto the terrain where white (over the base DefaultSurfaceType). Populates the C++-only Weights array. Then save + recreate_runtime."),
+        FMonolithActionHandler::CreateStatic(&HandleAddHeightmapWeight),
+        FParamSchemaBuilder()
+            .Required(TEXT("heightmap_path"), TEXT("string"), TEXT("UVoxelHeightmap asset path"))
+            .Required(TEXT("mask_texture_path"), TEXT("string"), TEXT("Grayscale mask UTexture2D path"))
+            .Required(TEXT("surface_type_path"), TEXT("string"), TEXT("UVoxelSurfaceTypeAsset/Interface path to paint where the mask is white"))
+            .Optional(TEXT("strength"), TEXT("number"), TEXT("Weight strength (default 1.0)"))
+            .Optional(TEXT("use_bicubic"), TEXT("boolean"), TEXT("Bicubic mask sampling (default false)"))
+            .Optional(TEXT("clear_existing"), TEXT("boolean"), TEXT("Empty the Weights array first (default false)"))
             .Build());
 }
