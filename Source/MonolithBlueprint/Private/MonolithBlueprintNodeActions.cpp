@@ -37,6 +37,8 @@
 #include "K2Node_FormatText.h"
 #include "K2Node_MakeArray.h"
 #include "K2Node_Select.h"
+#include "K2Node_EnhancedInputAction.h"
+#include "InputAction.h"
 #include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node.h"
@@ -441,6 +443,20 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 			.Optional(TEXT("position"),    TEXT("array"),  TEXT("Node position as [x, y] (default: [0, 0])"))
 			.Optional(TEXT("replication"), TEXT("string"), TEXT("Replication mode for custom events: none, multicast, server, client (default: none). Ignored for native override events."))
 			.Optional(TEXT("reliable"),    TEXT("bool"),   TEXT("Use reliable replication for custom events (default: false). Ignored for native override events."))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_enhanced_input_event"),
+		TEXT("Spawn a UK2Node_EnhancedInputAction event node (the 'EnhancedInputAction IA_X' red event node) into a Blueprint event graph, bound to a UInputAction asset. "
+		     "This is the node you place to react to an Enhanced Input action (its Triggered / Started / Ongoing / Canceled / Completed exec output pins, plus an ActionValue pin). "
+		     "No other Monolith/ue-mcp channel can create this node type. input_action_path is a UInputAction asset path (/Game/...) — a bare asset name is also accepted (FindFirstObject fallback). "
+		     "The node's InputAction is set BEFORE AllocateDefaultPins so the correct trigger/value pins are generated. Errors if an EnhancedInputAction node for the same action already exists in the graph. "
+		     "Returns the created node id (use it with connect_pins / connect_pins_bulk to wire the exec/value pins) plus its pins. Marks the Blueprint structurally-modified + dirty (save + compile separately)."),
+		FMonolithActionHandler::CreateStatic(&HandleAddEnhancedInputEvent),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"),        TEXT("Blueprint asset path to add the node to"))
+			.Required(TEXT("input_action_path"),  TEXT("string"), TEXT("UInputAction asset path (/Game/...) or bare asset name to bind the event to (e.g. /Game/Aetherkin/Input/IA_AK_HotbarScroll)"))
+			.Optional(TEXT("graph_name"),         TEXT("string"), TEXT("Event graph name (defaults to EventGraph)"))
+			.Optional(TEXT("position"),           TEXT("array"),  TEXT("Node position as [x, y] (default: [0, 0])"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_comment_node"),
@@ -3336,6 +3352,108 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddEventNode(const TS
 		}
 		return FMonolithActionResult::Success(Root);
 	}
+}
+
+// ============================================================
+//  add_enhanced_input_event
+//
+//  Spawns a UK2Node_EnhancedInputAction ("EnhancedInputAction IA_X" red event
+//  node) bound to a UInputAction asset. No node-alias / generic path can create
+//  this K2Node, so it gets a dedicated handler. InputAction MUST be set before
+//  AllocateDefaultPins — the node reads it to build the correct trigger/value
+//  pins (see K2Node_EnhancedInputAction::AllocateDefaultPins).
+// ============================================================
+
+// Resolve a UInputAction from an asset path (/Game/...) or, as a fallback, a bare
+// asset name. Path-first keeps it deterministic; the bare-name fallback mirrors the
+// tolerance callers get elsewhere. Returns nullptr on failure.
+static const UInputAction* ResolveInputActionAsset(const FString& Spec)
+{
+	if (Spec.IsEmpty())
+	{
+		return nullptr;
+	}
+	if (const UInputAction* ByPath = LoadObject<UInputAction>(nullptr, *Spec))
+	{
+		return ByPath;
+	}
+	// Bare-name (or partial-path) fallback — first match wins.
+	return FindFirstObject<UInputAction>(*Spec, EFindFirstObjectOptions::None);
+}
+
+FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddEnhancedInputEvent(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString InputActionSpec = Params->GetStringField(TEXT("input_action_path"));
+	if (InputActionSpec.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("add_enhanced_input_event requires 'input_action_path' (UInputAction asset path or name)"));
+	}
+
+	const UInputAction* Action = ResolveInputActionAsset(InputActionSpec);
+	if (!Action)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("No UInputAction resolved from '%s' (tried asset-path load then bare-name FindFirstObject)"), *InputActionSpec));
+	}
+
+	FString GraphName = Params->GetStringField(TEXT("graph_name"));
+	UEdGraph* Graph = MonolithBlueprintInternal::FindGraphByName(BP, GraphName);
+	if (!Graph)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
+	}
+
+	// Parse position ([x, y]; defaults [0, 0]).
+	int32 PosX = 0;
+	int32 PosY = 0;
+	const TArray<TSharedPtr<FJsonValue>>* PosArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("position"), PosArray) && PosArray && PosArray->Num() >= 2)
+	{
+		PosX = (int32)(*PosArray)[0]->AsNumber();
+		PosY = (int32)(*PosArray)[1]->AsNumber();
+	}
+
+	// Reject a duplicate — the editor's node spawner enforces one EnhancedInputAction
+	// node per action per graph; a raw NewObject would bypass that, so mirror it here.
+	for (UEdGraphNode* N : Graph->Nodes)
+	{
+		if (UK2Node_EnhancedInputAction* Existing = Cast<UK2Node_EnhancedInputAction>(N))
+		{
+			if (Existing->InputAction == Action)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("An EnhancedInputAction event node for '%s' already exists in graph '%s' (node: %s)"),
+					*Action->GetName(), *Graph->GetName(), *Existing->GetName()));
+			}
+		}
+	}
+
+	UK2Node_EnhancedInputAction* Node = NewObject<UK2Node_EnhancedInputAction>(Graph);
+	// Set the bound action BEFORE AllocateDefaultPins so the correct trigger/value pins are built.
+	Node->InputAction = Action;
+	Node->NodePosX = PosX;
+	Node->NodePosY = PosY;
+	Graph->AddNode(Node, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+	Node->AllocateDefaultPins();
+	Node->CreateNewGuid(); // Gap #15: valid NodeGuid for deterministic cooking
+
+	// Structural change (new event entry into the ubergraph).
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+
+	TSharedPtr<FJsonObject> Root = MonolithBlueprintInternal::SerializeNode(Node);
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("graph"), Graph->GetName());
+	Root->SetStringField(TEXT("input_action"), Action->GetPathName());
+	Root->SetBoolField(TEXT("is_enhanced_input_event"), true);
+	return FMonolithActionResult::Success(Root);
 }
 
 // ============================================================

@@ -24,6 +24,10 @@ public class MonolithBlueprint : ModuleRules
 			"KismetCompiler",
 			"EditorScriptingUtilities",
 			"EnhancedInput",
+			// UK2Node_EnhancedInputAction (blueprint.add_enhanced_input_event). Editor/UncookedOnly
+			// module shipped with the always-enabled EnhancedInput plugin; MonolithBlueprint is
+			// itself an editor module, so depending on an UncookedOnly module is release-safe.
+			"InputBlueprintNodes",
 			"Json",
 			"JsonUtilities"
 			// (Historical: StructUtils was added here by PR #40 but is deprecated

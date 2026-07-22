@@ -28,6 +28,10 @@ public:
 	static FMonolithActionResult HandleAddEventNode(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddCommentNode(const TSharedPtr<FJsonObject>& Params);
 
+	// Enhanced Input — spawn a UK2Node_EnhancedInputAction ("EnhancedInputAction IA_X") event node
+	// bound to a UInputAction asset, so its Triggered/Started/etc. exec pins can be wired.
+	static FMonolithActionResult HandleAddEnhancedInputEvent(const TSharedPtr<FJsonObject>& Params);
+
 	// Phase 3A — Timeline read/edit
 	static FMonolithActionResult HandleGetTimelineData(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddTimelineTrack(const TSharedPtr<FJsonObject>& Params);
