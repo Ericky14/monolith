@@ -136,7 +136,35 @@ namespace MonolithBlueprintInternal
 		{
 			if (UEdGraph* G = SearchArray(Iface.Graphs)) return G;
 		}
+
+		// Fall back to a full recursive scan that reaches COLLAPSED composite / macro
+		// sub-graphs. UBlueprint::GetAllGraphs flattens UEdGraph::SubGraphs, so this is what
+		// makes nodes inside collapsed graphs addressable by graph name for reads AND edits —
+		// get_graph_data / get_node_details / remove_node / connect_pins all route through here.
+		{
+			TArray<UEdGraph*> AllGraphs;
+			BP->GetAllGraphs(AllGraphs);
+			for (UEdGraph* G : AllGraphs)
+			{
+				if (G && G->GetName() == GraphName) return G;
+			}
+		}
 		return nullptr;
+	}
+
+	// Best-effort type label for a graph, including collapsed/nested graphs.
+	inline FString GraphTypeLabel(UBlueprint* BP, UEdGraph* Graph)
+	{
+		if (!BP || !Graph) return TEXT("unknown");
+		if (BP->UbergraphPages.Contains(Graph)) return TEXT("event_graph");
+		if (BP->FunctionGraphs.Contains(Graph)) return TEXT("function");
+		if (BP->MacroGraphs.Contains(Graph)) return TEXT("macro");
+		if (BP->DelegateSignatureGraphs.Contains(Graph)) return TEXT("delegate_signature");
+		for (const FBPInterfaceDescription& Iface : BP->ImplementedInterfaces)
+		{
+			if (Iface.Graphs.Contains(Graph)) return TEXT("interface");
+		}
+		return TEXT("nested"); // collapsed composite / macro-instance bound graph
 	}
 
 	inline FString PinTypeToString(const FEdGraphPinType& PinType)
@@ -240,6 +268,33 @@ namespace MonolithBlueprintInternal
 		}
 		PinObj->SetArrayField(TEXT("connected_to"), ConnArr);
 		return PinObj;
+	}
+
+	// Compact per-pin connection summary for a node: ONE entry per CONNECTED pin (unconnected
+	// pins omitted to stay small). Each entry: { pin, dir ("in"/"out"), exec (bool), to:["NodeId.PinName", ...] }.
+	// Lets find_in_blueprint report how a node is wired inline — no follow-up get_node_details needed.
+	inline TArray<TSharedPtr<FJsonValue>> BuildNodeConnectionsCompact(const UEdGraphNode* Node)
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		if (!Node) return Out;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->LinkedTo.Num() == 0) continue;
+			TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+			PObj->SetStringField(TEXT("pin"), Pin->PinName.ToString());
+			PObj->SetStringField(TEXT("dir"), Pin->Direction == EGPD_Input ? TEXT("in") : TEXT("out"));
+			PObj->SetBoolField(TEXT("exec"), Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
+			TArray<TSharedPtr<FJsonValue>> ToArr;
+			for (const UEdGraphPin* Linked : Pin->LinkedTo)
+			{
+				if (!Linked || !Linked->GetOwningNode()) continue;
+				ToArr.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s.%s"),
+					*Linked->GetOwningNode()->GetName(), *Linked->PinName.ToString())));
+			}
+			PObj->SetArrayField(TEXT("to"), ToArr);
+			Out.Add(MakeShared<FJsonValueObject>(PObj));
+		}
+		return Out;
 	}
 
 	// ============================================================
@@ -622,18 +677,15 @@ namespace MonolithBlueprintInternal
 			return Graph ? SearchGraph(Graph) : nullptr;
 		}
 
-		auto SearchGraphs = [&](const TArray<TObjectPtr<UEdGraph>>& Graphs) -> UEdGraphNode*
+		// Empty graph name: search EVERY graph, including collapsed composite / macro
+		// sub-graphs (GetAllGraphs flattens them). Node IDs are unique per graph, so this
+		// returns the first match — pass graph_name to disambiguate across graphs.
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+		for (UEdGraph* G : AllGraphs)
 		{
-			for (const auto& G : Graphs)
-			{
-				if (UEdGraphNode* N = SearchGraph(G)) return N;
-			}
-			return nullptr;
-		};
-
-		if (UEdGraphNode* N = SearchGraphs(BP->UbergraphPages)) return N;
-		if (UEdGraphNode* N = SearchGraphs(BP->FunctionGraphs)) return N;
-		if (UEdGraphNode* N = SearchGraphs(BP->MacroGraphs)) return N;
+			if (UEdGraphNode* N = SearchGraph(G)) return N;
+		}
 		return nullptr;
 	}
 

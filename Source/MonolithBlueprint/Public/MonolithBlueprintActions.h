@@ -33,6 +33,10 @@ public:
 	static FMonolithActionResult HandleGetBlueprintInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleFindVariableReferences(const TSharedPtr<FJsonObject>& Params);
 
+	// Recursive find across ALL graphs (incl. collapsed composites/macros) matching titles,
+	// class, comments, function names, pin names/values/objects, and legacy input keys.
+	static FMonolithActionResult HandleFindInBlueprint(const TSharedPtr<FJsonObject>& Params);
+
 private:
 	static UBlueprint* LoadBlueprint(const TSharedPtr<FJsonObject>& Params, FString& OutAssetPath);
 };

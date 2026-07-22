@@ -12,6 +12,7 @@
 #include "GameFramework/Actor.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/Class.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UObjectHash.h"
 #include "K2Node.h"
@@ -68,11 +69,35 @@ void FMonolithBlueprintActions::RegisterActions()
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("search_nodes"),
-		TEXT("Search for nodes in a Blueprint by title or function name"),
+		TEXT("Search nodes across ALL graphs of a Blueprint (now INCLUDING collapsed composite/macro "
+		     "sub-graphs) by node title, class name, or called-function name. To also match PIN "
+		     "values/literals, input keys, or comments — or when you don't know which graph a node is in — "
+		     "use find_in_blueprint instead."),
 		FMonolithActionHandler::CreateStatic(&HandleSearchNodes),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
-			.Required(TEXT("query"), TEXT("string"), TEXT("Search string to match against node titles and function names"))
+			.Required(TEXT("query"), TEXT("string"), TEXT("Search string to match against node titles, class names, and function names"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("find_in_blueprint"),
+		TEXT("Recursively search EVERY graph of a Blueprint — INCLUDING nodes inside collapsed graphs "
+		     "(K2Node_Composite bound graphs) and macro instances that search_nodes/get_graph_* historically "
+		     "could not reach — matching the query (case-insensitive substring by default) against: node title, "
+		     "node class, node comment, called-function name, each pin's name / default value / default object, "
+		     "and (via reflection) any legacy input-key node's bound key (e.g. 'MouseScrollUp'). This is the tool "
+		     "for finding a node when you don't know which graph it lives in or the value is a pin/key literal. "
+		     "Mirrors the editor's Ctrl+F Find-in-Blueprint. Each hit returns: graph (usable directly as a "
+		     "get_graph_data / get_node_details / remove_node / connect_pins graph_name — collapsed graphs are now "
+		     "addressable), graph_type, node_id, class, title, matched_field, snippet, and (unless disabled) a "
+		     "compact 'connections' list — one entry per WIRED pin {pin, dir, exec, to:[NodeId.PinName]} — so you "
+		     "see how the node is hooked up in the same call (no follow-up get_node_details needed)."),
+		FMonolithActionHandler::CreateStatic(&HandleFindInBlueprint),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Required(TEXT("query"), TEXT("string"), TEXT("Substring to search for across titles, class names, comments, function names, pin names/values/objects, and input keys."))
+			.Optional(TEXT("case_sensitive"), TEXT("boolean"), TEXT("Case-sensitive match (default false)."))
+			.Optional(TEXT("max_results"), TEXT("integer"), TEXT("Cap on returned hits (default 100)."))
+			.Optional(TEXT("include_connections"), TEXT("boolean"), TEXT("Include a compact per-wired-pin connection summary on each hit (default true; set false for a lean locate-only result)."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_components"),
@@ -651,52 +676,177 @@ FMonolithActionResult FMonolithBlueprintActions::HandleSearchNodes(const TShared
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Results;
 
-	auto SearchGraphs = [&](const TArray<TObjectPtr<UEdGraph>>& Graphs, const FString& Type)
+	// Walk EVERY graph, including collapsed composite / macro sub-graphs (GetAllGraphs flattens them).
+	TArray<UEdGraph*> AllGraphs;
+	BP->GetAllGraphs(AllGraphs);
+	for (UEdGraph* Graph : AllGraphs)
 	{
-		for (const auto& Graph : Graphs)
+		if (!Graph) continue;
+		const FString GraphType = MonolithBlueprintInternal::GraphTypeLabel(BP, Graph);
+		for (UEdGraphNode* Node : Graph->Nodes)
 		{
-			if (!Graph) continue;
-			for (UEdGraphNode* Node : Graph->Nodes)
+			if (!Node) continue;
+			FString Title = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+			FString ClassName = Node->GetClass()->GetName();
+			FString FuncName;
+
+			if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
 			{
-				if (!Node) continue;
-				FString Title = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
-				FString ClassName = Node->GetClass()->GetName();
-				FString FuncName;
+				FuncName = CallNode->FunctionReference.GetMemberName().ToString();
+			}
 
-				if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+			bool bMatch = Title.ToLower().Contains(QueryLower) ||
+						  ClassName.ToLower().Contains(QueryLower) ||
+						  FuncName.ToLower().Contains(QueryLower);
+
+			if (bMatch)
+			{
+				TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
+				RObj->SetStringField(TEXT("graph"), Graph->GetName());
+				RObj->SetStringField(TEXT("graph_type"), GraphType);
+				RObj->SetStringField(TEXT("node_id"), Node->GetName());
+				RObj->SetStringField(TEXT("class"), ClassName);
+				RObj->SetStringField(TEXT("title"), Title);
+				if (!FuncName.IsEmpty())
 				{
-					FuncName = CallNode->FunctionReference.GetMemberName().ToString();
+					RObj->SetStringField(TEXT("function"), FuncName);
 				}
-
-				bool bMatch = Title.ToLower().Contains(QueryLower) ||
-							  ClassName.ToLower().Contains(QueryLower) ||
-							  FuncName.ToLower().Contains(QueryLower);
-
-				if (bMatch)
-				{
-					TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
-					RObj->SetStringField(TEXT("graph"), Graph->GetName());
-					RObj->SetStringField(TEXT("graph_type"), Type);
-					RObj->SetStringField(TEXT("node_id"), Node->GetName());
-					RObj->SetStringField(TEXT("class"), ClassName);
-					RObj->SetStringField(TEXT("title"), Title);
-					if (!FuncName.IsEmpty())
-					{
-						RObj->SetStringField(TEXT("function"), FuncName);
-					}
-					Results.Add(MakeShared<FJsonValueObject>(RObj));
-				}
+				Results.Add(MakeShared<FJsonValueObject>(RObj));
 			}
 		}
-	};
-
-	SearchGraphs(BP->UbergraphPages, TEXT("event_graph"));
-	SearchGraphs(BP->FunctionGraphs, TEXT("function"));
-	SearchGraphs(BP->MacroGraphs, TEXT("macro"));
-	SearchGraphs(BP->DelegateSignatureGraphs, TEXT("delegate_signature"));
+	}
 
 	Root->SetStringField(TEXT("query"), Query);
 	Root->SetNumberField(TEXT("match_count"), Results.Num());
+	Root->SetArrayField(TEXT("results"), Results);
+
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- find_in_blueprint ---
+
+FMonolithActionResult FMonolithBlueprintActions::HandleFindInBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBlueprint* BP = LoadBlueprint(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString Query = Params->GetStringField(TEXT("query"));
+	if (Query.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: query"));
+	}
+
+	bool bCaseSensitive = false;
+	Params->TryGetBoolField(TEXT("case_sensitive"), bCaseSensitive);
+
+	int32 MaxResults = 100;
+	{
+		double Tmp = 0.0;
+		if (Params->TryGetNumberField(TEXT("max_results"), Tmp)) { MaxResults = FMath::Max(1, (int32)Tmp); }
+	}
+
+	bool bIncludeConnections = true;
+	Params->TryGetBoolField(TEXT("include_connections"), bIncludeConnections);
+
+	const FString Needle = bCaseSensitive ? Query : Query.ToLower();
+	auto Match = [&](const FString& Hay) -> bool
+	{
+		if (Hay.IsEmpty()) return false;
+		return (bCaseSensitive ? Hay : Hay.ToLower()).Contains(Needle);
+	};
+
+	TArray<UEdGraph*> AllGraphs;
+	BP->GetAllGraphs(AllGraphs);
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	bool bTruncated = false;
+
+	for (UEdGraph* Graph : AllGraphs)
+	{
+		if (!Graph) continue;
+		const FString GraphName = Graph->GetName();
+		const FString GraphType = MonolithBlueprintInternal::GraphTypeLabel(BP, Graph);
+
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+
+			const FString Title = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+			const FString ClassName = Node->GetClass()->GetName();
+			FString MatchedField;
+			FString Snippet;
+
+			if (Match(Title)) { MatchedField = TEXT("title"); Snippet = Title; }
+			else if (Match(ClassName)) { MatchedField = TEXT("class"); Snippet = ClassName; }
+			else if (Match(Node->NodeComment)) { MatchedField = TEXT("comment"); Snippet = Node->NodeComment; }
+			else
+			{
+				if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+				{
+					const FString Fn = CallNode->FunctionReference.GetMemberName().ToString();
+					if (Match(Fn)) { MatchedField = TEXT("function"); Snippet = Fn; }
+				}
+
+				// Legacy input-key nodes store the bound key as an FKey UPROPERTY (usually named
+				// "InputKey"). It is NOT a pin, so reflect it out to text and match (catches e.g.
+				// "MouseScrollUp"). Generic — no per-class cast/include needed.
+				if (MatchedField.IsEmpty())
+				{
+					if (FProperty* KeyProp = Node->GetClass()->FindPropertyByName(FName(TEXT("InputKey"))))
+					{
+						FString KeyText;
+						KeyProp->ExportTextItem_Direct(KeyText, KeyProp->ContainerPtrToValuePtr<void>(Node), nullptr, nullptr, PPF_None);
+						if (Match(KeyText)) { MatchedField = TEXT("input_key"); Snippet = KeyText; }
+					}
+				}
+
+				// Pins: names, default value literals, default object paths.
+				if (MatchedField.IsEmpty())
+				{
+					for (const UEdGraphPin* Pin : Node->Pins)
+					{
+						if (!Pin) continue;
+						const FString PinName = Pin->PinName.ToString();
+						if (Match(PinName)) { MatchedField = TEXT("pin_name"); Snippet = PinName; break; }
+						if (Match(Pin->DefaultValue)) { MatchedField = TEXT("pin_default_value"); Snippet = PinName + TEXT("=") + Pin->DefaultValue; break; }
+						if (Pin->DefaultObject)
+						{
+							const FString ObjPath = Pin->DefaultObject->GetPathName();
+							if (Match(ObjPath)) { MatchedField = TEXT("pin_default_object"); Snippet = PinName + TEXT("=") + ObjPath; break; }
+						}
+					}
+				}
+			}
+
+			if (!MatchedField.IsEmpty())
+			{
+				if (Results.Num() >= MaxResults) { bTruncated = true; break; }
+				TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
+				RObj->SetStringField(TEXT("graph"), GraphName);
+				RObj->SetStringField(TEXT("graph_type"), GraphType);
+				RObj->SetStringField(TEXT("node_id"), Node->GetName());
+				RObj->SetStringField(TEXT("class"), ClassName);
+				RObj->SetStringField(TEXT("title"), Title);
+				RObj->SetStringField(TEXT("matched_field"), MatchedField);
+				RObj->SetStringField(TEXT("snippet"), Snippet.Left(200));
+				if (bIncludeConnections)
+				{
+					RObj->SetArrayField(TEXT("connections"), MonolithBlueprintInternal::BuildNodeConnectionsCompact(Node));
+				}
+				Results.Add(MakeShared<FJsonValueObject>(RObj));
+			}
+		}
+		if (bTruncated) break;
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("query"), Query);
+	Root->SetNumberField(TEXT("match_count"), Results.Num());
+	Root->SetBoolField(TEXT("truncated"), bTruncated);
 	Root->SetArrayField(TEXT("results"), Results);
 
 	return FMonolithActionResult::Success(Root);

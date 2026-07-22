@@ -77,7 +77,8 @@ namespace
 		int32 PlayerIndex = 0;
 		TWeakObjectPtr<const UInputAction> Action;
 		FInputActionValue Value;
-		int32 FramesRemaining = 0; // injected while > 0
+		int32 FramesRemaining = 0;      // actuated-value frames still to inject (> 0)
+		int32 LeadReleaseRemaining = 0; // released (zero) baseline frames injected BEFORE the value
 	};
 
 	class FPieInputHoldRegistry
@@ -115,12 +116,17 @@ namespace
 			EnsureTicker();
 		}
 
-		// Queue a repeated input injection. RepeatFrames of <= 1 means the handler already did
-		// the single injection; nothing is queued. RepeatFrames > 1 queues (RepeatFrames - 1)
-		// additional per-frame injections.
-		void SetInputHold(int32 PlayerIndex, const UInputAction* Action, const FInputActionValue& Value, int32 ExtraFrames)
+		// Queue a "press gesture": LeadReleaseFrames of a released (zero) value FIRST, then the
+		// actuated Value for ValueFrames consecutive frames. The leading release is what lets an
+		// explicit InputTriggerPressed (and Tap/Hold triggers) observe a clean not-actuated ->
+		// actuated edge on injected-only input — without it a single actuated injection never
+		// forms the press edge and Pressed-gated actions silently never fire. Every frame runs off
+		// the shared ticker so they land on CONSECUTIVE editor frames (two separate MCP calls do
+		// NOT — arbitrary frames elapse between them, so the edge is lost between the release and
+		// the press).
+		void SetInputHold(int32 PlayerIndex, const UInputAction* Action, const FInputActionValue& Value, int32 ValueFrames, int32 LeadReleaseFrames)
 		{
-			if (!Action || ExtraFrames <= 0)
+			if (!Action || ValueFrames <= 0)
 			{
 				return;
 			}
@@ -128,7 +134,8 @@ namespace
 			New.PlayerIndex = PlayerIndex;
 			New.Action = Action;
 			New.Value = Value;
-			New.FramesRemaining = ExtraFrames;
+			New.FramesRemaining = ValueFrames;
+			New.LeadReleaseRemaining = FMath::Max(0, LeadReleaseFrames);
 			HeldInputs.Add(New);
 			EnsureTicker();
 		}
@@ -200,7 +207,8 @@ namespace
 				}
 			}
 
-			// Re-inject repeated input actions.
+			// Drive queued input "press gestures": a leading released (zero) frame, then the
+			// actuated value for the remaining frames — on consecutive editor frames.
 			for (int32 Index = HeldInputs.Num() - 1; Index >= 0; --Index)
 			{
 				FHeldInput& H = HeldInputs[Index];
@@ -212,14 +220,26 @@ namespace
 						ULocalPlayer::GetSubsystemFromController<UEnhancedInputLocalPlayerSubsystem>(
 							ResolvePlayerController(PieWorld, H.PlayerIndex)))
 					{
-						Subsystem->InjectInputForAction(Action, H.Value, {}, {});
+						if (H.LeadReleaseRemaining > 0)
+						{
+							// Released baseline: sets the trigger's "last value" to not-actuated
+							// so the following actuated frame reads as a clean press edge.
+							const FInputActionValue Zero(H.Value.GetValueType(), FVector::ZeroVector);
+							Subsystem->InjectInputForAction(Action, Zero, {}, {});
+							--H.LeadReleaseRemaining;
+						}
+						else
+						{
+							Subsystem->InjectInputForAction(Action, H.Value, {}, {});
+							--H.FramesRemaining;
+						}
 					}
 					else
 					{
 						bDropped = true; // no subsystem — stop trying
 					}
 				}
-				if (bDropped || --H.FramesRemaining <= 0)
+				if (bDropped || (H.LeadReleaseRemaining <= 0 && H.FramesRemaining <= 0))
 				{
 					HeldInputs.RemoveAt(Index);
 				}
@@ -472,8 +492,10 @@ void FMonolithPieInputActions::RegisterActions(FMonolithToolRegistry& Registry)
 		     "running that action's modifiers and triggers as if real input arrived. MUTATES LIVE PIE STATE. "
 		     "input_action is a UInputAction asset path (/Game/...) or short asset name (registry-resolved; first match wins). "
 		     "value maps to FInputActionValue by JSON shape: bool -> Boolean, number -> Axis1D, array[2] -> Axis2D, array[3] -> Axis3D. "
-		     "Optional player_index (default 0); repeat_frames (default 1) re-injects the value each frame for that many frames. "
-		     "No-ops with a clean error when PIE is not running or the action asset cannot be resolved."),
+		     "The injection is a full PRESS GESTURE: one released (zero) baseline frame is injected first, then the value for repeat_frames "
+		     "consecutive frames — so button actions gated by an explicit InputTriggerPressed/Tap/Hold see a real not-actuated -> actuated edge "
+		     "and actually fire (a bare value injection never forms that edge). Default repeat_frames (1) is a single clean tap. "
+		     "Optional player_index (default 0). No-ops with a clean error when PIE is not running or the action asset cannot be resolved."),
 		FMonolithActionHandler::CreateStatic(&HandleInjectInputAction),
 		FParamSchemaBuilder()
 			.Required(TEXT("input_action"), TEXT("string"), TEXT("UInputAction asset path (/Game/...) or short asset name."))
@@ -601,25 +623,51 @@ FMonolithActionResult FMonolithPieInputActions::HandleInjectInputAction(const TS
 			TEXT("No player controller at player_index %d in the running PIE world"), PlayerIndex));
 	}
 
+	// Resolve the Enhanced Input local-player subsystem via the PIE controller's ULocalPlayer.
+	// Split the failure into two cases so the caller can tell "the local player isn't ready
+	// yet" (transient — retry a frame later) apart from "Enhanced Input isn't the active input
+	// system" (a project-config issue). GetSubsystemFromController folds both into one null.
+	const ULocalPlayer* LocalPlayer = PC->GetLocalPlayer();
+	if (!LocalPlayer)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Player %d controller ('%s') has no ULocalPlayer yet — PIE may not have finished spawning the local player (retry after a frame), "
+			     "or this controller is not a local player (net/dedicated-server mode)."),
+			PlayerIndex, *PC->GetName()));
+	}
 	UEnhancedInputLocalPlayerSubsystem* Subsystem =
-		ULocalPlayer::GetSubsystemFromController<UEnhancedInputLocalPlayerSubsystem>(PC);
+		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LocalPlayer);
 	if (!Subsystem)
 	{
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Player %d has no UEnhancedInputLocalPlayerSubsystem (is Enhanced Input the active input system?)"), PlayerIndex));
+			TEXT("Player %d has a ULocalPlayer but no UEnhancedInputLocalPlayerSubsystem (is Enhanced Input the active input system?)"), PlayerIndex));
 	}
 
-	// Inject once now; queue any additional per-frame injections.
-	Subsystem->InjectInputForAction(Action, ActionValue, {}, {});
-	if (RepeatFrames > 1)
+	// Queue the injection as a proper press gesture off the shared ticker: ONE released (zero)
+	// baseline frame, then the value for RepeatFrames consecutive frames. Injecting the value on
+	// its own never forms the not-actuated -> actuated edge an explicit InputTriggerPressed needs,
+	// so button/tap actions would report injected=true yet never fire. The leading release fixes
+	// that for Pressed/Tap/Hold while staying harmless for continuous (no-trigger) actions.
+	// (Subsystem was resolved above only to validate PIE readiness and surface clean errors.)
+	FPieInputHoldRegistry::Get().SetInputHold(PlayerIndex, Action, ActionValue, RepeatFrames, /*LeadReleaseFrames*/ 1);
+
+	// Echo what was actually injected (value + type) so callers can confirm, e.g., that an
+	// Axis1D scroll went in as +1 vs -1 without re-deriving it from the request.
+	const TCHAR* ValueTypeStr = TEXT("Axis3D");
+	switch (ActionValue.GetValueType())
 	{
-		FPieInputHoldRegistry::Get().SetInputHold(PlayerIndex, Action, ActionValue, RepeatFrames - 1);
+	case EInputActionValueType::Boolean: ValueTypeStr = TEXT("Boolean"); break;
+	case EInputActionValueType::Axis1D:  ValueTypeStr = TEXT("Axis1D");  break;
+	case EInputActionValueType::Axis2D:  ValueTypeStr = TEXT("Axis2D");  break;
+	case EInputActionValueType::Axis3D:  ValueTypeStr = TEXT("Axis3D");  break;
 	}
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("input_action"), Action->GetPathName());
 	Root->SetNumberField(TEXT("player_index"), PlayerIndex);
 	Root->SetNumberField(TEXT("repeat_frames"), RepeatFrames);
+	Root->SetStringField(TEXT("injected_value"), ActionValue.ToString());
+	Root->SetStringField(TEXT("value_type"), ValueTypeStr);
 	Root->SetBoolField(TEXT("injected"), true);
 	return FMonolithActionResult::Success(Root);
 }
