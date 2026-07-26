@@ -21,6 +21,9 @@
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Misc/PackageName.h"
 
 // --- Registration ---
 
@@ -141,6 +144,18 @@ void FMonolithBlueprintActions::RegisterActions()
 		FMonolithActionHandler::CreateStatic(&HandleGetInterfaces),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("export_digest"),
+		TEXT("Export a COMPACT human/AI-readable text digest of the ENTIRE Blueprint to a file — parent class, "
+		     "variables, own components, and every graph (event graph + functions + macros + collapsed composites "
+		     "via GetAllGraphs) with per-node id/class/title, wired pins (name -> targets / <- sources), and data-pin "
+		     "literals. Writes a .bp.txt next to the .uasset (or output_path) so it can be Read/grepped cheaply "
+		     "instead of many get_graph_data calls. Re-run to refresh after edits (it overwrites)."),
+		FMonolithActionHandler::CreateStatic(&HandleExportDigest),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Absolute output file path (default: <uasset dir>/<Name>.bp.txt)"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_construction_script"),
@@ -849,6 +864,159 @@ FMonolithActionResult FMonolithBlueprintActions::HandleFindInBlueprint(const TSh
 	Root->SetBoolField(TEXT("truncated"), bTruncated);
 	Root->SetArrayField(TEXT("results"), Results);
 
+	return FMonolithActionResult::Success(Root);
+}
+
+// --- export_digest ---
+
+FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithBlueprintInternal;
+
+	FString AssetPath;
+	UBlueprint* BP = LoadBlueprint(Params, AssetPath);
+	if (!BP)
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FString S;
+	S.Reserve(64 * 1024);
+	S += FString::Printf(TEXT("# %s  (%s)\n"), *BP->GetName(), *AssetPath);
+	if (BP->ParentClass)
+	{
+		S += FString::Printf(TEXT("parent: %s\n"), *BP->ParentClass->GetName());
+	}
+
+	// Variables declared on this Blueprint.
+	if (BP->NewVariables.Num() > 0)
+	{
+		S += TEXT("\n## VARIABLES\n");
+		for (const FBPVariableDescription& Var : BP->NewVariables)
+		{
+			S += FString::Printf(TEXT("  %s : %s%s\n"),
+				*Var.VarName.ToString(),
+				*ContainerPrefix(Var.VarType), *PinTypeToString(Var.VarType));
+		}
+	}
+
+	// Components added by THIS Blueprint's SCS (inherited ones come from the parent class listed above).
+	if (BP->SimpleConstructionScript)
+	{
+		const TArray<USCS_Node*> ScsNodes = BP->SimpleConstructionScript->GetAllNodes();
+		if (ScsNodes.Num() > 0)
+		{
+			S += TEXT("\n## COMPONENTS (this BP's own SCS)\n");
+			for (const USCS_Node* N : ScsNodes)
+			{
+				if (!N) continue;
+				S += FString::Printf(TEXT("  %s : %s\n"),
+					*N->GetVariableName().ToString(),
+					N->ComponentClass ? *N->ComponentClass->GetName() : TEXT("?"));
+			}
+		}
+	}
+
+	// Every graph, including collapsed composites / macro sub-graphs (GetAllGraphs flattens them).
+	TArray<UEdGraph*> AllGraphs;
+	BP->GetAllGraphs(AllGraphs);
+	for (UEdGraph* Graph : AllGraphs)
+	{
+		if (!Graph) continue;
+		S += FString::Printf(TEXT("\n=== %s [%s]  (%d nodes) ===\n"),
+			*Graph->GetName(), *GraphTypeLabel(BP, Graph), Graph->Nodes.Num());
+
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+
+			// Comment boxes: one compact line (they document intent).
+			if (const UEdGraphNode_Comment* Cmt = Cast<UEdGraphNode_Comment>(Node))
+			{
+				FString C = Cmt->NodeComment.Left(160);
+				C.ReplaceInline(TEXT("\n"), TEXT(" "));
+				C.ReplaceInline(TEXT("\r"), TEXT(""));
+				S += FString::Printf(TEXT("\n// [%s] %s\n"), *Node->GetName(), *C);
+				continue;
+			}
+
+			FString Title = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+			Title.ReplaceInline(TEXT("\n"), TEXT(" "));
+			Title.ReplaceInline(TEXT("\r"), TEXT(""));
+
+			FString ClassName = Node->GetClass()->GetName();
+			ClassName.RemoveFromStart(TEXT("K2Node_"));
+
+			FString Extra;
+			if (const UK2Node_CallFunction* CF = Cast<UK2Node_CallFunction>(Node))
+			{
+				Extra = FString::Printf(TEXT("  fn=%s"), *CF->FunctionReference.GetMemberName().ToString());
+			}
+
+			S += FString::Printf(TEXT("\n[%s] %s <%s>%s\n"), *Node->GetName(), *Title, *ClassName, *Extra);
+
+			for (const UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin || Pin->bHidden) continue;
+				const bool bExec = (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
+				if (Pin->LinkedTo.Num() > 0)
+				{
+					TArray<FString> Tos;
+					for (const UEdGraphPin* L : Pin->LinkedTo)
+					{
+						if (!L || !L->GetOwningNode()) continue;
+						Tos.Add(FString::Printf(TEXT("%s.%s"),
+							*L->GetOwningNode()->GetName(), *L->PinName.ToString()));
+					}
+					S += FString::Printf(TEXT("   %s%s %s %s %s\n"),
+						bExec ? TEXT("*") : TEXT(" "),
+						Pin->Direction == EGPD_Output ? TEXT(">") : TEXT("<"),
+						*Pin->PinName.ToString(),
+						Pin->Direction == EGPD_Output ? TEXT("->") : TEXT("<-"),
+						*FString::Join(Tos, TEXT(", ")));
+				}
+				else if (Pin->Direction == EGPD_Input && !bExec)
+				{
+					// Hardcoded literal on an unconnected data input (e.g. a row name, a class).
+					if (Pin->DefaultObject)
+					{
+						S += FString::Printf(TEXT("    = %s: %s\n"), *Pin->PinName.ToString(), *Pin->DefaultObject->GetName());
+					}
+					else if (!Pin->DefaultValue.IsEmpty())
+					{
+						S += FString::Printf(TEXT("    = %s: %s\n"), *Pin->PinName.ToString(), *Pin->DefaultValue);
+					}
+				}
+			}
+		}
+	}
+
+	// Resolve the output path: explicit param, else next to the .uasset as <Name>.bp.txt.
+	FString OutPath = Params->GetStringField(TEXT("output_path"));
+	if (OutPath.IsEmpty())
+	{
+		const FString PackageName = BP->GetOutermost()->GetName();
+		FString Filename;
+		if (FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+		{
+			OutPath = Filename + TEXT(".bp.txt");
+		}
+		else
+		{
+			OutPath = FPaths::ProjectSavedDir() / TEXT("BlueprintDigests") / (BP->GetName() + TEXT(".bp.txt"));
+		}
+	}
+
+	if (!FFileHelper::SaveStringToFile(S, *OutPath))
+	{
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to write digest: %s"), *OutPath));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("output_path"), OutPath);
+	Root->SetNumberField(TEXT("graphs"), AllGraphs.Num());
+	Root->SetNumberField(TEXT("bytes"), S.Len());
 	return FMonolithActionResult::Success(Root);
 }
 

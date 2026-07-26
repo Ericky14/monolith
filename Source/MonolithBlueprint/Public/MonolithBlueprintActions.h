@@ -37,6 +37,9 @@ public:
 	// class, comments, function names, pin names/values/objects, and legacy input keys.
 	static FMonolithActionResult HandleFindInBlueprint(const TSharedPtr<FJsonObject>& Params);
 
+	// Export a compact all-graphs text digest of the Blueprint to a .bp.txt file (cheap to Read/grep).
+	static FMonolithActionResult HandleExportDigest(const TSharedPtr<FJsonObject>& Params);
+
 private:
 	static UBlueprint* LoadBlueprint(const TSharedPtr<FJsonObject>& Params, FString& OutAssetPath);
 };
