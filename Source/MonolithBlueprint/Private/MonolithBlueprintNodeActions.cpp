@@ -28,6 +28,7 @@
 #include "K2Node_ClearDelegate.h"
 #include "K2Node_CallDelegate.h"
 #include "K2Node_Self.h"
+#include "K2Node_CreateDelegate.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MakeStruct.h"
 #include "K2Node_BreakStruct.h"
@@ -281,7 +282,7 @@ bool MonolithBlueprintInternal::HasCustomEventNamed(UBlueprint* BP, FName EventN
 void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_node"),
-		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select. ComponentBoundEvent (binds an event entry node to a component's BlueprintAssignable multicast delegate; requires component_name + delegate_property_name), AddDelegate (binds an event to a BlueprintAssignable multicast delegate; \"Bind Event to ...\" node), RemoveDelegate (\"Unbind Event from ...\" — removes one previously bound event), ClearDelegate (\"Unbind all Events from ...\" — clears every bound listener), CallDelegate (\"Call ...\" — broadcasts a BP-resident multicast delegate to all listeners)"),
+		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select. ComponentBoundEvent (binds an event entry node to a component's BlueprintAssignable multicast delegate; requires component_name + delegate_property_name), AddDelegate (binds an event to a BlueprintAssignable multicast delegate; \"Bind Event to ...\" node), RemoveDelegate (\"Unbind Event from ...\" — removes one previously bound event), ClearDelegate (\"Unbind all Events from ...\" — clears every bound listener), CallDelegate (\"Call ...\" — broadcasts a BP-resident multicast delegate to all listeners), CreateDelegate (\"Create Event\" — the delegate VALUE that AddDelegate/RemoveDelegate consume; requires function_name/event_name naming the function or custom event to point at, and auto-wires a Self node)"),
 		FMonolithActionHandler::CreateStatic(&HandleAddNode),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),       TEXT("Blueprint asset path"))
@@ -1182,6 +1183,60 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 
 		NewNode = AddNode;
 	}
+	// ---- CreateDelegate ----
+	// The "Create Event" node that produces the delegate value AddDelegate/RemoveDelegate consume.
+	//
+	// It is useless until told WHICH function/event to point at, and that target is a node property
+	// (SelectedFunctionName), not a pin — so it cannot be set with set_pin_default. Without this branch
+	// the node can be spawned but never configured, which makes runtime delegate binding unreachable
+	// through MCP: you can add the bind node, but not the event reference it needs.
+	else if (NodeType == TEXT("CreateDelegate"))
+	{
+		FString TargetFuncName = Params->GetStringField(TEXT("function_name"));
+		if (TargetFuncName.IsEmpty())
+		{
+			Params->TryGetStringField(TEXT("event_name"), TargetFuncName);
+		}
+		if (TargetFuncName.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("CreateDelegate requires function_name (or event_name): the function or custom event "
+					 "this Create Event node should point at."));
+		}
+
+		UK2Node_CreateDelegate* DelegateNode = NewObject<UK2Node_CreateDelegate>(Graph);
+		DelegateNode->NodePosX = PosX;
+		DelegateNode->NodePosY = PosY;
+		Graph->AddNode(DelegateNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		DelegateNode->AllocateDefaultPins();
+
+		// Self-context by default: the event being bound lives on THIS Blueprint. Wire the node's self
+		// pin to a Self node, which is what the editor does when you drag off a delegate pin.
+		UK2Node_Self* SelfNode = NewObject<UK2Node_Self>(Graph);
+		SelfNode->NodePosX = PosX - 180;
+		SelfNode->NodePosY = PosY + 60;
+		Graph->AddNode(SelfNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+		SelfNode->AllocateDefaultPins();
+
+		if (UEdGraphPin* SelfOut = SelfNode->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Output))
+		{
+			if (UEdGraphPin* DelegateSelfIn = DelegateNode->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input))
+			{
+				DelegateSelfIn->MakeLinkTo(SelfOut);
+			}
+		}
+
+		// Record the target, but do NOT call HandleAnyChange here.
+		//
+		// A Create Event node validates its target against the signature expected by whatever its
+		// OutputDelegate is plugged into — and at creation time nothing is plugged in yet, so the
+		// validation finds no signature, decides the name is unresolvable, and CLEARS it. The name only
+		// sticks once the delegate pin is connected, which is why connect_pins re-resolves any
+		// CreateDelegate it touches (see MonolithBlueprintInternal::RefreshCreateDelegate).
+		DelegateNode->SetFunction(FName(*TargetFuncName));
+
+		NewNode = DelegateNode;
+	}
 	// ---- RemoveDelegate ----
 	// "Unbind Event from <DelegateProperty>" graph node. Removes a previously
 	// bound event at runtime. Same shape as AddDelegate — caller wires the node's
@@ -1759,6 +1814,19 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 			TEXT("TryCreateConnection failed for '%s.%s' -> '%s.%s'"),
 			*SourceNodeId, *SourcePinName, *TargetNodeId, *TargetPinName));
 	}
+
+	// A Create Event node can only resolve its selected function once its delegate pin is connected —
+	// the connection is what tells it which signature to match. The editor re-validates on connect; do
+	// the same here, or the node compiles as "missing a function/event name" despite having been told one.
+	auto RefreshCreateDelegate = [](UEdGraphNode* Node)
+	{
+		if (UK2Node_CreateDelegate* CreateDelegateNode = Cast<UK2Node_CreateDelegate>(Node))
+		{
+			CreateDelegateNode->HandleAnyChange(/*bForceModify=*/true);
+		}
+	};
+	RefreshCreateDelegate(SrcPin->GetOwningNode());
+	RefreshCreateDelegate(TgtPin->GetOwningNode());
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 

@@ -7,6 +7,8 @@
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_Event.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_EditablePinBase.h"
 #include "K2Node_CreateDelegate.h"
 #include "EdGraphSchema_K2.h"
 
@@ -99,13 +101,17 @@ void FMonolithBlueprintGraphActions::RegisterActions(FMonolithToolRegistry& Regi
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("set_function_params"),
-		TEXT("Add input/output parameters to a Blueprint function"),
+		TEXT("Add or REPLACE parameters on a Blueprint function OR a custom event. Resolves function_name "
+			 "against function graphs first, then against custom events in any graph (including collapsed "
+			 "composites) — which is how you give a custom event the signature it needs to be bound to a "
+			 "multicast delegate. Re-using a parameter name REPLACES it rather than appending a suffixed "
+			 "duplicate. Custom events reject 'outputs' (events return nothing)."),
 		FMonolithActionHandler::CreateStatic(&HandleSetFunctionParams),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
-			.Required(TEXT("function_name"), TEXT("string"), TEXT("Function graph name"))
-			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of {name, type} objects for inputs"))
-			.Optional(TEXT("outputs"), TEXT("array"), TEXT("Array of {name, type} objects for outputs"))
+			.Required(TEXT("function_name"), TEXT("string"), TEXT("Function graph name, or custom event name"))
+			.Optional(TEXT("inputs"), TEXT("array"), TEXT("Array of {name, type} objects for inputs (event params)"))
+			.Optional(TEXT("outputs"), TEXT("array"), TEXT("Array of {name, type} objects for outputs (functions only)"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("implement_interface"),
@@ -775,7 +781,6 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 		return FMonolithActionResult::Error(TEXT("Missing required parameter: function_name"));
 	}
 
-	// Only function graphs can have params set this way
 	UEdGraph* Graph = nullptr;
 	for (UEdGraph* G : BP->FunctionGraphs)
 	{
@@ -785,25 +790,80 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 			break;
 		}
 	}
-	if (!Graph)
-	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Function not found: %s"), *FuncName));
-	}
 
 	// Find entry and result nodes
 	UK2Node_FunctionEntry* EntryNode = nullptr;
 	UK2Node_FunctionResult* ResultNode = nullptr;
-	for (UEdGraphNode* Node : Graph->Nodes)
+	if (Graph)
 	{
-		if (!EntryNode) EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-		if (!ResultNode) ResultNode = Cast<UK2Node_FunctionResult>(Node);
-		if (EntryNode && ResultNode) break;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!EntryNode) EntryNode = Cast<UK2Node_FunctionEntry>(Node);
+			if (!ResultNode) ResultNode = Cast<UK2Node_FunctionResult>(Node);
+			if (EntryNode && ResultNode) break;
+		}
 	}
 
+	// Not a function graph? Try a CUSTOM EVENT of that name.
+	//
+	// Custom events are UK2Node_EditablePinBase just like a function entry, so their parameters are
+	// added exactly the same way — but they live as nodes inside an ubergraph (often inside a collapsed
+	// composite), not as their own FunctionGraph. Without this branch there is no way to give a custom
+	// event a signature through MCP at all, which blocks binding one to any multicast delegate.
+	UK2Node_CustomEvent* CustomEventNode = nullptr;
 	if (!EntryNode)
 	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("No FunctionEntry node found in: %s"), *FuncName));
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+		for (UEdGraph* G : AllGraphs)
+		{
+			if (!G) continue;
+			for (UEdGraphNode* Node : G->Nodes)
+			{
+				UK2Node_CustomEvent* Evt = Cast<UK2Node_CustomEvent>(Node);
+				if (Evt && Evt->CustomFunctionName.ToString() == FuncName)
+				{
+					CustomEventNode = Evt;
+					Graph = G;
+					break;
+				}
+			}
+			if (CustomEventNode) break;
+		}
 	}
+
+	if (!EntryNode && !CustomEventNode)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("No function graph or custom event named '%s' in %s"), *FuncName, *AssetPath));
+	}
+
+	// The node that owns input parameters: a function's entry node, or the custom event itself.
+	// In BOTH cases parameters are created as EGPD_Output pins (data flows OUT of the entry/event).
+	UK2Node_EditablePinBase* InputOwner = EntryNode
+		? static_cast<UK2Node_EditablePinBase*>(EntryNode)
+		: static_cast<UK2Node_EditablePinBase*>(CustomEventNode);
+
+	/**
+	 * Drop an existing user-defined pin of the same name first, so repeating a call REPLACES a
+	 * parameter instead of appending a second one. Without this, correcting a mistyped parameter left
+	 * the original behind and UE disambiguated by suffixing ("DamageType" + "DamageType1"), silently
+	 * producing a two-parameter signature nobody asked for.
+	 */
+	auto ReplaceUserPin = [](UK2Node_EditablePinBase* Owner, const FName& PinName,
+		const FEdGraphPinType& PinType, EEdGraphPinDirection Direction)
+	{
+		if (!Owner) return;
+		for (const TSharedPtr<FUserPinInfo>& Existing : Owner->UserDefinedPins)
+		{
+			if (Existing.IsValid() && Existing->PinName == PinName)
+			{
+				Owner->RemoveUserDefinedPin(Existing);
+				break;
+			}
+		}
+		Owner->CreateUserDefinedPin(PinName, PinType, Direction);
+	};
 
 	int32 InputsAdded = 0;
 	int32 OutputsAdded = 0;
@@ -824,7 +884,7 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 			if (PinName.IsEmpty() || TypeStr.IsEmpty()) continue;
 
 			FEdGraphPinType PinType = MonolithBlueprintInternal::ParsePinTypeFromString(TypeStr);
-			EntryNode->CreateUserDefinedPin(FName(*PinName), PinType, EGPD_Output);
+			ReplaceUserPin(InputOwner, FName(*PinName), PinType, EGPD_Output);
 			++InputsAdded;
 		}
 	}
@@ -833,6 +893,14 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 	const TArray<TSharedPtr<FJsonValue>>* OutputsArray = nullptr;
 	if (Params->TryGetArrayField(TEXT("outputs"), OutputsArray) && OutputsArray)
 	{
+		// A custom event is fire-and-forget: it has no return path, so outputs are meaningless there.
+		if (CustomEventNode)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("'%s' is a custom event and cannot have output parameters (events do not return values)."),
+				*FuncName));
+		}
+
 		if (!ResultNode)
 		{
 			// Create a result node if one doesn't exist

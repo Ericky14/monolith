@@ -17,13 +17,75 @@
 #include "UObject/UObjectHash.h"
 #include "K2Node.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
+#include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_CreateDelegate.h"
+#include "K2Node_MacroInstance.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "Components/ActorComponent.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/InheritableComponentHandler.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/PackageName.h"
+
+namespace MonolithDigestDetail
+{
+	/**
+	 * Net/authority specifiers on a Blueprint function or custom event, as the digest's compact suffix.
+	 * These are otherwise invisible outside the Details panel, which made every "this multicasts" claim
+	 * about an FCS graph an inference from the MC_/SR_ naming convention rather than a fact.
+	 */
+	static FString NetFlagsLabel(EFunctionFlags Flags)
+	{
+		TArray<FString> Parts;
+		if (Flags & FUNC_NetMulticast)      { Parts.Add(TEXT("Multicast")); }
+		else if (Flags & FUNC_NetServer)    { Parts.Add(TEXT("RunOnServer")); }
+		else if (Flags & FUNC_NetClient)    { Parts.Add(TEXT("RunOnOwningClient")); }
+		if (!Parts.IsEmpty())
+		{
+			// Reliability only means anything on a replicated function, and the flag is absent (not
+			// negated) for unreliable ones -- so report it explicitly either way.
+			Parts.Add((Flags & FUNC_NetReliable) ? TEXT("Reliable") : TEXT("Unreliable"));
+		}
+		if (Flags & FUNC_BlueprintAuthorityOnly) { Parts.Add(TEXT("AuthorityOnly")); }
+		if (Flags & FUNC_BlueprintCosmetic)      { Parts.Add(TEXT("Cosmetic")); }
+		if (Flags & FUNC_Static)                 { Parts.Add(TEXT("Static")); }
+		if (Flags & FUNC_BlueprintPure)          { Parts.Add(TEXT("Pure")); }
+		return Parts.IsEmpty() ? FString() : FString::Join(Parts, TEXT("|"));
+	}
+
+	/** Export a property's value on one object as text, trimmed for a one-line digest entry. */
+	static FString ValueToText(const FProperty* Prop, const void* Container, int32 MaxLen = 160)
+	{
+		if (!Prop || !Container) { return FString(); }
+		FString Out;
+		Prop->ExportTextItem_Direct(Out, Prop->ContainerPtrToValuePtr<void>(Container), nullptr, nullptr, PPF_None);
+		Out.ReplaceInline(TEXT("\n"), TEXT(" "));
+		Out.ReplaceInline(TEXT("\r"), TEXT(""));
+		return (Out.Len() > MaxLen) ? (Out.Left(MaxLen) + TEXT("...")) : Out;
+	}
+
+	/**
+	 * Properties on Obj whose value differs from Archetype's -- i.e. what this Blueprint actually
+	 * overrode. Used for SCS component templates, where the interesting question is never "what is
+	 * the CDO default" but "did this child BP change it".
+	 */
+	static void AppendOverrides(FString& S, const UObject* Obj, const UObject* Archetype, const TCHAR* Indent)
+	{
+		if (!Obj || !Archetype) { return; }
+		const UClass* Class = Obj->GetClass();
+		for (FProperty* Prop = Class->PropertyLink; Prop; Prop = Prop->PropertyLinkNext)
+		{
+			if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient | CPF_Deprecated)) { continue; }
+			if (Prop->Identical_InContainer(Obj, Archetype)) { continue; }
+			S += FString::Printf(TEXT("%s%s = %s   (default %s)\n"), Indent, *Prop->GetName(),
+				*ValueToText(Prop, Obj), *ValueToText(Prop, Archetype, 80));
+		}
+	}
+}
 
 // --- Registration ---
 
@@ -880,6 +942,8 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
+	using namespace MonolithDigestDetail;
+
 	FString S;
 	S.Reserve(64 * 1024);
 	S += FString::Printf(TEXT("# %s  (%s)\n"), *BP->GetName(), *AssetPath);
@@ -888,19 +952,73 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 		S += FString::Printf(TEXT("parent: %s\n"), *BP->ParentClass->GetName());
 	}
 
-	// Variables declared on this Blueprint.
+	// Class-level replication, read off the generated class's CDO. Without this, whether a component
+	// "replicates at all" -- which decides if any of its RPCs route -- is invisible in the digest.
+	UObject* CDO = BP->GeneratedClass ? BP->GeneratedClass->GetDefaultObject() : nullptr;
+	if (const AActor* ActorCDO = Cast<AActor>(CDO))
+	{
+		S += FString::Printf(TEXT("replication: bReplicates=%s bAlwaysRelevant=%s bNetLoadOnClient=%s bReplicateMovement=%s\n"),
+			ActorCDO->GetIsReplicated() ? TEXT("true") : TEXT("false"),
+			ActorCDO->bAlwaysRelevant ? TEXT("true") : TEXT("false"),
+			ActorCDO->bNetLoadOnClient ? TEXT("true") : TEXT("false"),
+			ActorCDO->IsReplicatingMovement() ? TEXT("true") : TEXT("false"));
+	}
+	else if (const UActorComponent* CompCDO = Cast<UActorComponent>(CDO))
+	{
+		S += FString::Printf(TEXT("replication: bReplicates=%s bAutoActivate=%s bCanEverTick=%s\n"),
+			CompCDO->GetIsReplicated() ? TEXT("true") : TEXT("false"),
+			CompCDO->bAutoActivate ? TEXT("true") : TEXT("false"),
+			CompCDO->PrimaryComponentTick.bCanEverTick ? TEXT("true") : TEXT("false"));
+	}
+	else
+	{
+		// Say so explicitly rather than emitting nothing. A silently ABSENT replication line is
+		// ambiguous -- it reads identically to a digest exported before this metadata existed, and a
+		// reader auditing "which digests are stale?" will wrongly list every widget, AnimNotify,
+		// GameplayCueNotify and BlueprintFunctionLibrary as needing re-export. None of them can
+		// replicate, so for these classes the absence IS the fact.
+		S += FString::Printf(TEXT("replication: n/a (%s is not an Actor or ActorComponent)\n"),
+			CDO ? *CDO->GetClass()->GetName() : TEXT("<no CDO>"));
+	}
+
+	// Variables declared on this Blueprint, with their replication specifier AND their CDO default.
+	// The default is the point: a digest that lists only types cannot tell you whether e.g. a poise
+	// regen delay is 1.5 or 0, so every ported constant would be a guess.
 	if (BP->NewVariables.Num() > 0)
 	{
 		S += TEXT("\n## VARIABLES\n");
 		for (const FBPVariableDescription& Var : BP->NewVariables)
 		{
-			S += FString::Printf(TEXT("  %s : %s%s\n"),
+			FString Suffix;
+			if (Var.PropertyFlags & CPF_Net)
+			{
+				Suffix += (Var.PropertyFlags & CPF_RepNotify)
+					? FString::Printf(TEXT("  [RepNotify -> %s]"), *Var.RepNotifyFunc.ToString())
+					: FString(TEXT("  [Replicated]"));
+			}
+
+			// Prefer the live CDO value over FBPVariableDescription::DefaultValue: the latter is only
+			// populated for some literal types and is empty for structs/objects.
+			FString DefaultText;
+			if (CDO)
+			{
+				if (const FProperty* Prop = BP->GeneratedClass->FindPropertyByName(Var.VarName))
+				{
+					DefaultText = ValueToText(Prop, CDO);
+				}
+			}
+			if (DefaultText.IsEmpty()) { DefaultText = Var.DefaultValue; }
+
+			S += FString::Printf(TEXT("  %s : %s%s%s%s\n"),
 				*Var.VarName.ToString(),
-				*ContainerPrefix(Var.VarType), *PinTypeToString(Var.VarType));
+				*ContainerPrefix(Var.VarType), *PinTypeToString(Var.VarType),
+				DefaultText.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" = %s"), *DefaultText),
+				*Suffix);
 		}
 	}
 
-	// Components added by THIS Blueprint's SCS (inherited ones come from the parent class listed above).
+	// Components added by THIS Blueprint's SCS (inherited ones come from the parent class listed above),
+	// each followed by the properties this BP actually changed from the component class's own defaults.
 	if (BP->SimpleConstructionScript)
 	{
 		const TArray<USCS_Node*> ScsNodes = BP->SimpleConstructionScript->GetAllNodes();
@@ -913,6 +1031,39 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 				S += FString::Printf(TEXT("  %s : %s\n"),
 					*N->GetVariableName().ToString(),
 					N->ComponentClass ? *N->ComponentClass->GetName() : TEXT("?"));
+
+				if (const UActorComponent* Template = Cast<UActorComponent>(N->ComponentTemplate))
+				{
+					AppendOverrides(S, Template, Template->GetArchetype(), TEXT("      ! "));
+				}
+			}
+		}
+	}
+
+	// Inherited-component overrides: the Details-panel edits this BP makes to a component declared by a
+	// PARENT's SCS. They live in a separate table (the InheritableComponentHandler) and are invisible to
+	// every SCS-walking tool -- this project has already been bitten by assuming a parent's SCS default
+	// propagated to a child. Diffing against each template's archetype (= the parent's template) makes
+	// the answer exactly "what this Blueprint changed".
+	if (const UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(BP->GeneratedClass))
+	{
+		if (BPGC->InheritableComponentHandler)
+		{
+			TArray<UActorComponent*> Overridden;
+			BPGC->InheritableComponentHandler->GetAllTemplates(Overridden);
+
+			FString Section;
+			for (const UActorComponent* Template : Overridden)
+			{
+				if (!Template) continue;
+				Section += FString::Printf(TEXT("  %s : %s\n"),
+					*Template->GetName(), *Template->GetClass()->GetName());
+				AppendOverrides(Section, Template, Template->GetArchetype(), TEXT("      ! "));
+			}
+			if (!Section.IsEmpty())
+			{
+				S += TEXT("\n## INHERITED COMPONENT OVERRIDES (parent-SCS components edited here)\n");
+				S += Section;
 			}
 		}
 	}
@@ -923,8 +1074,20 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 	for (UEdGraph* Graph : AllGraphs)
 	{
 		if (!Graph) continue;
-		S += FString::Printf(TEXT("\n=== %s [%s]  (%d nodes) ===\n"),
-			*Graph->GetName(), *GraphTypeLabel(BP, Graph), Graph->Nodes.Num());
+		// A function graph carries its net/authority specifiers on its FunctionEntry node's ExtraFlags.
+		FString GraphNet;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (const UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
+			{
+				GraphNet = NetFlagsLabel(static_cast<EFunctionFlags>(Entry->GetExtraFlags()));
+				break;
+			}
+		}
+
+		S += FString::Printf(TEXT("\n=== %s [%s]  (%d nodes)%s ===\n"),
+			*Graph->GetName(), *GraphTypeLabel(BP, Graph), Graph->Nodes.Num(),
+			GraphNet.IsEmpty() ? TEXT("") : *FString::Printf(TEXT("  <%s>"), *GraphNet));
 
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
@@ -951,6 +1114,35 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 			if (const UK2Node_CallFunction* CF = Cast<UK2Node_CallFunction>(Node))
 			{
 				Extra = FString::Printf(TEXT("  fn=%s"), *CF->FunctionReference.GetMemberName().ToString());
+			}
+			else if (const UK2Node_Event* Ev = Cast<UK2Node_Event>(Node))
+			{
+				// The Replicates dropdown on a custom event. This is the ONLY machine-readable source for
+				// it -- naming conventions like MC_/SR_ are convention, not a specifier.
+				const FString EventNet = NetFlagsLabel(static_cast<EFunctionFlags>(Ev->FunctionFlags));
+				if (!EventNet.IsEmpty())
+				{
+					Extra = FString::Printf(TEXT("  net=%s"), *EventNet);
+				}
+			}
+			else if (const UK2Node_CreateDelegate* CD = Cast<UK2Node_CreateDelegate>(Node))
+			{
+				// A "Create Event" node renders as the bare title "Create Event" -- the function it
+				// actually binds lives only in SelectedFunctionName. Without this, every timer and
+				// every delegate binding has to be identified by elimination from surrounding nodes,
+				// which is how a whole class of wrong conclusions gets made.
+				const FName Bound = CD->GetFunctionName();
+				Extra = FString::Printf(TEXT("  binds=%s"),
+					Bound.IsNone() ? TEXT("<UNBOUND>") : *Bound.ToString());
+			}
+			else if (const UK2Node_MacroInstance* MI = Cast<UK2Node_MacroInstance>(Node))
+			{
+				// Macro instances (Switch Has Authority, ForEachLoop, IsValid, ...) also title
+				// generically in some cases; record the macro graph they instance.
+				if (const UEdGraph* MacroGraph = MI->GetMacroGraph())
+				{
+					Extra = FString::Printf(TEXT("  macro=%s"), *MacroGraph->GetName());
+				}
 			}
 
 			S += FString::Printf(TEXT("\n[%s] %s <%s>%s\n"), *Node->GetName(), *Title, *ClassName, *Extra);
@@ -985,6 +1177,18 @@ FMonolithActionResult FMonolithBlueprintActions::HandleExportDigest(const TShare
 					else if (!Pin->DefaultValue.IsEmpty())
 					{
 						S += FString::Printf(TEXT("    = %s: %s\n"), *Pin->PinName.ToString(), *Pin->DefaultValue);
+					}
+					else if (!Pin->DefaultTextValue.IsEmpty())
+					{
+						// TEXT-typed pins keep their literal in a THIRD slot. Omitting it made an authored
+						// FText indistinguishable from an empty one, which is how a reader concluded that
+						// several WB_CombatText / WB_StatusCombatText options rendered blank when they in
+						// fact carry authored words ("Block", "Parry", "Frozen", ...).
+						FString TextLiteral = Pin->DefaultTextValue.ToString();
+						TextLiteral.ReplaceInline(TEXT("\n"), TEXT(" "));
+						TextLiteral.ReplaceInline(TEXT("\r"), TEXT(""));
+						S += FString::Printf(TEXT("    = %s: \"%s\"  (FText)\n"),
+							*Pin->PinName.ToString(), *TextLiteral);
 					}
 				}
 			}
