@@ -35,6 +35,9 @@
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MakeStruct.h"
 #include "K2Node_BreakStruct.h"
+#include "K2Node_EnumEquality.h"
+#include "K2Node_EnumInequality.h"
+#include "K2Node_CommutativeAssociativeBinaryOperator.h"
 #include "K2Node_SwitchEnum.h"
 #include "K2Node_SwitchInteger.h"
 #include "K2Node_SwitchString.h"
@@ -121,6 +124,11 @@ static const TMap<FString, FNodeAlias>& GetNodeAliases()
 		Aliases.Add(TEXT("makestruct"),        {TEXT("MakeStruct"), {}});
 		Aliases.Add(TEXT("break_struct"),      {TEXT("BreakStruct"), {}});
 		Aliases.Add(TEXT("breakstruct"),       {TEXT("BreakStruct"), {}});
+		Aliases.Add(TEXT("enum_equality"),     {TEXT("EnumEquality"), {}});
+		Aliases.Add(TEXT("equal_enum"),        {TEXT("EnumEquality"), {}});
+		Aliases.Add(TEXT("enumequality"),      {TEXT("EnumEquality"), {}});
+		Aliases.Add(TEXT("enum_inequality"),   {TEXT("EnumInequality"), {}});
+		Aliases.Add(TEXT("not_equal_enum"),    {TEXT("EnumInequality"), {}});
 		Aliases.Add(TEXT("switch_enum"),       {TEXT("SwitchOnEnum"), {}});
 		Aliases.Add(TEXT("switchonenum"),      {TEXT("SwitchOnEnum"), {}});
 		Aliases.Add(TEXT("switch_on_enum"),    {TEXT("SwitchOnEnum"), {}});
@@ -285,11 +293,11 @@ bool MonolithBlueprintInternal::HasCustomEventNamed(UBlueprint* BP, FName EventN
 void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_node"),
-		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select. ComponentBoundEvent (binds an event entry node to a component's BlueprintAssignable multicast delegate; requires component_name + delegate_property_name), AddDelegate (binds an event to a BlueprintAssignable multicast delegate; \"Bind Event to ...\" node), RemoveDelegate (\"Unbind Event from ...\" — removes one previously bound event), ClearDelegate (\"Unbind all Events from ...\" — clears every bound listener), CallDelegate (\"Call ...\" — broadcasts a BP-resident multicast delegate to all listeners), CreateDelegate (\"Create Event\" — the delegate VALUE that AddDelegate/RemoveDelegate consume; requires function_name/event_name naming the function or custom event to point at, and auto-wires a Self node)"),
+		TEXT("Add a new node to a Blueprint graph. Supports CallFunction, VariableGet, VariableSet, CustomEvent, Branch, Sequence, MacroInstance, SpawnActorFromClass, DynamicCast, Self, Return, MakeStruct, BreakStruct, SwitchOnEnum, SwitchOnInt, SwitchOnString, FormatText, MakeArray, Select, EnumEquality / EnumInequality node types. Also supports shorthand aliases: ForEachLoop, ForLoop, ForLoopWithBreak, DoOnce, FlipFlop, Gate (macro shortcuts), IsValid, Delay, RetriggerableDelay (function shortcuts), make_struct, break_struct, switch_enum, switch_int, switch_string, format_text, make_array, select. ComponentBoundEvent (binds an event entry node to a component's BlueprintAssignable multicast delegate; requires component_name + delegate_property_name), AddDelegate (binds an event to a BlueprintAssignable multicast delegate; \"Bind Event to ...\" node), RemoveDelegate (\"Unbind Event from ...\" — removes one previously bound event), ClearDelegate (\"Unbind all Events from ...\" — clears every bound listener), CallDelegate (\"Call ...\" — broadcasts a BP-resident multicast delegate to all listeners), CreateDelegate (\"Create Event\" — the delegate VALUE that AddDelegate/RemoveDelegate consume; requires function_name/event_name naming the function or custom event to point at, and auto-wires a Self node)"),
 		FMonolithActionHandler::CreateStatic(&HandleAddNode),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),       TEXT("Blueprint asset path"))
-			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select. Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate"))
+			.Required(TEXT("node_type"),         TEXT("string"),  TEXT("Node type: CallFunction (or 'function'/'call'), VariableGet (or 'get'), VariableSet (or 'set'), CustomEvent (or 'event'), Branch (or 'if'), Sequence, MacroInstance (or 'macro'), SpawnActorFromClass (or 'spawn'), DynamicCast (or 'cast'), Self, Return, MakeStruct (or 'make_struct'), BreakStruct (or 'break_struct'), SwitchOnEnum (or 'switch_enum'), SwitchOnInt (or 'switch_int'), SwitchOnString (or 'switch_string'), FormatText (or 'format_text'), MakeArray (or 'make_array'), Select, EnumEquality (or 'equal_enum' — the 'Equal (Enum)' dropdown node; resolves its enum from pin A, so connect A first then set pin B's default to the enumerator NAME e.g. NewEnumerator16), EnumInequality (or 'not_equal_enum'). Shortcuts: ForEachLoop, ForLoop, DoOnce, FlipFlop, Gate, IsValid, Delay, RetriggerableDelay, ComponentBoundEvent, AddDelegate, RemoveDelegate, ClearDelegate, CallDelegate"))
 			.Optional(TEXT("graph_name"),        TEXT("string"),  TEXT("Graph name (defaults to EventGraph)"))
 			.Optional(TEXT("position"),          TEXT("array"),   TEXT("Node position as [x, y] (default: [0, 0])"), {TEXT("pos")})
 			.Optional(TEXT("function_name"),     TEXT("string"),  TEXT("Function name for CallFunction nodes (e.g. PrintString)"))
@@ -1118,6 +1126,29 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		Graph->AddNode(SwitchNode, true, false);
 		SwitchNode->AllocateDefaultPins();
 		NewNode = SwitchNode;
+	}
+	// ---- EnumEquality / EnumInequality ----
+	// "Equal (Enum)" — the node that renders a DROPDOWN of enumerator names rather than a raw byte.
+	//
+	// This exists because its absence leaks into content: without it the only way to build an enum
+	// comparison through MCP was KismetMathLibrary::EqualEqual_ByteByte with a magic integer literal,
+	// which sits in the graph looking nothing like its neighbours and, worse, silently means a
+	// DIFFERENT enumerator if the enum is ever reordered — while the real EnumEquality nodes beside it
+	// follow the rename. A tooling gap is not a good enough reason to author a worse asset.
+	//
+	// No enum_type param: the node resolves its enum from whatever is wired into pin A, exactly as it
+	// does when a human drags one out. Connect A first, then set B's default to the enumerator NAME
+	// (e.g. "NewEnumerator16") — the raw name, not the display name.
+	else if (NodeType == TEXT("EnumEquality") || NodeType == TEXT("EnumInequality"))
+	{
+		UK2Node* EnumCmpNode = (NodeType == TEXT("EnumEquality"))
+			? static_cast<UK2Node*>(NewObject<UK2Node_EnumEquality>(Graph))
+			: static_cast<UK2Node*>(NewObject<UK2Node_EnumInequality>(Graph));
+		EnumCmpNode->NodePosX = PosX;
+		EnumCmpNode->NodePosY = PosY;
+		Graph->AddNode(EnumCmpNode, true, false);
+		EnumCmpNode->AllocateDefaultPins();
+		NewNode = EnumCmpNode;
 	}
 	// ---- SwitchOnInt ----
 	else if (NodeType == TEXT("SwitchOnInt"))
