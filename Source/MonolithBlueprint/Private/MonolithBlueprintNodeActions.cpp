@@ -20,6 +20,9 @@
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_SpawnActorFromClass.h"
 #include "K2Node_DynamicCast.h"
+#include "K2Node_AsyncAction.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Kismet/BlueprintAsyncActionBase.h"
 #include "K2Node_Timeline.h"
 #include "K2Node_Event.h"
 #include "K2Node_ComponentBoundEvent.h"
@@ -890,6 +893,120 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNode(const TShared
 		}
 
 		NewNode = SpawnNode;
+	}
+	// ---- AsyncAction (UK2Node_AsyncAction) ----
+	//
+	// The "latent BP node with output delegate pins" shape: WaitForAttributeChanged, WaitGameplayEvent,
+	// WaitDelay, and every other UBlueprintAsyncActionBase factory. There was previously no way to
+	// create one, and copy_nodes is NOT a substitute -- a T3D copy carries the source node's generated
+	// `Changed_<GUID>` delegate-handler names, so the pasted node collides with its original and the
+	// Blueprint fails to compile with "Found more than one function with the same name".
+	//
+	// Resolve the STATIC factory function (e.g. UAbilityAsync_WaitAttributeChanged::WaitForAttributeChanged)
+	// and let the node derive its proxy class from that function's return type, exactly as the palette does.
+	else if (NodeType == TEXT("AsyncAction"))
+	{
+		const FString FactoryFuncName = Params->GetStringField(TEXT("function_name"));
+		if (FactoryFuncName.IsEmpty())
+		{
+			return FMonolithActionResult::Error(
+				TEXT("AsyncAction node requires 'function_name' (the static factory, e.g. WaitForAttributeChanged)"));
+		}
+
+		FString FactoryClassName = Params->GetStringField(TEXT("target_class"));
+		if (FactoryClassName.IsEmpty())
+		{
+			FactoryClassName = Params->GetStringField(TEXT("function_class"));
+		}
+
+		UClass* FactoryClass = nullptr;
+		if (!FactoryClassName.IsEmpty())
+		{
+			FactoryClass = UClass::TryFindTypeSlow<UClass>(FactoryClassName);
+			if (!FactoryClass)
+			{
+				FactoryClass = FindFirstObject<UClass>(*FactoryClassName, EFindFirstObjectOptions::NativeFirst);
+			}
+			if (!FactoryClass)
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("AsyncAction factory class not found: '%s'"), *FactoryClassName));
+			}
+		}
+
+		UFunction* FactoryFunc = nullptr;
+		if (FactoryClass)
+		{
+			FactoryFunc = FactoryClass->FindFunctionByName(*FactoryFuncName);
+		}
+		else
+		{
+			// No class given: scan for a static factory of that name on a UBlueprintAsyncActionBase.
+			for (TObjectIterator<UClass> It; It; ++It)
+			{
+				if (!It->IsChildOf(UBlueprintAsyncActionBase::StaticClass())) continue;
+				if (UFunction* Candidate = It->FindFunctionByName(*FactoryFuncName))
+				{
+					FactoryFunc = Candidate;
+					FactoryClass = *It;
+					break;
+				}
+			}
+		}
+
+		if (!FactoryFunc)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("AsyncAction factory function '%s' not found%s"), *FactoryFuncName,
+				FactoryClass ? *FString::Printf(TEXT(" on class '%s'"), *FactoryClass->GetName()) : TEXT("")));
+		}
+
+		// The proxy class is the factory's return type; without it the node allocates no delegate pins.
+		UClass* ProxyClass = nullptr;
+		if (FObjectProperty* RetProp = CastField<FObjectProperty>(FactoryFunc->GetReturnProperty()))
+		{
+			ProxyClass = RetProp->PropertyClass;
+		}
+		if (!ProxyClass || !ProxyClass->IsChildOf(UBlueprintAsyncActionBase::StaticClass()))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("'%s' does not return a UBlueprintAsyncActionBase subclass, so it is not an async-action factory"),
+				*FactoryFuncName));
+		}
+
+		UK2Node_AsyncAction* AsyncNode = NewObject<UK2Node_AsyncAction>(Graph);
+
+		// ProxyFactoryFunctionName / ProxyFactoryClass / ProxyClass are PROTECTED on
+		// UK2Node_BaseAsyncTask (the palette sets them from inside a node-spawner lambda, which we are
+		// not). They are UPROPERTYs, so set them reflectively rather than subclassing the node just to
+		// reach them.
+		auto SetNodeProp = [AsyncNode](const TCHAR* PropName, auto Value) -> bool
+		{
+			using ValueType = decltype(Value);
+			if (FProperty* Prop = AsyncNode->GetClass()->FindPropertyByName(FName(PropName)))
+			{
+				*Prop->ContainerPtrToValuePtr<ValueType>(AsyncNode) = Value;
+				return true;
+			}
+			return false;
+		};
+
+		const bool bSetFn    = SetNodeProp(TEXT("ProxyFactoryFunctionName"), FactoryFunc->GetFName());
+		const bool bSetFnCls = SetNodeProp(TEXT("ProxyFactoryClass"), FactoryClass);
+		const bool bSetProxy = SetNodeProp(TEXT("ProxyClass"), ProxyClass);
+		if (!bSetFn || !bSetFnCls || !bSetProxy)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Could not set async-node properties reflectively (fn=%d fnClass=%d proxy=%d) — ")
+				TEXT("UK2Node_BaseAsyncTask's layout may have changed."),
+				bSetFn ? 1 : 0, bSetFnCls ? 1 : 0, bSetProxy ? 1 : 0));
+		}
+
+		AsyncNode->NodePosX = PosX;
+		AsyncNode->NodePosY = PosY;
+		Graph->AddNode(AsyncNode, true, false);
+		AsyncNode->AllocateDefaultPins();
+		NewNode = AsyncNode;
 	}
 	// ---- DynamicCast ----
 	else if (NodeType == TEXT("DynamicCast"))
@@ -1971,18 +2088,25 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleSetPinDefault(const T
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
 	}
 
+	// Search INPUT pins only. A default is meaningless on an output (see the error just below), so an
+	// output match is never the pin the caller meant -- but several node types carry the same name on
+	// both directions and the output is often found first. UK2Node_AsyncAction is the common case:
+	// WaitForAttributeChanged exposes `Attribute` as BOTH the input you configure and the output it
+	// reports, which made it impossible to configure one of these nodes through this action at all.
 	FString SetPinAvailPins;
-	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, &SetPinAvailPins);
+	UEdGraphPin* Pin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_Input, &SetPinAvailPins);
 	if (!Pin)
 	{
+		// Fall back to an any-direction lookup purely so the error can distinguish "no such pin" from
+		// "that pin exists but is an output".
+		UEdGraphPin* AnyPin = MonolithBlueprintInternal::FindPinOnNode(Node, PinName, EGPD_MAX, nullptr);
+		if (AnyPin && AnyPin->Direction != EGPD_Input)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Pin '%s' is an output pin — only input pins can have default values"), *PinName));
+		}
 		return FMonolithActionResult::Error(FString::Printf(
 			TEXT("Pin '%s' not found on node '%s'. Available pins: %s"), *PinName, *NodeId, *SetPinAvailPins));
-	}
-
-	if (Pin->Direction != EGPD_Input)
-	{
-		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Pin '%s' is an output pin — only input pins can have default values"), *PinName));
 	}
 
 	if (Pin->LinkedTo.Num() > 0)
