@@ -290,7 +290,23 @@ namespace
 					Cmd.Command = Python;
 					Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
 					OutPythonOk = PythonPlugin->ExecPythonCommandEx(Cmd);
-					OutPythonOutput = Cmd.CommandResult;
+
+					// CommandResult alone is the EVALUATED value, which for an ExecuteFile payload is
+					// almost always "None" — so a probe that print()s its measurements reported nothing,
+					// and the numbers had to be recovered afterwards by grepping the editor log. What a
+					// probe OBSERVED is the entire point of firing it, and print() + tracebacks land in
+					// LogOutput, so that is what the report should carry.
+					TArray<FString> Lines;
+					for (const FPythonLogOutputEntry& Entry : Cmd.LogOutput)
+					{
+						FString Text = Entry.Output;
+						Text.TrimEndInline();
+						if (!Text.IsEmpty())
+						{
+							Lines.Add(MoveTemp(Text));
+						}
+					}
+					OutPythonOutput = Lines.Num() > 0 ? FString::Join(Lines, TEXT("\n")) : Cmd.CommandResult;
 				}
 				else
 				{
@@ -1057,7 +1073,22 @@ bool FPieSmokeSessionManager::OnFrameTick(float /*DeltaTime*/)
 	// Stop PIE once no session needs it (and the world is still up).
 	if (!HasRunningSessions())
 	{
-		if (GEditor && FindActivePieWorld())
+		// ...but only if some session actually STARTED this PIE. An attach-only session
+		// (schedule_probes) is observing a PIE the developer opened by hand; ending it when
+		// the probe timeline expires would yank them out of the game they are testing in.
+		// bTeardownStarted excludes owners from an EARLIER run whose PIE we already stopped —
+		// otherwise their stale ownership would authorise stopping a later, manual PIE.
+		bool bAnyOwner = false;
+		for (const TPair<FString, FPieSmokeSession>& Pair : Sessions)
+		{
+			if (Pair.Value.bOwnsPie && !Pair.Value.bTeardownStarted)
+			{
+				bAnyOwner = true;
+				break;
+			}
+		}
+
+		if (bAnyOwner && GEditor && FindActivePieWorld())
 		{
 			GEditor->RequestEndPlayMap();
 			// #11 mark every session as teardown-started so lifecycle reflects the

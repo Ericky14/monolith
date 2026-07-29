@@ -290,6 +290,17 @@ struct FPieSmokeSession
 	bool bReady = false;             // PIE world valid + HasBegunPlay seen at least once
 	FString ErrorReason;
 
+	/**
+	 * Did THIS session start the PIE world it is observing?
+	 *
+	 * run_pie_smoke / capture_pie_movement_clip start PIE themselves, so when the last such
+	 * session finishes the observer is right to tear PIE down. schedule_probes ATTACHES to a
+	 * PIE the developer started by hand — tearing that down when the probe timeline ends would
+	 * kill the session they are playing in, mid-test. Sessions with bOwnsPie=false therefore
+	 * never contribute to the auto-stop decision; they just stop observing.
+	 */
+	bool bOwnsPie = true;
+
 	// --- Clip variant (capture_pie_movement_clip) ---
 	bool bCaptureFrames = false;
 	double CaptureInterval = 0.25;

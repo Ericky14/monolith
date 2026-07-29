@@ -582,6 +582,23 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		FMonolithActionHandler::CreateStatic(&HandleListErroredBlueprints),
 		FParamSchemaBuilder().Build());
 
+	Registry.RegisterAction(TEXT("editor"), TEXT("schedule_probes"),
+		TEXT("ATTACH a timed python timeline to the PIE session that is ALREADY RUNNING and RETURN IMMEDIATELY. "
+			"Each probe_scripts step fires ONCE, on a real game frame, when session elapsed reaches its at_seconds — "
+			"so state that only changes over frames (attribute regen, a duration GE expiring, a montage completing, "
+			"knockback travel) can actually be observed. This is the missing piece run_python cannot provide: run_python "
+			"executes inside the engine tick and gets NO frames, and two separate run_python calls have an unmeasured "
+			"multi-second gap that lets background regen forge the very value you are testing for. "
+			"Unlike run_pie_smoke this NEVER starts or stops PIE — it observes the developer's live session. "
+			"Returns {session_id, status:'running', attached:true}; read results with poll_pie_smoke (see 'probes': "
+			"per-step fired_at_seconds + python stdout). Force-end early with stop_pie_smoke."),
+		FMonolithActionHandler::CreateStatic(&FMonolithEditorActions::HandleScheduleProbes),
+		FParamSchemaBuilder()
+			.Required(TEXT("probe_scripts"), TEXT("array"), TEXT("Timeline steps: [{at_seconds:number, python?:string, console?:[string]}, ...]. Times are offsets from the schedule call, not from each other. Use a module-level dict/builtins to carry state between steps."))
+			.Optional(TEXT("tail_seconds"), TEXT("number"), TEXT("Extra seconds the session stays alive after the last probe, so its output is captured. Default 1.0."), TEXT("1.0"))
+			.Optional(TEXT("label"), TEXT("string"), TEXT("Short label folded into the log marker for this run."))
+			.Build());
+
 	Registry.RegisterAction(TEXT("editor"), TEXT("poll_pie_smoke"),
 		TEXT("Poll an async PIE-smoke session by id. Returns {status (running/complete/stopped/error), elapsed_seconds, sample_count, pie_active, summarized per-var min/max/last, post_marker_counts:{pattern:count}}. When status==complete it includes the full report (all samples + captured frame paths for the clip variant). Does not advance PIE — the editor frame loop does that."),
 		FMonolithActionHandler::CreateStatic(&HandlePollPieSmoke),
@@ -5931,6 +5948,81 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	Result->SetBoolField(TEXT("started"), true);
 	Result->SetStringField(TEXT("marker"), Marker);
 	Result->SetNumberField(TEXT("duration"), Duration);
+	return FMonolithActionResult::Success(Result);
+}
+
+// ---------------------------------------------------------------------------
+// schedule_probes — run a TIMELINE of python steps against the PIE the developer is
+// already playing in, each fired on a real frame at its own offset.
+//
+// Why this exists: run_python executes inside the engine tick, so it gets NO frames — a
+// script cannot "wait" for anything. Everything time-dependent (regen ticking, a duration
+// GE expiring, a montage completing, a knockback landing) is therefore untestable from a
+// single call, and two calls have an unmeasured multi-second gap between them, which is
+// worse than useless: it silently lets a slow background process (attribute regen) forge
+// the exact value a working fix would produce. That is not hypothetical — it produced a
+// false "verified" on the poise-recovery fix that play-testing then contradicted.
+//
+// run_pie_smoke already solved the mechanism (timed probes fired from the shared real-frame
+// observer); it just insisted on starting PIE itself. This is the same machinery with
+// bOwnsPie=false so it attaches to a running session and never tears it down.
+// ---------------------------------------------------------------------------
+FMonolithActionResult FMonolithEditorActions::HandleScheduleProbes(const TSharedPtr<FJsonObject>& Params)
+{
+	UWorld* PieWorld = FindActivePieWorld();
+	if (!PieWorld)
+	{
+		return FMonolithActionResult::Error(
+			TEXT("schedule_probes needs a running PIE session to attach to — press Play (or use ")
+			TEXT("run_pie_smoke, which starts its own). Probes fire on real game frames; without PIE ")
+			TEXT("no frames advance and nothing time-dependent would happen between steps."));
+	}
+
+	TArray<FPieSmokeProbe> Probes = MonolithEditorPieSmoke::ResolveProbes(Params);
+	if (Probes.Num() == 0)
+	{
+		return FMonolithActionResult::Error(
+			TEXT("schedule_probes requires a non-empty probe_scripts array: ")
+			TEXT("[{at_seconds:number, python?:string, console?:[string]}, ...]."));
+	}
+
+	// The session must outlive its last probe, or the observer stops before firing it.
+	double LastAt = 0.0;
+	for (const FPieSmokeProbe& P : Probes)
+	{
+		LastAt = FMath::Max(LastAt, P.AtSeconds);
+	}
+	double Tail = 1.0;
+	Params->TryGetNumberField(TEXT("tail_seconds"), Tail);
+
+	FPieSmokeSession Session;
+	Session.bOwnsPie = false; // attach-only: never tear down the developer's PIE
+	Session.Probes = MoveTemp(Probes);
+	Session.StartTimeSeconds = FPlatformTime::Seconds();
+	Session.DurationSeconds = LastAt + FMath::Max(0.0, Tail);
+	Session.MapName = PieWorld->GetMapName();
+
+	FString Label;
+	Params->TryGetStringField(TEXT("label"), Label);
+	Session.Marker = FString::Printf(TEXT("MONOLITH_PROBES_%s"),
+		Label.IsEmpty() ? *FDateTime::Now().ToString(TEXT("%H%M%S")) : *Label);
+	UE_LOG(LogMonolith, Display, TEXT("%s begin (map=%s, steps=%d, duration=%.2fs)"),
+		*Session.Marker, *Session.MapName, Session.Probes.Num(), Session.DurationSeconds);
+
+	const double Duration = Session.DurationSeconds;
+	const int32 StepCount = Session.Probes.Num();
+	const FString Marker = Session.Marker;
+	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("session_id"), SessionId);
+	Result->SetStringField(TEXT("status"), TEXT("running"));
+	Result->SetBoolField(TEXT("attached"), true);
+	Result->SetStringField(TEXT("marker"), Marker);
+	Result->SetNumberField(TEXT("steps"), StepCount);
+	Result->SetNumberField(TEXT("duration"), Duration);
+	Result->SetStringField(TEXT("poll_with"),
+		TEXT("editor.poll_pie_smoke {session_id} — read 'probes' for per-step fired_at_seconds + python output."));
 	return FMonolithActionResult::Success(Result);
 }
 

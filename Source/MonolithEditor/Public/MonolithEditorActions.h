@@ -131,6 +131,8 @@ public:
 	// stop_pie_smoke forces RequestEndPlayMap + finalises. capture_pie_movement_clip
 	// uses the same session model plus per-interval viewport frame capture.
 	static FMonolithActionResult HandleRunPieSmoke(const TSharedPtr<FJsonObject>& Params);
+	/** Attach a timed python timeline to the ALREADY-RUNNING PIE (never starts/stops PIE). */
+	static FMonolithActionResult HandleScheduleProbes(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandlePollPieSmoke(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleStopPieSmoke(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCapturePieMovementClip(const TSharedPtr<FJsonObject>& Params);
