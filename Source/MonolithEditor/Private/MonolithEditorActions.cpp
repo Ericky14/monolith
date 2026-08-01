@@ -800,7 +800,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_viewport"),
-		TEXT("Capture the active editor viewport as a PNG screenshot. Returns the file path. Optionally set camera position/rotation before capture."),
+		TEXT("Capture the active editor viewport as a PNG screenshot. Returns the file path. Optionally set camera position/rotation before capture, and set include_ui to composite the UMG/Slate layer (PIE HUD) rather than the 3D scene alone."),
 		FMonolithActionHandler::CreateStatic(&HandleCaptureViewport),
 		FParamSchemaBuilder()
 			.OptionalDiskPath(TEXT("output_path"), TEXT("Output file path (default: Saved/Screenshots/Monolith/viewport_<timestamp>.png)"))
@@ -808,6 +808,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("camera_rotation"), TEXT("array"), TEXT("Camera rotation [pitch,yaw,roll] to set before capture"))
 			.Optional(TEXT("fov"), TEXT("number"), TEXT("Camera FOV to set before capture"))
 			.Optional(TEXT("resolution"), TEXT("array"), TEXT("Output resolution [width,height] (default: viewport size)"))
+			.Optional(TEXT("include_ui"), TEXT("boolean"), TEXT("Capture the SLATE/UMG layer as well as the 3D scene (default false). The normal path reads the viewport render target, which holds the scene ONLY — a PIE capture without this shows the world with no HUD, which looks like a broken HUD rather than a blind capture. Turn it ON for anything checking UI; leave it OFF for VFX captures, where it would also pick up editor overlays. The response reports included_ui so you can tell whether it actually worked."))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_system_gif"),
@@ -3809,15 +3810,72 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureViewport(
 		ResY = (int32)(*ResArr)[1]->AsNumber();
 	}
 
-	// Read pixels from the viewport
+	// Read pixels.
+	//
+	// TWO DIFFERENT SOURCES, because they contain different things:
+	//
+	//   Viewport->ReadPixels()  reads the viewport's RENDER TARGET — the 3D scene only. UMG is composited
+	//                           by SLATE on top of that target and is simply not in those pixels. A PIE
+	//                           capture taken this way shows the world with NO HUD, which reads as "the
+	//                           HUD is broken" rather than "the capture cannot see it". That misdiagnosis
+	//                           is why include_ui exists.
+	//
+	//   FSlateApplication::TakeScreenshot()  rasterises a SLATE WIDGET and everything drawn inside it, so
+	//                           the viewport widget yields scene + UMG + any Slate overlay.
+	//
+	// Default is FALSE, deliberately. The VFX capture loop points this at the editor viewport where there
+	// is no game UI, and the Slate path would additionally pick up editor-only overlays (stats text, gizmo
+	// chrome) that would pollute those captures. UI is opt-in; the doc string says so loudly.
+	bool bIncludeUI = false;
+	Params->TryGetBoolField(TEXT("include_ui"), bIncludeUI);
+
 	TArray<FColor> Bitmap;
-	bool bReadOk = Viewport->ReadPixels(Bitmap);
+	FIntPoint CapturedSize = ViewportSize;
+	bool bReadOk = false;
+	bool bUsedSlatePath = false;
+
+	if (bIncludeUI)
+	{
+		TSharedPtr<SViewport> ViewportWidget = LevelViewport->GetViewportWidget().Pin();
+		if (ViewportWidget.IsValid())
+		{
+			FIntVector SlateSize(0, 0, 0);
+			bReadOk = FSlateApplication::Get().TakeScreenshot(ViewportWidget.ToSharedRef(), Bitmap, SlateSize);
+			if (bReadOk && Bitmap.Num() > 0)
+			{
+				// Slate reports its own size and it is NOT always the viewport's — DPI scaling and widget
+				// padding both move it. Using the viewport size here would mis-stride the PNG.
+				CapturedSize = FIntPoint(SlateSize.X, SlateSize.Y);
+				bUsedSlatePath = true;
+			}
+			else
+			{
+				bReadOk = false;
+			}
+		}
+	}
+
+	if (!bReadOk)
+	{
+		bReadOk = Viewport->ReadPixels(Bitmap);
+		CapturedSize = ViewportSize;
+	}
 
 	if (!bReadOk || Bitmap.Num() == 0)
 	{
 		return FMonolithActionResult::Error(
 			FString::Printf(TEXT("Failed to read pixels from viewport (%dx%d, bitmap size: %d)"),
 				ViewportSize.X, ViewportSize.Y, Bitmap.Num()));
+	}
+
+	// The bitmap must actually fill the image we are about to allocate. This was previously an unchecked
+	// memcpy of Bitmap.Num() into a buffer sized from ViewportSize — fine while the two always agreed,
+	// a buffer overrun the moment they did not, which the Slate path makes possible.
+	if (Bitmap.Num() < CapturedSize.X * CapturedSize.Y)
+	{
+		return FMonolithActionResult::Error(
+			FString::Printf(TEXT("Pixel buffer is %d but %dx%d needs %d — refusing to encode a short buffer"),
+				Bitmap.Num(), CapturedSize.X, CapturedSize.Y, CapturedSize.X * CapturedSize.Y));
 	}
 
 	// Generate output path
@@ -3843,8 +3901,9 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureViewport(
 
 	// Save as PNG
 	FImage Image;
-	Image.Init(ViewportSize.X, ViewportSize.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
-	FMemory::Memcpy(Image.RawData.GetData(), Bitmap.GetData(), Bitmap.Num() * sizeof(FColor));
+	Image.Init(CapturedSize.X, CapturedSize.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+	FMemory::Memcpy(Image.RawData.GetData(), Bitmap.GetData(),
+		(int64)CapturedSize.X * CapturedSize.Y * sizeof(FColor));
 
 	bool bSaveOk = FImageUtils::SaveImageAutoFormat(*OutputPath, Image);
 
@@ -3858,9 +3917,19 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureViewport(
 	Result->SetStringField(TEXT("output_file"), OutputPath);
 
 	TSharedPtr<FJsonObject> ResObj = MakeShared<FJsonObject>();
-	ResObj->SetNumberField(TEXT("width"), ViewportSize.X);
-	ResObj->SetNumberField(TEXT("height"), ViewportSize.Y);
+	ResObj->SetNumberField(TEXT("width"), CapturedSize.X);
+	ResObj->SetNumberField(TEXT("height"), CapturedSize.Y);
 	Result->SetObjectField(TEXT("resolution"), ResObj);
+
+	// Say which source produced these pixels. Without this, a caller who asked for include_ui and silently
+	// fell back to the scene-only path would draw exactly the wrong conclusion from an empty HUD — which
+	// is the misdiagnosis this whole option exists to prevent.
+	Result->SetBoolField(TEXT("included_ui"), bUsedSlatePath);
+	if (bIncludeUI && !bUsedSlatePath)
+	{
+		Result->SetStringField(TEXT("ui_capture_warning"),
+			TEXT("include_ui was requested but the Slate capture failed; these pixels are the 3D scene ONLY and contain no UMG."));
+	}
 
 	FVector CamLoc = ViewportClient.GetViewLocation();
 	FRotator CamRot = ViewportClient.GetViewRotation();
