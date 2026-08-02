@@ -25,6 +25,7 @@
 #include "Actions/Hoisted/AnimationCoreActions.h"
 #include "Actions/Hoisted/AnimationEventActions.h"
 #include "Actions/Hoisted/RoundedCornerActions.h"
+#include "Actions/Hoisted/PieWidgetInspectorActions.h"
 #include "Actions/Hoisted/ShadowActions.h"
 #include "Actions/Hoisted/GradientActions.h"
 
@@ -91,6 +92,11 @@ void FMonolithUIModule::StartupModule()
     MonolithUI::FAnimationCoreActions::Register(Registry);
     MonolithUI::FAnimationEventActions::Register(Registry);
     MonolithUI::FRoundedCornerActions::Register(Registry);
+
+    // Runtime UMG inspector. Every other action here reads the widget BLUEPRINT; this one reads the
+    // LIVE tree in PIE, which is the only way to see a null brush or a collapsed ancestor.
+    MonolithUI::FPieWidgetInspectorActions::Register(Registry);
+
     MonolithUI::FShadowActions::Register(Registry);
     MonolithUI::FGradientActions::Register(Registry);
 

@@ -1963,6 +1963,36 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPins(const TSh
 			*SourceNodeId, *SourcePinName, *TargetNodeId, *TargetPinName));
 	}
 
+	// ⚠ TELL THE NODES THEY WERE CONNECTED.
+	//
+	// TryCreateConnection makes the link, but a node only adapts to it when PinConnectionListChanged
+	// fires — that callback is where WILDCARD pins take their concrete type. Skipping it produces a
+	// graph that looks correctly wired in every dump (the link IS there) yet refuses to compile with
+	// "the type of Target Array is undetermined": K2Node_CallArrayFunction's TargetArray stays
+	// `array:wildcard` because nothing ever told it an array had arrived. Select, Make/Break-style and
+	// promotable-operator nodes resolve through the same path.
+	//
+	// The interactive editor calls this for you as part of dragging a wire; an authored connection has
+	// to do it explicitly. Both ends are notified because either side may be the one holding wildcards.
+	//
+	// ⚠ BOTH callbacks, and NotifyPinConnectionListChanged is the one that matters.
+	// UEdGraphNode::PinConnectionListChanged is the base hook, but the K2 nodes that carry wildcards
+	// override the K2-specific UK2Node::NotifyPinConnectionListChanged instead — UK2Node_CallArrayFunction
+	// resolves TargetArray there. Calling only the base version compiles, changes nothing, and leaves the
+	// pin `array:wildcard`; measured by wiring a real HotbarLayout into Array_Resize and watching it still
+	// fail with "the type of Target Array is undetermined".
+	auto NotifyBothWays = [](UEdGraphPin* Pin)
+	{
+		UEdGraphNode* Owner = Pin->GetOwningNode();
+		Owner->PinConnectionListChanged(Pin);
+		if (UK2Node* AsK2 = Cast<UK2Node>(Owner))
+		{
+			AsK2->NotifyPinConnectionListChanged(Pin);
+		}
+	};
+	NotifyBothWays(SrcPin);
+	NotifyBothWays(TgtPin);
+
 	// A Create Event node can only resolve its selected function once its delegate pin is connected —
 	// the connection is what tells it which signature to match. The editor re-validates on connect; do
 	// the same here, or the node compiles as "missing a function/event name" despite having been told one.
@@ -2429,10 +2459,23 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 
 FMonolithActionResult FMonolithBlueprintNodeActions::HandleResolveNode(const TSharedPtr<FJsonObject>& Params)
 {
-	FString NodeType = Params->GetStringField(TEXT("node_type"));
-	if (NodeType.IsEmpty())
+	// ⚠ TryGetStringField, never GetStringField.
+	//
+	// FJsonObject::GetStringField FATALS on a missing field, which kills the MCP connection outright
+	// rather than returning an error — the caller sees "the socket connection was closed unexpectedly"
+	// and has no idea which parameter it forgot. The IsEmpty() guard below was already written to
+	// handle the absent case gracefully; it simply never got the chance to run.
+	//
+	// This is a preview/dry-run action: it reports the pins a node WOULD have, built on a transient
+	// Blueprint. It does NOT re-resolve an existing node in a graph — for that, the fix belongs in
+	// connect_pins, which must notify the node so its wildcard pins take a concrete type.
+	FString NodeType;
+	if (!Params->TryGetStringField(TEXT("node_type"), NodeType) || NodeType.IsEmpty())
 	{
-		return FMonolithActionResult::Error(TEXT("Missing required parameter: node_type"));
+		return FMonolithActionResult::Error(
+			TEXT("Missing required parameter: node_type. resolve_node PREVIEWS the pins a new node "
+			     "would have (e.g. node_type='CallFunction', function_name='Foo'); it does not operate "
+			     "on an existing node in a graph."));
 	}
 
 	// Apply same alias normalization as add_node (shared map from 1G)
