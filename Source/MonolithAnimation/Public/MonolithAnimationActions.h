@@ -176,12 +176,26 @@ public:
 	static FMonolithActionResult HandleSetNotifyProperties(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 15: Physics Assets + IK Chains (6) ---
+	// NOTE (Wave 17): get_physics_asset_info and set_constraint_properties were EXTENDED in
+	// place — geometry / constraint frames / collision table / solver settings on the read
+	// side, linear DOFs + projection/shock/mass-conditioning on the write side.
 	static FMonolithActionResult HandleGetPhysicsAssetInfo(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetBodyProperties(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetConstraintProperties(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleAddRetargetChain(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveRetargetChain(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleSetRetargetChainBones(const TSharedPtr<FJsonObject>& Params);
+
+	// --- Wave 17: Physics Asset diagnosis + geometry/frame/collision authoring (7) ---
+	// analyze_physics_asset is read-only by construction so it is safe to run before AND
+	// after every fix; the six mutators are the repair half its suggested_fix entries name.
+	static FMonolithActionResult HandleAnalyzePhysicsAsset(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetPhysicsBodyGeometry(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSnapConstraintToBone(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetPhysicsConstraintFrames(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleSetPhysicsCollisionPairs(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddPhysicsBody(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleRemovePhysicsBody(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Retarget CREATE/RUN pack (4) ---
 	// Creates the IK Rig + IK Retargeter assets and runs a cross-skeleton batch

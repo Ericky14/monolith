@@ -393,7 +393,7 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 | IKRig / Retarget | 7 | `get_ikrig_info`, `add_ik_solver`, `remove_ik_solver`, `get_retargeter_info`, `set_retarget_chain_mapping`, `add_retarget_chain`, `remove_retarget_chain`, `set_retarget_chain_bones` |
 | Control Rig | 7 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins` |
 | Anim modifiers | 2 | `apply_anim_modifier`, `list_anim_modifiers` |
-| Physics asset | 3 | `get_physics_asset_info`, `set_body_properties`, `set_constraint_properties` |
+| Physics asset | 10 | `get_physics_asset_info`, `analyze_physics_asset`, `set_body_properties`, `set_constraint_properties`, `set_physics_body_geometry`, `snap_constraint_to_bone`, `set_physics_constraint_frames`, `set_physics_collision_pairs`, `add_physics_body`, `remove_physics_body` |
 | PoseSearch | 13 | `get_pose_search_schema`, `get_pose_search_database`, `add_database_sequence`, `remove_database_sequence`, `get_database_stats`, `create_pose_search_schema`, `create_pose_search_database`, `set_database_sequence_properties`, `add_schema_channel`, `remove_schema_channel`, `set_channel_weight`, `rebuild_pose_search_index`, `set_database_search_mode` |
 | Layout / batch | 2 | `auto_layout`, `batch_execute` |
 

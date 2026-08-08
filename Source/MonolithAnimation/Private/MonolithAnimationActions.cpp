@@ -1,4 +1,4 @@
-#include "MonolithAnimationActions.h"
+﻿#include "MonolithAnimationActions.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithParamSchema.h"
 #include "MonolithPropertyAccessReader.h"
@@ -83,6 +83,22 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "PhysicsEngine/BodyInstance.h"
+// Wave 17 — physics-asset geometry / constraint-frame / collision-table authoring.
+// AggregateGeom + the per-shape elem headers are reachable transitively via BodySetup.h,
+// but the geometry writers touch every field on them, so include them explicitly.
+#include "PhysicsEngine/AggregateGeom.h"
+#include "PhysicsEngine/ShapeElem.h"
+#include "PhysicsEngine/SphereElem.h"
+#include "PhysicsEngine/SphylElem.h"
+#include "PhysicsEngine/BoxElem.h"
+#include "PhysicsEngine/TaperedCapsuleElem.h"
+#include "PhysicsEngine/ConvexElem.h"
+#include "PhysicsEngine/ConstraintInstance.h"   // frames, EConstraintTransformComponentFlags, SnapTransformsToDefault
+#include "PhysicsEngine/RigidBodyIndexPair.h"   // CollisionDisableTable key
+#include "PhysicalMaterials/PhysicalMaterial.h" // density readout behind CalculateMass
+#include "PhysicsAssetUtils.h"                  // FPhysicsAssetUtils::CreateNewBody / DestroyBody / CreateNewConstraint
+#include "AnimationRuntime.h"                   // FAnimationRuntime::GetComponentSpaceTransformRefPose
+#include "MonolithParamUtils.h"                 // ParseVector / ParseRotator for geometry + frame params
 
 #if WITH_CHOOSER
 // Phase-2 read-only recursive chooser-tree collector (same module, MonolithAnimation).
@@ -1183,10 +1199,28 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// Wave 15 — Physics Assets + IK Chains
 	Registry.RegisterAction(TEXT("animation"), TEXT("get_physics_asset_info"),
-		TEXT("Read all bodies, constraints, profiles, and solver settings from a physics asset"),
+		TEXT("Read a physics asset: bodies (primitive geometry, computed mass, damping, collision), constraints (reference frames, angular+linear limits, projection/shock settings), the CollisionDisableTable, and solver settings"),
 		FMonolithActionHandler::CreateStatic(&HandleGetPhysicsAssetInfo),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("bone_name"), TEXT("string"), TEXT("Only report the body on this bone"))
+			.Optional(TEXT("constraint_index"), TEXT("integer"), TEXT("Only report this constraint"))
+			.Optional(TEXT("include_geometry"), TEXT("boolean"), TEXT("Per-primitive dimensions and transforms"), TEXT("true"))
+			.Optional(TEXT("include_frames"), TEXT("boolean"), TEXT("Constraint reference frames (Pos/PriAxis/SecAxis per frame)"), TEXT("true"))
+			.Optional(TEXT("include_solver"), TEXT("boolean"), TEXT("SolverType + FPhysicsAssetSolverSettings"), TEXT("true"))
+			.Optional(TEXT("include_collision_table"), TEXT("boolean"), TEXT("Full CollisionDisableTable pair list (large: 190 pairs on a 20-body asset)"), TEXT("false"))
+			.Optional(TEXT("include_derived"), TEXT("boolean"), TEXT("Ref-pose component-space transforms, COM and AABBs (requires a preview mesh)"), TEXT("false"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("analyze_physics_asset"),
+		TEXT("Diagnose a ragdoll: runs 12 checks (integrity, degenerate geometry, frame orthonormality/pre-load, ref-pose limit violations, body overlap vs the collision table, mass ratios, CoM lever arms, kinematic pairing, projection energy, solver posture) and returns ranked findings each carrying a machine-usable suggested_fix. Read-only — safe to run before and after every fix"),
+		FMonolithActionHandler::CreateStatic(&HandleAnalyzePhysicsAsset),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("symptom"), TEXT("string"), TEXT("launch_on_contact, explodes_immediately, sinks_through_floor, jitters, or none. Re-weights the ranking: a contact-gated symptom promotes the checks that are dormant in free-fall"), TEXT("none"))
+			.Optional(TEXT("overlap_tolerance"), TEXT("number"), TEXT("Penetration in cm below which an overlap is ignored"), TEXT("0.01"))
+			.Optional(TEXT("include_matrix"), TEXT("boolean"), TEXT("Emit every body pair instead of only offending rows"), TEXT("false"))
+			.Optional(TEXT("max_findings"), TEXT("integer"), TEXT("Truncate findings after sorting (summary counts stay complete)"), TEXT("50"))
+			.Optional(TEXT("checks"), TEXT("array"), TEXT("Run only the named checks, e.g. [\"C5\",\"C7\"]. Omit to run all"))
 			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_body_properties"),
 		TEXT("Modify mass, physics type, collision, damping on a physics body identified by bone name"),
@@ -1203,7 +1237,7 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("enable_gravity"), TEXT("boolean"), TEXT("Enable gravity"))
 			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("set_constraint_properties"),
-		TEXT("Modify angular/linear limits on a physics constraint by index or bone pair"),
+		TEXT("Modify angular/linear limits, projection, shock propagation and mass conditioning on a physics constraint by index or bone pair. Does NOT save the package"),
 		FMonolithActionHandler::CreateStatic(&HandleSetConstraintProperties),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
@@ -1216,7 +1250,118 @@ void FMonolithAnimationActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("swing2_limit"), TEXT("number"), TEXT("Swing2 limit in degrees"))
 			.Optional(TEXT("twist_motion"), TEXT("string"), TEXT("Free, Limited, or Locked"))
 			.Optional(TEXT("twist_limit"), TEXT("number"), TEXT("Twist limit in degrees"))
-			.Optional(TEXT("disable_collision"), TEXT("boolean"), TEXT("Disable collision between constrained bodies"))
+			.Optional(TEXT("disable_collision"), TEXT("boolean"), TEXT("Disable collision between constrained bodies (the JOINT flag — it does NOT write CollisionDisableTable; use set_physics_collision_pairs for that)"))
+			.Optional(TEXT("linear_x_motion"), TEXT("string"), TEXT("Free, Limited, or Locked (a ragdoll wants all three Locked)"))
+			.Optional(TEXT("linear_y_motion"), TEXT("string"), TEXT("Free, Limited, or Locked"))
+			.Optional(TEXT("linear_z_motion"), TEXT("string"), TEXT("Free, Limited, or Locked"))
+			.Optional(TEXT("linear_limit"), TEXT("number"), TEXT("Linear limit in cm"))
+			.Optional(TEXT("enable_projection"), TEXT("boolean"), TEXT("Joint projection. ON by default and it injects real velocity (DV1 = DP * p.Chaos.Joint.VelProjectionAlpha / Dt) once contacts stop the joints resolving"))
+			.Optional(TEXT("projection_linear_tolerance"), TEXT("number"), TEXT("cm of joint error tolerated before projection teleports the child (engine default 5)"))
+			.Optional(TEXT("projection_angular_tolerance"), TEXT("number"), TEXT("Degrees (engine default 180)"))
+			.Optional(TEXT("projection_linear_alpha"), TEXT("number"), TEXT("0-1 (engine default 1.0). Lowering to 0.2-0.5 is the standard launch mitigation"))
+			.Optional(TEXT("projection_angular_alpha"), TEXT("number"), TEXT("0-1 (engine default 0.0)"))
+			.Optional(TEXT("enable_shock_propagation"), TEXT("boolean"), TEXT("Epic's header warns it 'is prone to introducing energy down the chain' and 'does not work well if there are collisions on the bodies'"))
+			.Optional(TEXT("shock_propagation_alpha"), TEXT("number"), TEXT("0-1 (engine default 0.3)"))
+			.Optional(TEXT("parent_dominates"), TEXT("boolean"), TEXT("Parent ignores the child entirely — a legitimate remedy for a heavy-parent/light-child pair"))
+			.Optional(TEXT("enable_mass_conditioning"), TEXT("boolean"), TEXT("Chaos mass conditioning (engine default true)"))
+			.Optional(TEXT("contact_transfer_scale"), TEXT("number"), TEXT("Contact transfer scale (engine default 0)"))
+			.Optional(TEXT("swing_soft"), TEXT("boolean"), TEXT("Soft cone limit"))
+			.Optional(TEXT("swing_stiffness"), TEXT("number"), TEXT("Cone limit stiffness (scaled by AverageMass at solve time, so a mass error propagates into limit strength)"))
+			.Optional(TEXT("swing_damping"), TEXT("number"), TEXT("Cone limit damping"))
+			.Optional(TEXT("twist_soft"), TEXT("boolean"), TEXT("Soft twist limit"))
+			.Optional(TEXT("twist_stiffness"), TEXT("number"), TEXT("Twist limit stiffness"))
+			.Optional(TEXT("twist_damping"), TEXT("number"), TEXT("Twist limit damping"))
+			.Optional(TEXT("apply_to_all"), TEXT("boolean"), TEXT("Apply the same edit to every constraint in the asset"), TEXT("false"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("set_physics_body_geometry"),
+		TEXT("Write, add, or remove ONE collision primitive on a physics body. Reports the mass change, since resizing a capsule silently rewrites its mass. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleSetPhysicsBodyGeometry),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Bone name identifying the body"))
+			.Optional(TEXT("primitive_index"), TEXT("integer"), TEXT("Index WITHIN the shape_type array, matching get_physics_asset_info primitives[].index"), TEXT("0"))
+			.Optional(TEXT("operation"), TEXT("string"), TEXT("modify, add, or remove"), TEXT("modify"))
+			.Optional(TEXT("shape_type"), TEXT("string"), TEXT("Capsule, Sphere, Box, or TaperedCapsule. Required for add; inferred from the body's dominant type otherwise. Convex/LevelSet are read-only"))
+			.Optional(TEXT("center"), TEXT("array"), TEXT("Primitive center in bone space, [x,y,z] or {x,y,z}"))
+			.Optional(TEXT("rotation"), TEXT("array"), TEXT("Primitive rotation, [pitch,yaw,roll] or {pitch,yaw,roll} (spheres have none)"))
+			.Optional(TEXT("radius"), TEXT("number"), TEXT("Sphere/capsule radius"))
+			.Optional(TEXT("length"), TEXT("number"), TEXT("Capsule LINE-SEGMENT length; total capsule length is length + 2*radius"))
+			.Optional(TEXT("extent_x"), TEXT("number"), TEXT("Box FULL extent on X (not a half-extent)"))
+			.Optional(TEXT("extent_y"), TEXT("number"), TEXT("Box FULL extent on Y"))
+			.Optional(TEXT("extent_z"), TEXT("number"), TEXT("Box FULL extent on Z"))
+			.Optional(TEXT("radius_0"), TEXT("number"), TEXT("TaperedCapsule first radius"))
+			.Optional(TEXT("radius_1"), TEXT("number"), TEXT("TaperedCapsule second radius"))
+			.Optional(TEXT("scale"), TEXT("number"), TEXT("Uniform multiplier applied to radius/length/extents AFTER the explicit values — the bulk shrink/grow lever"))
+			.Optional(TEXT("rest_offset"), TEXT("number"), TEXT("Contact-generation rest offset"))
+			.Optional(TEXT("contributes_to_mass"), TEXT("boolean"), TEXT("Whether this shape contributes to body mass"))
+			.Optional(TEXT("collision_enabled"), TEXT("string"), TEXT("NoCollision, QueryOnly, PhysicsOnly, or QueryAndPhysics"))
+			.Optional(TEXT("name"), TEXT("string"), TEXT("FKShapeElem name"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("snap_constraint_to_bone"),
+		TEXT("PhAT's 'Snap Constraint to Bone'. Omit the locator to snap EVERY constraint. dry_run:true reports each frame's exact delta from its bone-derived default without writing — the decisive test for frame drift. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleSnapConstraintToBone),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("constraint_index"), TEXT("integer"), TEXT("Constraint index (omit with bone_1/bone_2 to target every constraint)"))
+			.Optional(TEXT("bone_1"), TEXT("string"), TEXT("Child bone name (with bone_2)"))
+			.Optional(TEXT("bone_2"), TEXT("string"), TEXT("Parent bone name (with bone_1)"))
+			.Optional(TEXT("components"), TEXT("string"), TEXT("All, AllChild, AllParent, AllPosition, AllRotation, ChildPosition, ChildRotation, ParentPosition, ParentRotation, or None"), TEXT("All"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Compute and report the deltas, write nothing"), TEXT("false"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("set_physics_constraint_frames"),
+		TEXT("Explicitly author a constraint's reference frames — the scripted equivalent of dragging the constraint gizmo in PhAT. Axes are orthonormalized server-side. Reports the ref-pose joint error before and after. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleSetPhysicsConstraintFrames),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("constraint_index"), TEXT("integer"), TEXT("Constraint index (alternative to bone pair)"))
+			.Optional(TEXT("bone_1"), TEXT("string"), TEXT("Child bone name (with bone_2, alternative to constraint_index)"))
+			.Optional(TEXT("bone_2"), TEXT("string"), TEXT("Parent bone name (with bone_1, alternative to constraint_index)"))
+			.Optional(TEXT("frame1_position"), TEXT("array"), TEXT("Child-frame position in child-bone space, [x,y,z] or {x,y,z}"))
+			.Optional(TEXT("frame1_pri_axis"), TEXT("array"), TEXT("Child-frame primary (twist) axis"))
+			.Optional(TEXT("frame1_sec_axis"), TEXT("array"), TEXT("Child-frame secondary axis, orthogonal to pri_axis"))
+			.Optional(TEXT("frame1_rotation"), TEXT("array"), TEXT("Friendlier alternative to the axis pair: pri_axis = X axis, sec_axis = Y axis"))
+			.Optional(TEXT("frame2_position"), TEXT("array"), TEXT("Parent-frame position in parent-bone space"))
+			.Optional(TEXT("frame2_pri_axis"), TEXT("array"), TEXT("Parent-frame primary (twist) axis"))
+			.Optional(TEXT("frame2_sec_axis"), TEXT("array"), TEXT("Parent-frame secondary axis"))
+			.Optional(TEXT("frame2_rotation"), TEXT("array"), TEXT("Parent-frame rotation form of the axis pair"))
+			.Optional(TEXT("angular_rotation_offset"), TEXT("array"), TEXT("Bias applied to the rest orientation on top of the frames"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("set_physics_collision_pairs"),
+		TEXT("Read/write UPhysicsAsset::CollisionDisableTable — the switch that actually decides whether two bodies collide (the constraint's disable_collision flag does NOT write it). disable_overlapping re-runs the engine's generation-time overlap pass, which is what auto-gen did ONCE before the capsules were edited. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleSetPhysicsCollisionPairs),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("pairs"), TEXT("array"), TEXT("Explicit per-pair set: [{bone_1, bone_2, enabled}]"))
+			.Optional(TEXT("disable_overlapping"), TEXT("boolean"), TEXT("Analytically test every pair in the reference pose and disable collision on each pair whose primitives interpenetrate"), TEXT("false"))
+			.Optional(TEXT("overlap_tolerance"), TEXT("number"), TEXT("Penetration in cm below which an overlap is ignored"), TEXT("0.01"))
+			.Optional(TEXT("include_adjacent"), TEXT("boolean"), TEXT("Also disable overlapping ADJACENT pairs (mirrors auto-gen, which ignores adjacency)"), TEXT("true"))
+			.Optional(TEXT("dry_run"), TEXT("boolean"), TEXT("Report the planned changes, write nothing"), TEXT("false"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("add_physics_body"),
+		TEXT("Create a body on a bone that has none, routed through FPhysicsAssetUtils::CreateNewBody so the index map, bounds bodies and collision table stay consistent. Optionally seeds a capsule sized from the bone and creates the constraint to the nearest body-bearing ancestor. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleAddPhysicsBody),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Required(TEXT("bone_name"), TEXT("string"), TEXT("Bone to create the body on"))
+			.Optional(TEXT("shape_type"), TEXT("string"), TEXT("Capsule, Sphere, Box, or TaperedCapsule"), TEXT("Capsule"))
+			.Optional(TEXT("auto_size"), TEXT("boolean"), TEXT("Size one capsule along the bone -> nearest-child axis: length = that distance (or half the distance back to the parent for a leaf), radius = 0.25*length, both clamped to MinPrimSize 0.5"), TEXT("true"))
+			.Optional(TEXT("radius"), TEXT("number"), TEXT("Explicit radius, overrides auto_size"))
+			.Optional(TEXT("length"), TEXT("number"), TEXT("Explicit capsule SEGMENT length, overrides auto_size"))
+			.Optional(TEXT("extent_x"), TEXT("number"), TEXT("Explicit box FULL extent on X"))
+			.Optional(TEXT("extent_y"), TEXT("number"), TEXT("Explicit box FULL extent on Y"))
+			.Optional(TEXT("extent_z"), TEXT("number"), TEXT("Explicit box FULL extent on Z"))
+			.Optional(TEXT("physics_type"), TEXT("string"), TEXT("Default, Kinematic, or Simulated"), TEXT("Default"))
+			.Optional(TEXT("create_constraint"), TEXT("boolean"), TEXT("Create + snap the constraint to the nearest body-bearing ancestor"), TEXT("true"))
+			.Optional(TEXT("disable_collision_with_parent"), TEXT("boolean"), TEXT("Disable collision against the constrained parent body"), TEXT("true"))
+			.Optional(TEXT("disable_collision_with_all"), TEXT("boolean"), TEXT("Disable collision against every other body (FPhysAssetCreateParams::bDisableCollisionsByDefault)"), TEXT("false"))
+			.Build());
+	Registry.RegisterAction(TEXT("animation"), TEXT("remove_physics_body"),
+		TEXT("Delete a body, routed through FPhysicsAssetUtils::DestroyBody so the index-keyed collision table is re-indexed and the attached constraints are destroyed. Reports bodies left with no path to the root through the constraint graph. Does NOT save the package"),
+		FMonolithActionHandler::CreateStatic(&HandleRemovePhysicsBody),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("Physics asset path"))
+			.Optional(TEXT("bone_name"), TEXT("string"), TEXT("Bone name identifying the body (alternative to body_index)"))
+			.Optional(TEXT("body_index"), TEXT("integer"), TEXT("Body index (alternative to bone_name)"))
 			.Build());
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_retarget_chain"),
 		TEXT("Add a retarget chain to an IK Rig asset"),
@@ -8915,6 +9060,16 @@ FMonolithActionResult FMonolithAnimationActions::HandleBatchExecute(const TShare
 
 		else if (OpName == TEXT("add_ik_solver"))             SubResult = HandleAddIKSolver(SubParams);
 		else if (OpName == TEXT("remove_ik_solver"))          SubResult = HandleRemoveIKSolver(SubParams);
+		// Physics asset ops — per-body resize and per-constraint edits are exactly the
+		// 20-call workloads batch_execute exists for.
+		else if (OpName == TEXT("set_body_properties"))            SubResult = HandleSetBodyProperties(SubParams);
+		else if (OpName == TEXT("set_constraint_properties"))      SubResult = HandleSetConstraintProperties(SubParams);
+		else if (OpName == TEXT("set_physics_body_geometry"))      SubResult = HandleSetPhysicsBodyGeometry(SubParams);
+		else if (OpName == TEXT("snap_constraint_to_bone"))        SubResult = HandleSnapConstraintToBone(SubParams);
+		else if (OpName == TEXT("set_physics_constraint_frames"))  SubResult = HandleSetPhysicsConstraintFrames(SubParams);
+		else if (OpName == TEXT("set_physics_collision_pairs"))    SubResult = HandleSetPhysicsCollisionPairs(SubParams);
+		else if (OpName == TEXT("add_physics_body"))               SubResult = HandleAddPhysicsBody(SubParams);
+		else if (OpName == TEXT("remove_physics_body"))            SubResult = HandleRemovePhysicsBody(SubParams);
 		// Socket ops
 		else if (OpName == TEXT("add_socket"))                SubResult = HandleAddSocket(SubParams);
 		else if (OpName == TEXT("remove_socket"))             SubResult = HandleRemoveSocket(SubParams);
@@ -8940,6 +9095,8 @@ FMonolithActionResult FMonolithAnimationActions::HandleBatchExecute(const TShare
 		else if (OpName == TEXT("get_curve_keys"))            SubResult = HandleGetCurveKeys(SubParams);
 		else if (OpName == TEXT("list_curves"))               SubResult = HandleListCurves(SubParams);
 		else if (OpName == TEXT("get_sync_markers"))          SubResult = HandleGetSyncMarkers(SubParams);
+		else if (OpName == TEXT("get_physics_asset_info"))    SubResult = HandleGetPhysicsAssetInfo(SubParams);
+		else if (OpName == TEXT("analyze_physics_asset"))     SubResult = HandleAnalyzePhysicsAsset(SubParams);
 
 		RO->SetBoolField(TEXT("success"), SubResult.bSuccess);
 		if (!SubResult.bSuccess)
@@ -9884,39 +10041,785 @@ static FString GetShapeTypeString(const UBodySetup* BodySetup)
 	return TEXT("None");
 }
 
+// ---------------------------------------------------------------------------
+// Wave 17 — Physics Asset geometry / constraint frames / collision table
+// ---------------------------------------------------------------------------
+//
+// Shared plumbing for the extended get_physics_asset_info, analyze_physics_asset
+// and the five Wave-17 mutators. Written once here (file-local namespace, same
+// convention as MonolithAnimGraphChooser above) so the body / constraint locators
+// and the ref-pose maths are not copy-pasted into six handlers.
+//
+// UNIT TRAPS baked into these helpers — do not "simplify" them away:
+//   * FKBoxElem X/Y/Z are FULL extents (GetScaledVolume = |Sx*Sy*Sz*X*Y*Z|).
+//   * FKSphylElem Length is the LINE-SEGMENT length; total = Length + 2*Radius,
+//     and the capsule axis is LOCAL Z.
+//   * FConstraintInstance Frame1 == ConstraintBone1 == CHILD, Frame2 == PARENT.
+namespace MonolithPhysics
+{
+	/** Engine's own authoring floor for a collision primitive (PhysicsAssetUtils.cpp MinPrimSize). */
+	static const float MinPrimSize = 0.5f;
+	/** Hard runtime clamp inside FKSphylElem::GetScaledRadius / GetScaledCylinderLength. */
+	static const float HardPrimClamp = 0.1f;
+
+	// --- JSON writers (same shape as get_bone_ref_pose) ---
+
+	static TSharedPtr<FJsonObject> WriteVec(const FVector& V)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("x"), V.X);
+		O->SetNumberField(TEXT("y"), V.Y);
+		O->SetNumberField(TEXT("z"), V.Z);
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> WriteRot(const FRotator& R)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("pitch"), R.Pitch);
+		O->SetNumberField(TEXT("yaw"), R.Yaw);
+		O->SetNumberField(TEXT("roll"), R.Roll);
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> WriteXform(const FTransform& T)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetObjectField(TEXT("location"), WriteVec(T.GetLocation()));
+		O->SetObjectField(TEXT("rotation"), WriteRot(T.GetRotation().Rotator()));
+		return O;
+	}
+
+	static void WriteStringArray(const TSharedPtr<FJsonObject>& Root, const FString& Key, const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FString& S : Values)
+		{
+			Arr.Add(MakeShared<FJsonValueString>(S));
+		}
+		Root->SetArrayField(Key, Arr);
+	}
+
+	// --- Enum <-> string ---
+
+	static FString LinearMotionToString(ELinearConstraintMotion Motion)
+	{
+		switch (Motion)
+		{
+			case LCM_Free:    return TEXT("Free");
+			case LCM_Limited: return TEXT("Limited");
+			case LCM_Locked:  return TEXT("Locked");
+			default:          return TEXT("Unknown");
+		}
+	}
+
+	static ELinearConstraintMotion StringToLinearMotion(const FString& Str)
+	{
+		if (Str.Equals(TEXT("Free"), ESearchCase::IgnoreCase))    return LCM_Free;
+		if (Str.Equals(TEXT("Limited"), ESearchCase::IgnoreCase)) return LCM_Limited;
+		return LCM_Locked;
+	}
+
+	static FString ShapeTypeToString(EAggCollisionShape::Type Type)
+	{
+		switch (Type)
+		{
+			case EAggCollisionShape::Sphere:              return TEXT("Sphere");
+			case EAggCollisionShape::Box:                 return TEXT("Box");
+			case EAggCollisionShape::Sphyl:               return TEXT("Capsule");
+			case EAggCollisionShape::Convex:              return TEXT("ConvexHull");
+			case EAggCollisionShape::TaperedCapsule:      return TEXT("TaperedCapsule");
+			case EAggCollisionShape::LevelSet:            return TEXT("LevelSet");
+			case EAggCollisionShape::SkinnedLevelSet:     return TEXT("SkinnedLevelSet");
+			case EAggCollisionShape::MLLevelSet:          return TEXT("MLLevelSet");
+			case EAggCollisionShape::SkinnedTriangleMesh: return TEXT("SkinnedTriangleMesh");
+			default:                                      return TEXT("Unknown");
+		}
+	}
+
+	/** Parse a writable analytic shape name. Convex/LevelSet are deliberately NOT writable. */
+	static bool StringToWritableShapeType(const FString& Str, EAggCollisionShape::Type& Out)
+	{
+		if (Str.Equals(TEXT("Capsule"), ESearchCase::IgnoreCase) || Str.Equals(TEXT("Sphyl"), ESearchCase::IgnoreCase))
+		{
+			Out = EAggCollisionShape::Sphyl;   return true;
+		}
+		if (Str.Equals(TEXT("Sphere"), ESearchCase::IgnoreCase))
+		{
+			Out = EAggCollisionShape::Sphere;  return true;
+		}
+		if (Str.Equals(TEXT("Box"), ESearchCase::IgnoreCase))
+		{
+			Out = EAggCollisionShape::Box;     return true;
+		}
+		if (Str.Equals(TEXT("TaperedCapsule"), ESearchCase::IgnoreCase))
+		{
+			Out = EAggCollisionShape::TaperedCapsule; return true;
+		}
+		return false;
+	}
+
+	static FString CollisionEnabledToString(ECollisionEnabled::Type Type)
+	{
+		switch (Type)
+		{
+			case ECollisionEnabled::NoCollision:      return TEXT("NoCollision");
+			case ECollisionEnabled::QueryOnly:        return TEXT("QueryOnly");
+			case ECollisionEnabled::PhysicsOnly:      return TEXT("PhysicsOnly");
+			case ECollisionEnabled::QueryAndPhysics:  return TEXT("QueryAndPhysics");
+			default:                                  return TEXT("Unknown");
+		}
+	}
+
+	static bool StringToCollisionEnabled(const FString& Str, ECollisionEnabled::Type& Out)
+	{
+		if (Str.Equals(TEXT("NoCollision"), ESearchCase::IgnoreCase))     { Out = ECollisionEnabled::NoCollision;     return true; }
+		if (Str.Equals(TEXT("QueryOnly"), ESearchCase::IgnoreCase))       { Out = ECollisionEnabled::QueryOnly;       return true; }
+		if (Str.Equals(TEXT("PhysicsOnly"), ESearchCase::IgnoreCase))     { Out = ECollisionEnabled::PhysicsOnly;     return true; }
+		if (Str.Equals(TEXT("QueryAndPhysics"), ESearchCase::IgnoreCase)) { Out = ECollisionEnabled::QueryAndPhysics; return true; }
+		return false;
+	}
+
+	static FString SolverTypeToString(EPhysicsAssetSolverType Type)
+	{
+		return (Type == EPhysicsAssetSolverType::RBAN) ? TEXT("RBAN") : TEXT("World");
+	}
+
+	/** Case-insensitive EConstraintTransformComponentFlags parser (the PhAT snap-menu set). */
+	static bool StringToSnapFlags(const FString& Str, EConstraintTransformComponentFlags& Out)
+	{
+		if (Str.Equals(TEXT("All"), ESearchCase::IgnoreCase))            { Out = EConstraintTransformComponentFlags::All;            return true; }
+		if (Str.Equals(TEXT("AllChild"), ESearchCase::IgnoreCase))       { Out = EConstraintTransformComponentFlags::AllChild;       return true; }
+		if (Str.Equals(TEXT("AllParent"), ESearchCase::IgnoreCase))      { Out = EConstraintTransformComponentFlags::AllParent;      return true; }
+		if (Str.Equals(TEXT("AllPosition"), ESearchCase::IgnoreCase))    { Out = EConstraintTransformComponentFlags::AllPosition;    return true; }
+		if (Str.Equals(TEXT("AllRotation"), ESearchCase::IgnoreCase))    { Out = EConstraintTransformComponentFlags::AllRotation;    return true; }
+		if (Str.Equals(TEXT("ChildPosition"), ESearchCase::IgnoreCase))  { Out = EConstraintTransformComponentFlags::ChildPosition;  return true; }
+		if (Str.Equals(TEXT("ChildRotation"), ESearchCase::IgnoreCase))  { Out = EConstraintTransformComponentFlags::ChildRotation;  return true; }
+		if (Str.Equals(TEXT("ParentPosition"), ESearchCase::IgnoreCase)) { Out = EConstraintTransformComponentFlags::ParentPosition; return true; }
+		if (Str.Equals(TEXT("ParentRotation"), ESearchCase::IgnoreCase)) { Out = EConstraintTransformComponentFlags::ParentRotation; return true; }
+		if (Str.Equals(TEXT("None"), ESearchCase::IgnoreCase))           { Out = EConstraintTransformComponentFlags::None;           return true; }
+		return false;
+	}
+
+	// --- Locators (engine FindConstraintIndex(Bone1,Bone2) is order-sensitive, so the
+	//     bone-pair search below is deliberately bidirectional — same as the Wave 15 one) ---
+
+	static USkeletalBodySetup* ResolveBody(UPhysicsAsset* PhysAsset, const FString& BoneName, int32& OutIdx)
+	{
+		OutIdx = PhysAsset ? PhysAsset->FindBodyIndex(FName(*BoneName)) : INDEX_NONE;
+		if (OutIdx == INDEX_NONE || !PhysAsset->SkeletalBodySetups.IsValidIndex(OutIdx)) return nullptr;
+		return PhysAsset->SkeletalBodySetups[OutIdx];
+	}
+
+	/** constraint_index wins; otherwise bone_1+bone_2 in either order. INDEX_NONE if neither resolves. */
+	static int32 ResolveConstraintIndex(const UPhysicsAsset* PhysAsset, const TSharedPtr<FJsonObject>& Params)
+	{
+		if (!PhysAsset) return INDEX_NONE;
+
+		double IdxVal;
+		if (Params->TryGetNumberField(TEXT("constraint_index"), IdxVal))
+		{
+			return static_cast<int32>(IdxVal);
+		}
+
+		FString Bone1, Bone2;
+		if (Params->TryGetStringField(TEXT("bone_1"), Bone1) && Params->TryGetStringField(TEXT("bone_2"), Bone2)
+			&& !Bone1.IsEmpty() && !Bone2.IsEmpty())
+		{
+			for (int32 i = 0; i < PhysAsset->ConstraintSetup.Num(); ++i)
+			{
+				if (!PhysAsset->ConstraintSetup[i]) continue;
+				const FConstraintInstance& CI = PhysAsset->ConstraintSetup[i]->DefaultInstance;
+				if ((CI.ConstraintBone1 == FName(*Bone1) && CI.ConstraintBone2 == FName(*Bone2)) ||
+					(CI.ConstraintBone1 == FName(*Bone2) && CI.ConstraintBone2 == FName(*Bone1)))
+				{
+					return i;
+				}
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	// --- Primitive view: one uniform record per analytic collision element ---
+
+	struct FPrimView
+	{
+		EAggCollisionShape::Type Type = EAggCollisionShape::Unknown;
+		int32       Index = INDEX_NONE;          // index WITHIN its own shape array
+		FName       Name;
+		FTransform  Local = FTransform::Identity; // primitive transform in BONE space
+		float       Radius = 0.f;                 // sphere / capsule
+		float       Length = 0.f;                 // capsule / tapered-capsule SEGMENT length
+		FVector     Extents = FVector::ZeroVector;// box FULL extents
+		float       Radius0 = 0.f;
+		float       Radius1 = 0.f;
+		float       RestOffset = 0.f;
+		bool        bContributesToMass = true;
+		ECollisionEnabled::Type CollisionEnabled = ECollisionEnabled::QueryAndPhysics;
+		float       EffectiveRadius = 0.f;        // post engine clamp (capsules)
+		float       EffectiveLength = 0.f;
+		FBox        LocalBounds = FBox(ForceInit);// bone-space AABB
+	};
+
+	static void GatherPrimitives(const FKAggregateGeom& Geom, TArray<FPrimView>& Out)
+	{
+		for (int32 i = 0; i < Geom.SphereElems.Num(); ++i)
+		{
+			const FKSphereElem& E = Geom.SphereElems[i];
+			FPrimView V;
+			V.Type = EAggCollisionShape::Sphere;
+			V.Index = i;
+			V.Name = E.GetName();
+			V.Local = E.GetTransform();
+			V.Radius = E.Radius;
+			V.EffectiveRadius = E.Radius;
+			V.RestOffset = E.RestOffset;
+			V.bContributesToMass = E.GetContributeToMass();
+			V.CollisionEnabled = E.GetCollisionEnabled();
+			V.LocalBounds = E.CalcAABB(FTransform::Identity, 1.0f);
+			Out.Add(V);
+		}
+		for (int32 i = 0; i < Geom.BoxElems.Num(); ++i)
+		{
+			const FKBoxElem& E = Geom.BoxElems[i];
+			FPrimView V;
+			V.Type = EAggCollisionShape::Box;
+			V.Index = i;
+			V.Name = E.GetName();
+			V.Local = E.GetTransform();
+			V.Extents = FVector(E.X, E.Y, E.Z);   // FULL extents
+			V.RestOffset = E.RestOffset;
+			V.bContributesToMass = E.GetContributeToMass();
+			V.CollisionEnabled = E.GetCollisionEnabled();
+			V.LocalBounds = E.CalcAABB(FTransform::Identity, 1.0f);
+			Out.Add(V);
+		}
+		for (int32 i = 0; i < Geom.SphylElems.Num(); ++i)
+		{
+			const FKSphylElem& E = Geom.SphylElems[i];
+			FPrimView V;
+			V.Type = EAggCollisionShape::Sphyl;
+			V.Index = i;
+			V.Name = E.GetName();
+			V.Local = E.GetTransform();
+			V.Radius = E.Radius;
+			V.Length = E.Length;
+			V.RestOffset = E.RestOffset;
+			V.bContributesToMass = E.GetContributeToMass();
+			V.CollisionEnabled = E.GetCollisionEnabled();
+			// What the SIM actually uses — the engine clamps silently, so report both.
+			V.EffectiveRadius = E.GetScaledRadius(FVector::OneVector);
+			V.EffectiveLength = E.GetScaledCylinderLength(FVector::OneVector);
+			V.LocalBounds = E.CalcAABB(FTransform::Identity, 1.0f);
+			Out.Add(V);
+		}
+		for (int32 i = 0; i < Geom.TaperedCapsuleElems.Num(); ++i)
+		{
+			const FKTaperedCapsuleElem& E = Geom.TaperedCapsuleElems[i];
+			FPrimView V;
+			V.Type = EAggCollisionShape::TaperedCapsule;
+			V.Index = i;
+			V.Name = E.GetName();
+			V.Local = E.GetTransform();
+			V.Radius0 = E.Radius0;
+			V.Radius1 = E.Radius1;
+			V.Radius = FMath::Max(E.Radius0, E.Radius1);
+			V.Length = E.Length;
+			V.RestOffset = E.RestOffset;
+			V.bContributesToMass = E.GetContributeToMass();
+			V.CollisionEnabled = E.GetCollisionEnabled();
+			V.LocalBounds = E.CalcAABB(FTransform::Identity, 1.0f);
+			Out.Add(V);
+		}
+		for (int32 i = 0; i < Geom.ConvexElems.Num(); ++i)
+		{
+			const FKConvexElem& E = Geom.ConvexElems[i];
+			FPrimView V;
+			V.Type = EAggCollisionShape::Convex;
+			V.Index = i;
+			V.Name = E.GetName();
+			V.Local = E.GetTransform();
+			V.RestOffset = E.RestOffset;
+			V.bContributesToMass = E.GetContributeToMass();
+			V.CollisionEnabled = E.GetCollisionEnabled();
+			V.LocalBounds = E.CalcAABB(FTransform::Identity, FVector::OneVector);
+			Out.Add(V);
+		}
+	}
+
+	static TSharedPtr<FJsonObject> WritePrimitive(const FPrimView& V)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("index"), V.Index);
+		O->SetStringField(TEXT("name"), V.Name.ToString());
+		O->SetStringField(TEXT("shape_type"), ShapeTypeToString(V.Type));
+		O->SetObjectField(TEXT("center"), WriteVec(V.Local.GetTranslation()));
+		O->SetObjectField(TEXT("rotation"), WriteRot(V.Local.GetRotation().Rotator()));
+		O->SetNumberField(TEXT("rest_offset"), V.RestOffset);
+		O->SetBoolField(TEXT("contributes_to_mass"), V.bContributesToMass);
+		O->SetStringField(TEXT("collision_enabled"), CollisionEnabledToString(V.CollisionEnabled));
+
+		switch (V.Type)
+		{
+			case EAggCollisionShape::Sphere:
+				O->SetNumberField(TEXT("radius"), V.Radius);
+				break;
+			case EAggCollisionShape::Sphyl:
+				O->SetNumberField(TEXT("radius"), V.Radius);
+				O->SetNumberField(TEXT("length"), V.Length);
+				O->SetNumberField(TEXT("total_length"), V.Length + 2.f * V.Radius);
+				O->SetNumberField(TEXT("effective_radius"), V.EffectiveRadius);
+				O->SetNumberField(TEXT("effective_length"), V.EffectiveLength);
+				break;
+			case EAggCollisionShape::Box:
+				O->SetNumberField(TEXT("extent_x"), V.Extents.X);
+				O->SetNumberField(TEXT("extent_y"), V.Extents.Y);
+				O->SetNumberField(TEXT("extent_z"), V.Extents.Z);
+				break;
+			case EAggCollisionShape::TaperedCapsule:
+				O->SetNumberField(TEXT("radius_0"), V.Radius0);
+				O->SetNumberField(TEXT("radius_1"), V.Radius1);
+				O->SetNumberField(TEXT("length"), V.Length);
+				break;
+			default:
+				break;
+		}
+		return O;
+	}
+
+	// --- Component-space collider used by the ref-pose overlap test ---
+	//
+	// Capsule/sphere/tapered reduce EXACTLY to a swept sphere (segment + radius), so
+	// their pair test is analytic and exact. Boxes fall back to a sampled point-to-box
+	// distance, and anything else to an AABB gap — both flagged `approximate`.
+	// The ground-truth pass (temp FPreviewScene + OverlapTestForBody) is deliberately
+	// NOT used: spawning a world inside an MCP action is a known editor-crash source.
+
+	enum class EColliderKind : uint8 { SweptSphere, Box, Bounds };
+
+	struct FPrimCollider
+	{
+		EColliderKind Kind = EColliderKind::Bounds;
+		FVector P0 = FVector::ZeroVector;   // component space
+		FVector P1 = FVector::ZeroVector;
+		double  Radius = 0.0;
+		FTransform BoxToComp = FTransform::Identity;
+		FVector BoxHalf = FVector::ZeroVector;
+		FBox    CompBounds = FBox(ForceInit);
+	};
+
+	static FPrimCollider MakeCollider(const FPrimView& V, const FTransform& BoneCS)
+	{
+		const FTransform ElemCS = V.Local * BoneCS;
+
+		FPrimCollider C;
+		C.CompBounds = V.LocalBounds.TransformBy(ElemCS);
+
+		switch (V.Type)
+		{
+			case EAggCollisionShape::Sphere:
+			{
+				C.Kind = EColliderKind::SweptSphere;
+				C.P0 = C.P1 = ElemCS.GetTranslation();
+				C.Radius = V.Radius;
+				break;
+			}
+			case EAggCollisionShape::Sphyl:
+			case EAggCollisionShape::TaperedCapsule:
+			{
+				// FKSphylElem: axis is LOCAL Z, Length EXCLUDES the two hemispherical caps.
+				const FVector Axis = ElemCS.GetUnitAxis(EAxis::Z);
+				const FVector Centre = ElemCS.GetTranslation();
+				const double  Half = 0.5 * V.Length;
+				C.Kind = EColliderKind::SweptSphere;
+				C.P0 = Centre - Half * Axis;
+				C.P1 = Centre + Half * Axis;
+				C.Radius = V.Radius;
+				break;
+			}
+			case EAggCollisionShape::Box:
+			{
+				C.Kind = EColliderKind::Box;
+				C.BoxToComp = ElemCS;
+				C.BoxHalf = V.Extents * 0.5;    // X/Y/Z are FULL extents
+				break;
+			}
+			default:
+				C.Kind = EColliderKind::Bounds;
+				break;
+		}
+		return C;
+	}
+
+	/** Distance between the two SURFACES. Negative == interpenetration depth. */
+	static double ColliderSurfaceDistance(const FPrimCollider& A, const FPrimCollider& B, bool& bOutApproximate)
+	{
+		bOutApproximate = false;
+
+		if (A.Kind == EColliderKind::SweptSphere && B.Kind == EColliderKind::SweptSphere)
+		{
+			FVector CA, CB;
+			FMath::SegmentDistToSegmentSafe<double>(A.P0, A.P1, B.P0, B.P1, CA, CB);
+			return FVector::Dist(CA, CB) - (A.Radius + B.Radius);
+		}
+
+		// Box vs swept sphere — sample the segment into box-local space.
+		auto BoxVsSwept = [&bOutApproximate](const FPrimCollider& Box, const FPrimCollider& Swept) -> double
+		{
+			bOutApproximate = true;
+			const FBox Local(-Box.BoxHalf, Box.BoxHalf);
+			const int32 NumSamples = 33;
+			double Best = TNumericLimits<double>::Max();
+			for (int32 s = 0; s < NumSamples; ++s)
+			{
+				const double T = (NumSamples > 1) ? (double)s / (double)(NumSamples - 1) : 0.0;
+				const FVector WorldPt = FMath::Lerp(Swept.P0, Swept.P1, T);
+				const FVector LocalPt = Box.BoxToComp.InverseTransformPosition(WorldPt);
+				Best = FMath::Min(Best, FMath::Sqrt(Local.ComputeSquaredDistanceToPoint(LocalPt)));
+			}
+			return Best - Swept.Radius;
+		};
+
+		if (A.Kind == EColliderKind::Box && B.Kind == EColliderKind::SweptSphere) return BoxVsSwept(A, B);
+		if (B.Kind == EColliderKind::Box && A.Kind == EColliderKind::SweptSphere) return BoxVsSwept(B, A);
+
+		// Everything else — component-space AABB gap (negative = overlap depth on the
+		// least-separated axis). Coarse, and reported as such.
+		bOutApproximate = true;
+		if (!A.CompBounds.IsValid || !B.CompBounds.IsValid) return TNumericLimits<double>::Max();
+
+		double Sep[3];
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			const double AMin = A.CompBounds.Min[Axis], AMax = A.CompBounds.Max[Axis];
+			const double BMin = B.CompBounds.Min[Axis], BMax = B.CompBounds.Max[Axis];
+			Sep[Axis] = FMath::Max(AMin - BMax, BMin - AMax);   // >0 separated, <0 overlapping
+		}
+		const double MaxSep = FMath::Max3(Sep[0], Sep[1], Sep[2]);
+		if (MaxSep > 0.0)
+		{
+			// Separated on at least one axis — Euclidean gap over the separated axes.
+			double SumSq = 0.0;
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				if (Sep[Axis] > 0.0) SumSq += Sep[Axis] * Sep[Axis];
+			}
+			return FMath::Sqrt(SumSq);
+		}
+		return MaxSep;   // overlapping on all three axes: least-penetrating axis depth
+	}
+
+	// --- Reference-pose cache (bone transforms + body/bone maps + adjacency inputs) ---
+
+	struct FRefPoseInfo
+	{
+		bool bValid = false;
+		USkeletalMesh* PreviewMesh = nullptr;
+		const FReferenceSkeleton* RefSkel = nullptr;
+		TArray<FTransform> BoneCS;              // per ref-skeleton bone, scaling removed
+		TArray<int32> BodyBoneIndex;            // per body -> bone index (INDEX_NONE if orphaned)
+		TArray<int32> NearestBodyAncestor;      // per body -> nearest body-bearing ancestor body index
+		TArray<TArray<FPrimView>> BodyPrims;    // per body -> its analytic primitives
+	};
+
+	/**
+	 * Build the ref-pose cache. Returns false (bValid stays false) when the physics asset
+	 * has no preview mesh — in that state EVERY ref-pose figure is meaningless and
+	 * SnapTransformsToDefault would collapse the parent frames, so callers must gate on it.
+	 */
+	static bool BuildRefPose(UPhysicsAsset* PhysAsset, FRefPoseInfo& Out)
+	{
+		if (!PhysAsset) return false;
+
+		Out.BodyBoneIndex.Init(INDEX_NONE, PhysAsset->SkeletalBodySetups.Num());
+		Out.NearestBodyAncestor.Init(INDEX_NONE, PhysAsset->SkeletalBodySetups.Num());
+		Out.BodyPrims.SetNum(PhysAsset->SkeletalBodySetups.Num());
+
+		for (int32 b = 0; b < PhysAsset->SkeletalBodySetups.Num(); ++b)
+		{
+			if (const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b])
+			{
+				GatherPrimitives(BS->AggGeom, Out.BodyPrims[b]);
+			}
+		}
+
+		Out.PreviewMesh = PhysAsset->GetPreviewMesh();
+		if (!Out.PreviewMesh) return false;
+
+		Out.RefSkel = &Out.PreviewMesh->GetRefSkeleton();
+		const int32 NumBones = Out.RefSkel->GetNum();
+		Out.BoneCS.SetNum(NumBones);
+		for (int32 i = 0; i < NumBones; ++i)
+		{
+			Out.BoneCS[i] = FAnimationRuntime::GetComponentSpaceTransformRefPose(*Out.RefSkel, i);
+			Out.BoneCS[i].RemoveScaling();   // PhysDrawing does this before using a bone TM as a frame basis
+		}
+
+		TArray<int32> BoneToBody;
+		BoneToBody.Init(INDEX_NONE, NumBones);
+		for (int32 b = 0; b < PhysAsset->SkeletalBodySetups.Num(); ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			const int32 BoneIdx = Out.RefSkel->FindBoneIndex(BS->BoneName);
+			Out.BodyBoneIndex[b] = BoneIdx;
+			if (BoneIdx != INDEX_NONE) BoneToBody[BoneIdx] = b;
+		}
+
+		// Nearest body-bearing ANCESTOR — this is what "adjacent" means for a physics
+		// asset that skips bones (pelvis -> spine_02 with no body on spine_01).
+		for (int32 b = 0; b < Out.BodyBoneIndex.Num(); ++b)
+		{
+			int32 BoneIdx = Out.BodyBoneIndex[b];
+			if (BoneIdx == INDEX_NONE) continue;
+			int32 Parent = Out.RefSkel->GetParentIndex(BoneIdx);
+			while (Parent != INDEX_NONE)
+			{
+				if (BoneToBody[Parent] != INDEX_NONE)
+				{
+					Out.NearestBodyAncestor[b] = BoneToBody[Parent];
+					break;
+				}
+				Parent = Out.RefSkel->GetParentIndex(Parent);
+			}
+		}
+
+		Out.bValid = true;
+		return true;
+	}
+
+	/** Per-body component-space colliders in the reference pose (empty entry == unusable body). */
+	static void BuildBodyColliders(const FRefPoseInfo& Ref, TArray<TArray<FPrimCollider>>& Out)
+	{
+		Out.Reset();
+		Out.SetNum(Ref.BodyPrims.Num());
+		if (!Ref.bValid) return;
+
+		for (int32 b = 0; b < Ref.BodyPrims.Num(); ++b)
+		{
+			const int32 BoneIdx = Ref.BodyBoneIndex.IsValidIndex(b) ? Ref.BodyBoneIndex[b] : INDEX_NONE;
+			if (!Ref.BoneCS.IsValidIndex(BoneIdx)) continue;
+			for (const FPrimView& V : Ref.BodyPrims[b])
+			{
+				Out[b].Add(MakeCollider(V, Ref.BoneCS[BoneIdx]));
+			}
+		}
+	}
+
+	/**
+	 * Closest surface distance over every primitive pair of two bodies.
+	 * Negative == interpenetration depth. false when either body has no usable collider.
+	 */
+	static bool BodyPairSurfaceDistance(const TArray<FPrimCollider>& A, const TArray<FPrimCollider>& B,
+		double& OutDist, bool& bOutApproximate)
+	{
+		OutDist = TNumericLimits<double>::Max();
+		bOutApproximate = false;
+
+		for (const FPrimCollider& Pa : A)
+		{
+			for (const FPrimCollider& Pb : B)
+			{
+				bool bThisApprox = false;
+				const double D = ColliderSurfaceDistance(Pa, Pb, bThisApprox);
+				if (D < OutDist)
+				{
+					OutDist = D;
+					bOutApproximate = bThisApprox;
+				}
+			}
+		}
+		return OutDist != TNumericLimits<double>::Max();
+	}
+
+	/** Constraint index keyed by unordered body-index pair ("min|max"). */
+	static void BuildConstraintPairMap(const UPhysicsAsset* PhysAsset, TMap<FString, int32>& Out)
+	{
+		Out.Reset();
+		if (!PhysAsset) return;
+		for (int32 c = 0; c < PhysAsset->ConstraintSetup.Num(); ++c)
+		{
+			const UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const int32 B1 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone1);
+			const int32 B2 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone2);
+			if (B1 == INDEX_NONE || B2 == INDEX_NONE) continue;
+			Out.Add(FString::Printf(TEXT("%d|%d"), FMath::Min(B1, B2), FMath::Max(B1, B2)), c);
+		}
+	}
+
+	/** Component-space transform of a constraint frame in the reference pose. */
+	static bool GetConstraintFrameCS(const FRefPoseInfo& Ref, const FConstraintInstance& CI,
+		EConstraintFrame::Type Frame, FTransform& Out)
+	{
+		if (!Ref.bValid || !Ref.RefSkel) return false;
+		const FName BoneName = (Frame == EConstraintFrame::Frame1) ? CI.ConstraintBone1 : CI.ConstraintBone2;
+		const int32 BoneIdx = Ref.RefSkel->FindBoneIndex(BoneName);
+		if (!Ref.BoneCS.IsValidIndex(BoneIdx)) return false;
+		Out = CI.GetRefFrame(Frame) * Ref.BoneCS[BoneIdx];
+		return true;
+	}
+
+	/**
+	 * Swing/twist decomposition in the EXACT Chaos convention, replicated locally so
+	 * MonolithAnimation does not need to link the Chaos module:
+	 *   R01   = R0^-1 * R1;  R01.ToSwingTwistX(Swing, Twist)  (twist axis = frame X)
+	 *   Twist = signed angle of the twist quat about X
+	 *   Swing1 = 4*atan2(Swing.Z, 1+Swing.W),  Swing2 = 4*atan2(Swing.Y, 1+Swing.W)
+	 * Source: Chaos/PBDJointConstraintUtilities.cpp GetSwingTwistAngles + Rotation.h
+	 * ToSwingTwistX. Angles returned in RADIANS.
+	 */
+	static void GetSwingTwistAngles(const FQuat& R0, const FQuat& R1,
+		double& OutTwist, double& OutSwing1, double& OutSwing2)
+	{
+		const FQuat R01 = (R0.Inverse() * R1).GetNormalized();
+		const FQuat Twist = (R01.X != 0.0) ? FQuat(R01.X, 0.0, 0.0, R01.W).GetNormalized() : FQuat::Identity;
+		const FQuat Swing = R01 * Twist.Inverse();
+
+		double Angle = Twist.GetAngle();
+		if (Angle > UE_PI) Angle -= 2.0 * UE_PI;
+		if (Twist.X < 0.0) Angle = -Angle;
+		OutTwist = Angle;
+
+		// The 4*atan2 form assumes the positive-W hemisphere; flip first or it reports ~360 deg.
+		FQuat S = Swing;
+		if (S.W < 0.0) { S.X = -S.X; S.Y = -S.Y; S.Z = -S.Z; S.W = -S.W; }
+		OutSwing1 = 4.0 * FMath::Atan2(S.Z, 1.0 + S.W);
+		OutSwing2 = 4.0 * FMath::Atan2(S.Y, 1.0 + S.W);
+	}
+
+	/** Mass-weighted centroid of the mass-contributing primitives, in BONE space. */
+	static FVector ComputeBodyCOMBoneSpace(const TArray<FPrimView>& Prims)
+	{
+		double TotalWeight = 0.0;
+		FVector Weighted = FVector::ZeroVector;
+		for (const FPrimView& V : Prims)
+		{
+			if (!V.bContributesToMass) continue;
+			double Vol = 0.0;
+			switch (V.Type)
+			{
+				case EAggCollisionShape::Sphere:
+					Vol = (4.0 / 3.0) * UE_PI * FMath::Pow((double)V.Radius, 3.0);
+					break;
+				case EAggCollisionShape::Sphyl:
+				case EAggCollisionShape::TaperedCapsule:
+					Vol = UE_PI * FMath::Square((double)V.Radius) * ((4.0 / 3.0) * V.Radius + V.Length);
+					break;
+				case EAggCollisionShape::Box:
+					Vol = FMath::Abs(V.Extents.X * V.Extents.Y * V.Extents.Z);
+					break;
+				default:
+					Vol = FMath::Max(0.0, V.LocalBounds.GetVolume());
+					break;
+			}
+			if (Vol <= 0.0) continue;
+			TotalWeight += Vol;
+			Weighted += V.Local.GetTranslation() * Vol;
+		}
+		return (TotalWeight > 0.0) ? (Weighted / TotalWeight) : FVector::ZeroVector;
+	}
+
+	/** Largest primitive "reach" on a body — used to normalise COM offsets / lever arms. */
+	static double ComputeCharacteristicSize(const TArray<FPrimView>& Prims)
+	{
+		double Best = 0.0;
+		for (const FPrimView& V : Prims)
+		{
+			double Size = 0.0;
+			switch (V.Type)
+			{
+				case EAggCollisionShape::Sphere:         Size = V.Radius; break;
+				case EAggCollisionShape::Sphyl:
+				case EAggCollisionShape::TaperedCapsule: Size = V.Radius + 0.5 * V.Length; break;
+				case EAggCollisionShape::Box:            Size = 0.5 * V.Extents.GetMax(); break;
+				default:                                 Size = V.LocalBounds.GetExtent().GetMax(); break;
+			}
+			Best = FMath::Max(Best, Size);
+		}
+		return Best;
+	}
+}
+
 FMonolithActionResult FMonolithAnimationActions::HandleGetPhysicsAssetInfo(const TSharedPtr<FJsonObject>& Params)
 {
+	using namespace MonolithPhysics;
+
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 
 	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
 	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
 
+	// Section toggles — additive to the Wave 15 payload, so old callers see the same keys.
+	bool bIncludeGeometry = true;   Params->TryGetBoolField(TEXT("include_geometry"), bIncludeGeometry);
+	bool bIncludeFrames = true;     Params->TryGetBoolField(TEXT("include_frames"), bIncludeFrames);
+	bool bIncludeSolver = true;     Params->TryGetBoolField(TEXT("include_solver"), bIncludeSolver);
+	bool bIncludeTable = false;     Params->TryGetBoolField(TEXT("include_collision_table"), bIncludeTable);
+	bool bIncludeDerived = false;   Params->TryGetBoolField(TEXT("include_derived"), bIncludeDerived);
+
+	FString BoneFilter;
+	Params->TryGetStringField(TEXT("bone_name"), BoneFilter);
+	int32 ConstraintFilter = INDEX_NONE;
+	double ConstraintFilterVal;
+	if (Params->TryGetNumberField(TEXT("constraint_index"), ConstraintFilterVal))
+	{
+		ConstraintFilter = static_cast<int32>(ConstraintFilterVal);
+	}
+
+	FRefPoseInfo Ref;
+	const bool bRefValid = BuildRefPose(PhysAsset, Ref);
+
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("asset_path"), PhysAsset->GetPathName());
+	Root->SetStringField(TEXT("preview_mesh"), Ref.PreviewMesh ? Ref.PreviewMesh->GetPathName() : FString());
+	Root->SetBoolField(TEXT("preview_mesh_present"), Ref.PreviewMesh != nullptr);
+	Root->SetNumberField(TEXT("ref_bone_count"), bRefValid ? Ref.RefSkel->GetNum() : 0);
 
 	// Bodies
+	double TotalMass = 0.0;
 	TArray<TSharedPtr<FJsonValue>> BodiesArr;
 	for (int32 i = 0; i < PhysAsset->SkeletalBodySetups.Num(); ++i)
 	{
 		USkeletalBodySetup* BodySetup = PhysAsset->SkeletalBodySetups[i];
 		if (!BodySetup) continue;
 
+		const float BodyMass = BodySetup->CalculateMass(nullptr);
+		TotalMass += BodyMass;
+
+		if (!BoneFilter.IsEmpty() && !BodySetup->BoneName.ToString().Equals(BoneFilter, ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
+
 		TSharedPtr<FJsonObject> BodyObj = MakeShared<FJsonObject>();
 		BodyObj->SetNumberField(TEXT("index"), i);
 		BodyObj->SetStringField(TEXT("bone_name"), BodySetup->BoneName.ToString());
 		BodyObj->SetStringField(TEXT("physics_type"), PhysicsTypeToString(BodySetup->PhysicsType));
 		BodyObj->SetStringField(TEXT("shape_type"), GetShapeTypeString(BodySetup));
+		BodyObj->SetNumberField(TEXT("bone_index"), Ref.BodyBoneIndex.IsValidIndex(i) ? Ref.BodyBoneIndex[i] : INDEX_NONE);
+		BodyObj->SetBoolField(TEXT("bone_exists_in_ref_skeleton"),
+			Ref.BodyBoneIndex.IsValidIndex(i) && Ref.BodyBoneIndex[i] != INDEX_NONE);
 
 		const FBodyInstance& BI = BodySetup->DefaultInstance;
-		BodyObj->SetNumberField(TEXT("mass"), BI.GetMassOverride());
+		// NOTE: `mass` used to be GetMassOverride(), which is the MassInKgOverride FIELD
+		// (struct default 100) regardless of bOverrideMass — i.e. a constant on most assets.
+		// It now reports the mass the sim actually uses.
+		BodyObj->SetNumberField(TEXT("mass"), BodyMass);
+		BodyObj->SetNumberField(TEXT("computed_mass_kg"), BodyMass);
+		BodyObj->SetNumberField(TEXT("mass_override_kg"), BI.GetMassOverride());
 		BodyObj->SetBoolField(TEXT("override_mass"), BI.bOverrideMass);
+		BodyObj->SetNumberField(TEXT("mass_scale"), BI.MassScale);
+		BodyObj->SetNumberField(TEXT("volume_cm3"),
+			BodySetup->GetScaledVolume(FVector::OneVector, EVolumeCalculationMethod::OnlyMassRelevantGeoms));
+		const UPhysicalMaterial* PhysMat = BodySetup->GetPhysMaterial();
+		BodyObj->SetNumberField(TEXT("density"), PhysMat ? PhysMat->Density : 1.0f);
 		BodyObj->SetNumberField(TEXT("linear_damping"), BI.LinearDamping);
 		BodyObj->SetNumberField(TEXT("angular_damping"), BI.AngularDamping);
 		BodyObj->SetStringField(TEXT("collision_profile"), BI.GetCollisionProfileName().ToString());
 		BodyObj->SetBoolField(TEXT("simulate_physics"), BI.bSimulatePhysics);
 		BodyObj->SetBoolField(TEXT("enable_gravity"), BI.bEnableGravity);
 
-		// Geometry counts
+		// Geometry counts (unchanged shape)
 		TSharedPtr<FJsonObject> GeomObj = MakeShared<FJsonObject>();
 		const FKAggregateGeom& Geom = BodySetup->AggGeom;
 		GeomObj->SetNumberField(TEXT("spheres"), Geom.SphereElems.Num());
@@ -9925,11 +10828,53 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetPhysicsAssetInfo(const
 		GeomObj->SetNumberField(TEXT("convex_hulls"), Geom.ConvexElems.Num());
 		GeomObj->SetNumberField(TEXT("tapered_capsules"), Geom.TaperedCapsuleElems.Num());
 		BodyObj->SetObjectField(TEXT("geometry"), GeomObj);
+		BodyObj->SetNumberField(TEXT("primitive_count"), Geom.GetElementCount());
+
+		static const TArray<FPrimView> EmptyPrims;
+		const TArray<FPrimView>& Prims = Ref.BodyPrims.IsValidIndex(i) ? Ref.BodyPrims[i] : EmptyPrims;
+
+		if (bIncludeGeometry)
+		{
+			TArray<TSharedPtr<FJsonValue>> PrimArr;
+			for (const FPrimView& V : Prims)
+			{
+				TSharedPtr<FJsonObject> PrimObj = WritePrimitive(V);
+				if (bIncludeDerived && bRefValid && Ref.BodyBoneIndex.IsValidIndex(i)
+					&& Ref.BoneCS.IsValidIndex(Ref.BodyBoneIndex[i]))
+				{
+					PrimObj->SetObjectField(TEXT("transform_component_space"),
+						WriteXform(V.Local * Ref.BoneCS[Ref.BodyBoneIndex[i]]));
+				}
+				PrimArr.Add(MakeShared<FJsonValueObject>(PrimObj));
+			}
+			BodyObj->SetArrayField(TEXT("primitives"), PrimArr);
+		}
+
+		if (bIncludeDerived)
+		{
+			const FVector COM = ComputeBodyCOMBoneSpace(Prims);
+			BodyObj->SetObjectField(TEXT("com_bonespace"), WriteVec(COM));
+			BodyObj->SetNumberField(TEXT("com_offset_cm"), COM.Size());
+
+			FBox Bounds(ForceInit);
+			for (const FPrimView& V : Prims)
+			{
+				if (V.LocalBounds.IsValid) Bounds += V.LocalBounds.TransformBy(V.Local);
+			}
+			if (Bounds.IsValid)
+			{
+				TSharedPtr<FJsonObject> BoundsObj = MakeShared<FJsonObject>();
+				BoundsObj->SetObjectField(TEXT("min"), WriteVec(Bounds.Min));
+				BoundsObj->SetObjectField(TEXT("max"), WriteVec(Bounds.Max));
+				BodyObj->SetObjectField(TEXT("bounds_cm"), BoundsObj);
+			}
+		}
 
 		BodiesArr.Add(MakeShared<FJsonValueObject>(BodyObj));
 	}
 	Root->SetArrayField(TEXT("bodies"), BodiesArr);
 	Root->SetNumberField(TEXT("body_count"), BodiesArr.Num());
+	Root->SetNumberField(TEXT("total_mass_kg"), TotalMass);
 
 	// Constraints
 	TArray<TSharedPtr<FJsonValue>> ConstraintsArr;
@@ -9937,6 +10882,7 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetPhysicsAssetInfo(const
 	{
 		UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[i];
 		if (!CT) continue;
+		if (ConstraintFilter != INDEX_NONE && i != ConstraintFilter) continue;
 
 		const FConstraintInstance& CI = CT->DefaultInstance;
 		const FConstraintProfileProperties& Profile = CI.ProfileInstance;
@@ -9947,6 +10893,11 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetPhysicsAssetInfo(const
 		ConstraintObj->SetStringField(TEXT("bone_1"), CI.ConstraintBone1.ToString());
 		ConstraintObj->SetStringField(TEXT("bone_2"), CI.ConstraintBone2.ToString());
 
+		const int32 BodyIdx1 = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+		const int32 BodyIdx2 = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+		ConstraintObj->SetNumberField(TEXT("body_index_1"), BodyIdx1);
+		ConstraintObj->SetNumberField(TEXT("body_index_2"), BodyIdx2);
+
 		// Angular limits
 		TSharedPtr<FJsonObject> AngularObj = MakeShared<FJsonObject>();
 		AngularObj->SetStringField(TEXT("swing1_motion"), ConstraintMotionToString(static_cast<EAngularConstraintMotion>(Profile.ConeLimit.Swing1Motion.GetValue())));
@@ -9955,19 +10906,144 @@ FMonolithActionResult FMonolithAnimationActions::HandleGetPhysicsAssetInfo(const
 		AngularObj->SetNumberField(TEXT("swing2_limit"), Profile.ConeLimit.Swing2LimitDegrees);
 		AngularObj->SetStringField(TEXT("twist_motion"), ConstraintMotionToString(static_cast<EAngularConstraintMotion>(Profile.TwistLimit.TwistMotion.GetValue())));
 		AngularObj->SetNumberField(TEXT("twist_limit"), Profile.TwistLimit.TwistLimitDegrees);
+		AngularObj->SetBoolField(TEXT("swing_soft"), Profile.ConeLimit.bSoftConstraint != 0);
+		AngularObj->SetNumberField(TEXT("swing_stiffness"), Profile.ConeLimit.Stiffness);
+		AngularObj->SetNumberField(TEXT("swing_damping"), Profile.ConeLimit.Damping);
+		AngularObj->SetNumberField(TEXT("swing_restitution"), Profile.ConeLimit.Restitution);
+		AngularObj->SetNumberField(TEXT("swing_contact_distance"), Profile.ConeLimit.ContactDistance);
+		AngularObj->SetBoolField(TEXT("twist_soft"), Profile.TwistLimit.bSoftConstraint != 0);
+		AngularObj->SetNumberField(TEXT("twist_stiffness"), Profile.TwistLimit.Stiffness);
+		AngularObj->SetNumberField(TEXT("twist_damping"), Profile.TwistLimit.Damping);
+		AngularObj->SetNumberField(TEXT("twist_restitution"), Profile.TwistLimit.Restitution);
+		AngularObj->SetNumberField(TEXT("twist_contact_distance"), Profile.TwistLimit.ContactDistance);
 		ConstraintObj->SetObjectField(TEXT("angular"), AngularObj);
 
-		// Linear limits
+		// Linear limits — a ragdoll wants X/Y/Z all Locked; Wave 15 could not even read them.
 		TSharedPtr<FJsonObject> LinearObj = MakeShared<FJsonObject>();
 		LinearObj->SetNumberField(TEXT("limit"), Profile.LinearLimit.Limit);
+		LinearObj->SetStringField(TEXT("x_motion"), LinearMotionToString(static_cast<ELinearConstraintMotion>(Profile.LinearLimit.XMotion.GetValue())));
+		LinearObj->SetStringField(TEXT("y_motion"), LinearMotionToString(static_cast<ELinearConstraintMotion>(Profile.LinearLimit.YMotion.GetValue())));
+		LinearObj->SetStringField(TEXT("z_motion"), LinearMotionToString(static_cast<ELinearConstraintMotion>(Profile.LinearLimit.ZMotion.GetValue())));
+		LinearObj->SetBoolField(TEXT("soft"), Profile.LinearLimit.bSoftConstraint != 0);
+		LinearObj->SetNumberField(TEXT("stiffness"), Profile.LinearLimit.Stiffness);
+		LinearObj->SetNumberField(TEXT("damping"), Profile.LinearLimit.Damping);
+		LinearObj->SetNumberField(TEXT("restitution"), Profile.LinearLimit.Restitution);
+		LinearObj->SetNumberField(TEXT("contact_distance"), Profile.LinearLimit.ContactDistance);
 		ConstraintObj->SetObjectField(TEXT("linear"), LinearObj);
 
 		ConstraintObj->SetBoolField(TEXT("disable_collision"), Profile.bDisableCollision);
+		// AUTHORITATIVE pair state. The constraint checkbox above never writes
+		// CollisionDisableTable, and the table is what InitCollisionRelationships applies.
+		ConstraintObj->SetBoolField(TEXT("pair_collision_enabled"),
+			(BodyIdx1 != INDEX_NONE && BodyIdx2 != INDEX_NONE) ? PhysAsset->IsCollisionEnabled(BodyIdx1, BodyIdx2) : false);
+
+		// Projection / shock propagation / mass conditioning — the launch amplifiers.
+		TSharedPtr<FJsonObject> ProjObj = MakeShared<FJsonObject>();
+		ProjObj->SetBoolField(TEXT("enabled"), Profile.bEnableProjection != 0);
+		ProjObj->SetNumberField(TEXT("linear_tolerance"), Profile.ProjectionLinearTolerance);
+		ProjObj->SetNumberField(TEXT("angular_tolerance"), Profile.ProjectionAngularTolerance);
+		ProjObj->SetNumberField(TEXT("linear_alpha"), Profile.ProjectionLinearAlpha);
+		ProjObj->SetNumberField(TEXT("angular_alpha"), Profile.ProjectionAngularAlpha);
+		ConstraintObj->SetObjectField(TEXT("projection"), ProjObj);
+
+		TSharedPtr<FJsonObject> ShockObj = MakeShared<FJsonObject>();
+		ShockObj->SetBoolField(TEXT("enabled"), Profile.bEnableShockPropagation != 0);
+		ShockObj->SetNumberField(TEXT("alpha"), Profile.ShockPropagationAlpha);
+		ConstraintObj->SetObjectField(TEXT("shock_propagation"), ShockObj);
+
+		ConstraintObj->SetBoolField(TEXT("parent_dominates"), Profile.bParentDominates != 0);
+		ConstraintObj->SetBoolField(TEXT("mass_conditioning"), Profile.bEnableMassConditioning != 0);
+		ConstraintObj->SetBoolField(TEXT("use_linear_joint_solver"), Profile.bUseLinearJointSolver != 0);
+		ConstraintObj->SetNumberField(TEXT("contact_transfer_scale"), Profile.ContactTransferScale);
+
+		TSharedPtr<FJsonObject> LinBreakObj = MakeShared<FJsonObject>();
+		LinBreakObj->SetBoolField(TEXT("enabled"), Profile.bLinearBreakable != 0);
+		LinBreakObj->SetNumberField(TEXT("threshold"), Profile.LinearBreakThreshold);
+		ConstraintObj->SetObjectField(TEXT("linear_breakable"), LinBreakObj);
+
+		TSharedPtr<FJsonObject> AngBreakObj = MakeShared<FJsonObject>();
+		AngBreakObj->SetBoolField(TEXT("enabled"), Profile.bAngularBreakable != 0);
+		AngBreakObj->SetNumberField(TEXT("threshold"), Profile.AngularBreakThreshold);
+		ConstraintObj->SetObjectField(TEXT("angular_breakable"), AngBreakObj);
+
+		if (bIncludeFrames)
+		{
+			// Frames are stored as raw axis vectors, NOT transforms — emit both forms.
+			TSharedPtr<FJsonObject> F1 = MakeShared<FJsonObject>();
+			F1->SetObjectField(TEXT("position"), WriteVec(CI.Pos1));
+			F1->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis1));
+			F1->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis1));
+			ConstraintObj->SetObjectField(TEXT("frame1"), F1);
+
+			TSharedPtr<FJsonObject> F2 = MakeShared<FJsonObject>();
+			F2->SetObjectField(TEXT("position"), WriteVec(CI.Pos2));
+			F2->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis2));
+			F2->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis2));
+			ConstraintObj->SetObjectField(TEXT("frame2"), F2);
+
+			const FTransform RefFrame1 = CI.GetRefFrame(EConstraintFrame::Frame1);
+			const FTransform RefFrame2 = CI.GetRefFrame(EConstraintFrame::Frame2);
+			ConstraintObj->SetObjectField(TEXT("frame1_transform"), WriteXform(RefFrame1));
+			ConstraintObj->SetObjectField(TEXT("frame2_transform"), WriteXform(RefFrame2));
+			ConstraintObj->SetObjectField(TEXT("angular_rotation_offset"), WriteRot(CI.AngularRotationOffset));
+			// |det - 1| — the engine's own "Contained scale." test on a frame basis.
+			ConstraintObj->SetNumberField(TEXT("frame_determinant_error_1"), FMath::Abs(RefFrame1.ToMatrixWithScale().Determinant() - 1.0));
+			ConstraintObj->SetNumberField(TEXT("frame_determinant_error_2"), FMath::Abs(RefFrame2.ToMatrixWithScale().Determinant() - 1.0));
+		}
 
 		ConstraintsArr.Add(MakeShared<FJsonValueObject>(ConstraintObj));
 	}
 	Root->SetArrayField(TEXT("constraints"), ConstraintsArr);
 	Root->SetNumberField(TEXT("constraint_count"), ConstraintsArr.Num());
+
+	if (bIncludeSolver)
+	{
+		Root->SetStringField(TEXT("solver_type"), SolverTypeToString(PhysAsset->SolverType));
+		// FPhysicsAssetSolverSettings only drives the RBAN anim-node path. On a World-type
+		// asset (the ragdoll case) they are a documented no-op — say so, or an agent will
+		// "try raising PositionIterations", see nothing, and cross off a good avenue.
+		Root->SetBoolField(TEXT("solver_settings_apply"), PhysAsset->SolverType == EPhysicsAssetSolverType::RBAN);
+		if (PhysAsset->SolverType != EPhysicsAssetSolverType::RBAN)
+		{
+			Root->SetStringField(TEXT("solver_settings_note"),
+				TEXT("SolverType is World: solver_settings have NO effect (they only drive the RBAN anim-node solver)."));
+		}
+
+		const FPhysicsAssetSolverSettings& SS = PhysAsset->SolverSettings;
+		TSharedPtr<FJsonObject> SolverObj = MakeShared<FJsonObject>();
+		SolverObj->SetNumberField(TEXT("position_iterations"), SS.PositionIterations);
+		SolverObj->SetNumberField(TEXT("velocity_iterations"), SS.VelocityIterations);
+		SolverObj->SetNumberField(TEXT("projection_iterations"), SS.ProjectionIterations);
+		SolverObj->SetNumberField(TEXT("cull_distance"), SS.CullDistance);
+		SolverObj->SetNumberField(TEXT("max_depenetration_velocity"), SS.MaxDepenetrationVelocity);
+		SolverObj->SetNumberField(TEXT("fixed_time_step"), SS.FixedTimeStep);
+		SolverObj->SetBoolField(TEXT("use_linear_joint_solver"), SS.bUseLinearJointSolver);
+		SolverObj->SetBoolField(TEXT("use_manifolds"), SS.bUseManifolds);
+		Root->SetObjectField(TEXT("solver_settings"), SolverObj);
+		Root->SetBoolField(TEXT("not_for_dedicated_server"), PhysAsset->bNotForDedicatedServer != 0);
+	}
+
+	if (bIncludeTable)
+	{
+		// CollisionDisableTable is a plain TMap (not a UPROPERTY) — invisible to Python
+		// and to every other tool. Dumping it is a large part of this action's value.
+		TArray<TSharedPtr<FJsonValue>> TableArr;
+		for (const TPair<FRigidBodyIndexPair, bool>& Pair : PhysAsset->CollisionDisableTable)
+		{
+			const int32 A = Pair.Key.Indices[0];
+			const int32 B = Pair.Key.Indices[1];
+			TSharedPtr<FJsonObject> PairObj = MakeShared<FJsonObject>();
+			PairObj->SetNumberField(TEXT("body_i"), A);
+			PairObj->SetNumberField(TEXT("body_j"), B);
+			PairObj->SetStringField(TEXT("bone_1"), PhysAsset->SkeletalBodySetups.IsValidIndex(A) && PhysAsset->SkeletalBodySetups[A]
+				? PhysAsset->SkeletalBodySetups[A]->BoneName.ToString() : FString());
+			PairObj->SetStringField(TEXT("bone_2"), PhysAsset->SkeletalBodySetups.IsValidIndex(B) && PhysAsset->SkeletalBodySetups[B]
+				? PhysAsset->SkeletalBodySetups[B]->BoneName.ToString() : FString());
+			TableArr.Add(MakeShared<FJsonValueObject>(PairObj));
+		}
+		Root->SetArrayField(TEXT("collision_disable_table"), TableArr);
+		Root->SetNumberField(TEXT("collision_disable_table_size"), TableArr.Num());
+	}
 
 	// Physical animation profiles
 #if WITH_EDITORONLY_DATA
@@ -10084,110 +11160,252 @@ FMonolithActionResult FMonolithAnimationActions::HandleSetBodyProperties(const T
 
 FMonolithActionResult FMonolithAnimationActions::HandleSetConstraintProperties(const TSharedPtr<FJsonObject>& Params)
 {
+	using namespace MonolithPhysics;
+
 	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
 
 	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
 	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
 
-	// Find constraint by index or bone pair
-	int32 ConstraintIdx = INDEX_NONE;
-	double IdxVal;
-	if (Params->TryGetNumberField(TEXT("constraint_index"), IdxVal))
+	// apply_to_all is the realistic form of "turn projection down on the whole ragdoll".
+	bool bApplyToAll = false;
+	Params->TryGetBoolField(TEXT("apply_to_all"), bApplyToAll);
+
+	TArray<int32> TargetIndices;
+	if (bApplyToAll)
 	{
-		ConstraintIdx = static_cast<int32>(IdxVal);
+		for (int32 i = 0; i < PhysAsset->ConstraintSetup.Num(); ++i)
+		{
+			if (PhysAsset->ConstraintSetup[i]) TargetIndices.Add(i);
+		}
+		if (TargetIndices.Num() == 0)
+			return FMonolithActionResult::Error(TEXT("Physics asset has no constraints"));
 	}
 	else
 	{
-		FString Bone1, Bone2;
-		if (Params->TryGetStringField(TEXT("bone_1"), Bone1) && Params->TryGetStringField(TEXT("bone_2"), Bone2)
-			&& !Bone1.IsEmpty() && !Bone2.IsEmpty())
-		{
-			// Search through constraints for matching bone pair
-			for (int32 i = 0; i < PhysAsset->ConstraintSetup.Num(); ++i)
-			{
-				if (!PhysAsset->ConstraintSetup[i]) continue;
-				const FConstraintInstance& CI = PhysAsset->ConstraintSetup[i]->DefaultInstance;
-				if ((CI.ConstraintBone1 == FName(*Bone1) && CI.ConstraintBone2 == FName(*Bone2)) ||
-					(CI.ConstraintBone1 == FName(*Bone2) && CI.ConstraintBone2 == FName(*Bone1)))
-				{
-					ConstraintIdx = i;
-					break;
-				}
-			}
-		}
+		const int32 ConstraintIdx = ResolveConstraintIndex(PhysAsset, Params);
+		if (ConstraintIdx == INDEX_NONE || !PhysAsset->ConstraintSetup.IsValidIndex(ConstraintIdx))
+			return FMonolithActionResult::Error(TEXT("Constraint not found. Provide constraint_index or bone_1+bone_2 pair."));
+		if (!PhysAsset->ConstraintSetup[ConstraintIdx])
+			return FMonolithActionResult::Error(TEXT("Constraint template is null"));
+		TargetIndices.Add(ConstraintIdx);
 	}
-
-	if (ConstraintIdx == INDEX_NONE || !PhysAsset->ConstraintSetup.IsValidIndex(ConstraintIdx))
-		return FMonolithActionResult::Error(TEXT("Constraint not found. Provide constraint_index or bone_1+bone_2 pair."));
-
-	UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[ConstraintIdx];
-	if (!CT) return FMonolithActionResult::Error(TEXT("Constraint template is null"));
 
 	GEditor->BeginTransaction(FText::FromString(TEXT("Set Constraint Properties")));
-	CT->Modify();
 
-	FConstraintProfileProperties& Profile = CT->DefaultInstance.ProfileInstance;
 	TArray<FString> ModifiedProps;
+	for (int32 Pass = 0; Pass < TargetIndices.Num(); ++Pass)
+	{
+		UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[TargetIndices[Pass]];
+		if (!CT) continue;
 
-	// Swing1
-	FString Swing1MotionStr;
-	if (Params->TryGetStringField(TEXT("swing1_motion"), Swing1MotionStr) && !Swing1MotionStr.IsEmpty())
-	{
-		Profile.ConeLimit.Swing1Motion = StringToConstraintMotion(Swing1MotionStr);
-		ModifiedProps.Add(TEXT("swing1_motion"));
-	}
-	double Swing1Limit;
-	if (Params->TryGetNumberField(TEXT("swing1_limit"), Swing1Limit))
-	{
-		Profile.ConeLimit.Swing1LimitDegrees = static_cast<float>(Swing1Limit);
-		ModifiedProps.Add(TEXT("swing1_limit"));
+		CT->Modify();
+
+		FConstraintProfileProperties& Profile = CT->DefaultInstance.ProfileInstance;
+		// Only the FIRST pass records the modified-prop names; every pass writes the same set.
+		const bool bRecord = (Pass == 0);
+		auto Note = [&ModifiedProps, bRecord](const TCHAR* Name) { if (bRecord) ModifiedProps.Add(Name); };
+
+		// Swing1
+		FString Swing1MotionStr;
+		if (Params->TryGetStringField(TEXT("swing1_motion"), Swing1MotionStr) && !Swing1MotionStr.IsEmpty())
+		{
+			Profile.ConeLimit.Swing1Motion = StringToConstraintMotion(Swing1MotionStr);
+			Note(TEXT("swing1_motion"));
+		}
+		double Swing1Limit;
+		if (Params->TryGetNumberField(TEXT("swing1_limit"), Swing1Limit))
+		{
+			Profile.ConeLimit.Swing1LimitDegrees = static_cast<float>(Swing1Limit);
+			Note(TEXT("swing1_limit"));
+		}
+
+		// Swing2
+		FString Swing2MotionStr;
+		if (Params->TryGetStringField(TEXT("swing2_motion"), Swing2MotionStr) && !Swing2MotionStr.IsEmpty())
+		{
+			Profile.ConeLimit.Swing2Motion = StringToConstraintMotion(Swing2MotionStr);
+			Note(TEXT("swing2_motion"));
+		}
+		double Swing2Limit;
+		if (Params->TryGetNumberField(TEXT("swing2_limit"), Swing2Limit))
+		{
+			Profile.ConeLimit.Swing2LimitDegrees = static_cast<float>(Swing2Limit);
+			Note(TEXT("swing2_limit"));
+		}
+
+		// Twist
+		FString TwistMotionStr;
+		if (Params->TryGetStringField(TEXT("twist_motion"), TwistMotionStr) && !TwistMotionStr.IsEmpty())
+		{
+			Profile.TwistLimit.TwistMotion = StringToConstraintMotion(TwistMotionStr);
+			Note(TEXT("twist_motion"));
+		}
+		double TwistLimit;
+		if (Params->TryGetNumberField(TEXT("twist_limit"), TwistLimit))
+		{
+			Profile.TwistLimit.TwistLimitDegrees = static_cast<float>(TwistLimit);
+			Note(TEXT("twist_limit"));
+		}
+
+		// Disable collision
+		bool bDisableCollision;
+		if (Params->TryGetBoolField(TEXT("disable_collision"), bDisableCollision))
+		{
+			Profile.bDisableCollision = bDisableCollision;
+			Note(TEXT("disable_collision"));
+		}
+
+		// --- Wave 17: linear DOFs. A ragdoll wants X/Y/Z all Locked; nothing could write these. ---
+		FString LinXStr;
+		if (Params->TryGetStringField(TEXT("linear_x_motion"), LinXStr) && !LinXStr.IsEmpty())
+		{
+			Profile.LinearLimit.XMotion = StringToLinearMotion(LinXStr);
+			Note(TEXT("linear_x_motion"));
+		}
+		FString LinYStr;
+		if (Params->TryGetStringField(TEXT("linear_y_motion"), LinYStr) && !LinYStr.IsEmpty())
+		{
+			Profile.LinearLimit.YMotion = StringToLinearMotion(LinYStr);
+			Note(TEXT("linear_y_motion"));
+		}
+		FString LinZStr;
+		if (Params->TryGetStringField(TEXT("linear_z_motion"), LinZStr) && !LinZStr.IsEmpty())
+		{
+			Profile.LinearLimit.ZMotion = StringToLinearMotion(LinZStr);
+			Note(TEXT("linear_z_motion"));
+		}
+		double LinLimit;
+		if (Params->TryGetNumberField(TEXT("linear_limit"), LinLimit))
+		{
+			Profile.LinearLimit.Limit = static_cast<float>(LinLimit);
+			Note(TEXT("linear_limit"));
+		}
+
+		// --- Wave 17: projection / shock propagation / mass conditioning. ---
+		// Projection is ON by default with ProjectionLinearAlpha 1.0, and Chaos converts
+		// the projection position delta into injected velocity
+		// (DV1 = DP * p.Chaos.Joint.VelProjectionAlpha / Dt) — the amplifier that turns a
+		// joint-vs-contact fight into an actual launch. These params make it reachable.
+		bool bProjEnabled;
+		if (Params->TryGetBoolField(TEXT("enable_projection"), bProjEnabled))
+		{
+			Profile.bEnableProjection = bProjEnabled;
+			Note(TEXT("enable_projection"));
+		}
+		double ProjLinTol;
+		if (Params->TryGetNumberField(TEXT("projection_linear_tolerance"), ProjLinTol))
+		{
+			Profile.ProjectionLinearTolerance = static_cast<float>(ProjLinTol);
+			Note(TEXT("projection_linear_tolerance"));
+		}
+		double ProjAngTol;
+		if (Params->TryGetNumberField(TEXT("projection_angular_tolerance"), ProjAngTol))
+		{
+			Profile.ProjectionAngularTolerance = static_cast<float>(ProjAngTol);
+			Note(TEXT("projection_angular_tolerance"));
+		}
+		double ProjLinAlpha;
+		if (Params->TryGetNumberField(TEXT("projection_linear_alpha"), ProjLinAlpha))
+		{
+			Profile.ProjectionLinearAlpha = static_cast<float>(ProjLinAlpha);
+			Note(TEXT("projection_linear_alpha"));
+		}
+		double ProjAngAlpha;
+		if (Params->TryGetNumberField(TEXT("projection_angular_alpha"), ProjAngAlpha))
+		{
+			Profile.ProjectionAngularAlpha = static_cast<float>(ProjAngAlpha);
+			Note(TEXT("projection_angular_alpha"));
+		}
+		bool bShock;
+		if (Params->TryGetBoolField(TEXT("enable_shock_propagation"), bShock))
+		{
+			Profile.bEnableShockPropagation = bShock;
+			Note(TEXT("enable_shock_propagation"));
+		}
+		double ShockAlpha;
+		if (Params->TryGetNumberField(TEXT("shock_propagation_alpha"), ShockAlpha))
+		{
+			Profile.ShockPropagationAlpha = static_cast<float>(ShockAlpha);
+			Note(TEXT("shock_propagation_alpha"));
+		}
+		bool bParentDominates;
+		if (Params->TryGetBoolField(TEXT("parent_dominates"), bParentDominates))
+		{
+			Profile.bParentDominates = bParentDominates;
+			Note(TEXT("parent_dominates"));
+		}
+		bool bMassCond;
+		if (Params->TryGetBoolField(TEXT("enable_mass_conditioning"), bMassCond))
+		{
+			Profile.bEnableMassConditioning = bMassCond;
+			Note(TEXT("enable_mass_conditioning"));
+		}
+		double ContactTransfer;
+		if (Params->TryGetNumberField(TEXT("contact_transfer_scale"), ContactTransfer))
+		{
+			Profile.ContactTransferScale = static_cast<float>(ContactTransfer);
+			Note(TEXT("contact_transfer_scale"));
+		}
+
+		// --- Wave 17: soft angular limits (stiffness is scaled by AverageMass at solve time). ---
+		bool bSwingSoft;
+		if (Params->TryGetBoolField(TEXT("swing_soft"), bSwingSoft))
+		{
+			Profile.ConeLimit.bSoftConstraint = bSwingSoft;
+			Note(TEXT("swing_soft"));
+		}
+		double SwingStiffness;
+		if (Params->TryGetNumberField(TEXT("swing_stiffness"), SwingStiffness))
+		{
+			Profile.ConeLimit.Stiffness = static_cast<float>(SwingStiffness);
+			Note(TEXT("swing_stiffness"));
+		}
+		double SwingDamping;
+		if (Params->TryGetNumberField(TEXT("swing_damping"), SwingDamping))
+		{
+			Profile.ConeLimit.Damping = static_cast<float>(SwingDamping);
+			Note(TEXT("swing_damping"));
+		}
+		bool bTwistSoft;
+		if (Params->TryGetBoolField(TEXT("twist_soft"), bTwistSoft))
+		{
+			Profile.TwistLimit.bSoftConstraint = bTwistSoft;
+			Note(TEXT("twist_soft"));
+		}
+		double TwistStiffness;
+		if (Params->TryGetNumberField(TEXT("twist_stiffness"), TwistStiffness))
+		{
+			Profile.TwistLimit.Stiffness = static_cast<float>(TwistStiffness);
+			Note(TEXT("twist_stiffness"));
+		}
+		double TwistDamping;
+		if (Params->TryGetNumberField(TEXT("twist_damping"), TwistDamping))
+		{
+			Profile.TwistLimit.Damping = static_cast<float>(TwistDamping);
+			Note(TEXT("twist_damping"));
+		}
+
+		// MANDATORY: Serialize() swaps the transient DefaultProfile into
+		// DefaultInstance.ProfileInstance at save time, so an un-mirrored profile edit is
+		// DISCARDED ON SAVE while the editor keeps showing the new value.
+		CT->UpdateProfileInstance();
 	}
 
-	// Swing2
-	FString Swing2MotionStr;
-	if (Params->TryGetStringField(TEXT("swing2_motion"), Swing2MotionStr) && !Swing2MotionStr.IsEmpty())
-	{
-		Profile.ConeLimit.Swing2Motion = StringToConstraintMotion(Swing2MotionStr);
-		ModifiedProps.Add(TEXT("swing2_motion"));
-	}
-	double Swing2Limit;
-	if (Params->TryGetNumberField(TEXT("swing2_limit"), Swing2Limit))
-	{
-		Profile.ConeLimit.Swing2LimitDegrees = static_cast<float>(Swing2Limit);
-		ModifiedProps.Add(TEXT("swing2_limit"));
-	}
-
-	// Twist
-	FString TwistMotionStr;
-	if (Params->TryGetStringField(TEXT("twist_motion"), TwistMotionStr) && !TwistMotionStr.IsEmpty())
-	{
-		Profile.TwistLimit.TwistMotion = StringToConstraintMotion(TwistMotionStr);
-		ModifiedProps.Add(TEXT("twist_motion"));
-	}
-	double TwistLimit;
-	if (Params->TryGetNumberField(TEXT("twist_limit"), TwistLimit))
-	{
-		Profile.TwistLimit.TwistLimitDegrees = static_cast<float>(TwistLimit);
-		ModifiedProps.Add(TEXT("twist_limit"));
-	}
-
-	// Disable collision
-	bool bDisableCollision;
-	if (Params->TryGetBoolField(TEXT("disable_collision"), bDisableCollision))
-	{
-		Profile.bDisableCollision = bDisableCollision;
-		ModifiedProps.Add(TEXT("disable_collision"));
-	}
-
-	CT->UpdateProfileInstance();
 	GEditor->EndTransaction();
 	PhysAsset->MarkPackageDirty();
 
+	UPhysicsConstraintTemplate* FirstCT = PhysAsset->ConstraintSetup[TargetIndices[0]];
+
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
-	Root->SetNumberField(TEXT("constraint_index"), ConstraintIdx);
-	Root->SetStringField(TEXT("bone_1"), CT->DefaultInstance.ConstraintBone1.ToString());
-	Root->SetStringField(TEXT("bone_2"), CT->DefaultInstance.ConstraintBone2.ToString());
+	Root->SetNumberField(TEXT("constraint_index"), TargetIndices[0]);
+	Root->SetStringField(TEXT("bone_1"), FirstCT->DefaultInstance.ConstraintBone1.ToString());
+	Root->SetStringField(TEXT("bone_2"), FirstCT->DefaultInstance.ConstraintBone2.ToString());
+	if (bApplyToAll)
+	{
+		Root->SetNumberField(TEXT("constraints_modified"), TargetIndices.Num());
+	}
 
 	TArray<TSharedPtr<FJsonValue>> ModArr;
 	for (const FString& P : ModifiedProps)
@@ -10195,6 +11413,2952 @@ FMonolithActionResult FMonolithAnimationActions::HandleSetConstraintProperties(c
 		ModArr.Add(MakeShared<FJsonValueString>(P));
 	}
 	Root->SetArrayField(TEXT("modified"), ModArr);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 17 — analyze_physics_asset
+// ---------------------------------------------------------------------------
+
+namespace MonolithPhysics
+{
+	/** A priori cause rank, used only as the final tiebreaker in the finding sort. */
+	static int32 CausePriority(const FString& Check)
+	{
+		if (Check.StartsWith(TEXT("C0")))  return 12;   // integrity gate — always first
+		if (Check.StartsWith(TEXT("C5")))  return 11;
+		if (Check.StartsWith(TEXT("C7")))  return 10;
+		if (Check.StartsWith(TEXT("C10"))) return 9;
+		if (Check.StartsWith(TEXT("C8")))  return 8;
+		if (Check.StartsWith(TEXT("C3")))  return 7;
+		if (Check.StartsWith(TEXT("C4")))  return 6;
+		if (Check.StartsWith(TEXT("C2")))  return 5;
+		if (Check.StartsWith(TEXT("C1")))  return 4;
+		if (Check.StartsWith(TEXT("C9")))  return 3;
+		if (Check.StartsWith(TEXT("C11"))) return 2;
+		return 1;                                       // C6
+	}
+
+	static int32 SeverityRank(const FString& Severity)
+	{
+		if (Severity == TEXT("critical")) return 3;
+		if (Severity == TEXT("warning"))  return 2;
+		return 1;
+	}
+
+	struct FFinding
+	{
+		FString Check;
+		FString Severity = TEXT("info");
+		bool bContactGated = false;
+		TSharedPtr<FJsonObject> Subject;
+		TSharedPtr<FJsonObject> Measured;
+		double Threshold = 0.0;
+		double Ratio = 0.0;
+		FString Message;
+		TSharedPtr<FJsonObject> SuggestedFix;
+	};
+
+	static TSharedPtr<FJsonObject> MakeFix(const TCHAR* Action, const TSharedPtr<FJsonObject>& FixParams)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("action"), Action);
+		O->SetObjectField(TEXT("params"), FixParams.IsValid() ? FixParams : MakeShared<FJsonObject>());
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> SubjectBody(const FString& BoneName)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("kind"), TEXT("body"));
+		O->SetStringField(TEXT("bone_name"), BoneName);
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> SubjectConstraint(int32 Index, const FString& Bone1, const FString& Bone2)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("kind"), TEXT("constraint"));
+		O->SetNumberField(TEXT("constraint_index"), Index);
+		O->SetStringField(TEXT("bone_1"), Bone1);
+		O->SetStringField(TEXT("bone_2"), Bone2);
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> SubjectPair(int32 I, int32 J, const FString& Bone1, const FString& Bone2)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("kind"), TEXT("pair"));
+		O->SetNumberField(TEXT("body_i"), I);
+		O->SetNumberField(TEXT("body_j"), J);
+		O->SetStringField(TEXT("bone_1"), Bone1);
+		O->SetStringField(TEXT("bone_2"), Bone2);
+		return O;
+	}
+
+	static TSharedPtr<FJsonObject> SubjectAsset()
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("kind"), TEXT("asset"));
+		return O;
+	}
+
+	/**
+	 * Principal-inertia ratio (Imax/Imin) for a SINGLE-primitive body, analytic.
+	 * Returns false for multi-primitive / convex bodies rather than guessing — Chaos
+	 * clamps anisotropy to 5:1 (ConditionInertia) so a wrong number here is worse than none.
+	 */
+	static bool ComputeInertiaAnisotropy(const TArray<FPrimView>& Prims, double& OutRatio)
+	{
+		if (Prims.Num() != 1) return false;
+		const FPrimView& V = Prims[0];
+
+		double Ia = 0.0, Ib = 0.0;   // axial, perpendicular (unit mass factors are enough for a ratio)
+		switch (V.Type)
+		{
+			case EAggCollisionShape::Sphere:
+				OutRatio = 1.0;
+				return true;
+			case EAggCollisionShape::Sphyl:
+			{
+				const double R = V.Radius, H = V.Length;
+				if (R <= 0.0) return false;
+				const double Vc = UE_PI * R * R * H;            // cylinder
+				const double Vh = (4.0 / 3.0) * UE_PI * R * R * R; // both caps
+				const double Mc = Vc, Mh = Vh, MhE = Mh * 0.5;  // density factors out of a ratio
+				Ia = 0.5 * Mc * R * R + 2.0 * (0.4 * MhE * R * R);
+				Ib = Mc * (H * H / 12.0 + R * R / 4.0)
+				   + 2.0 * MhE * (0.4 * R * R + 0.375 * H * R + 0.25 * H * H);
+				break;
+			}
+			case EAggCollisionShape::Box:
+			{
+				const double X = V.Extents.X, Y = V.Extents.Y, Z = V.Extents.Z;
+				if (X <= 0.0 || Y <= 0.0 || Z <= 0.0) return false;
+				const double Ix = (Y * Y + Z * Z) / 12.0;
+				const double Iy = (X * X + Z * Z) / 12.0;
+				const double Iz = (X * X + Y * Y) / 12.0;
+				const double Mx = FMath::Max3(Ix, Iy, Iz);
+				const double Mn = FMath::Min3(Ix, Iy, Iz);
+				if (Mn <= 0.0) return false;
+				OutRatio = Mx / Mn;
+				return true;
+			}
+			default:
+				return false;
+		}
+
+		const double Mx = FMath::Max(Ia, Ib);
+		const double Mn = FMath::Min(Ia, Ib);
+		if (Mn <= 0.0) return false;
+		OutRatio = Mx / Mn;
+		return true;
+	}
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleAnalyzePhysicsAsset(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	FString Symptom = TEXT("none");
+	Params->TryGetStringField(TEXT("symptom"), Symptom);
+
+	double OverlapTolerance = 0.01;
+	Params->TryGetNumberField(TEXT("overlap_tolerance"), OverlapTolerance);
+
+	bool bIncludeMatrix = false;
+	Params->TryGetBoolField(TEXT("include_matrix"), bIncludeMatrix);
+
+	int32 MaxFindings = 50;
+	double MaxFindingsVal;
+	if (Params->TryGetNumberField(TEXT("max_findings"), MaxFindingsVal))
+	{
+		MaxFindings = FMath::Max(1, static_cast<int32>(MaxFindingsVal));
+	}
+
+	// Optional check filter — empty means "run everything".
+	TSet<FString> EnabledChecks;
+	const TArray<TSharedPtr<FJsonValue>>* ChecksArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("checks"), ChecksArr) && ChecksArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *ChecksArr)
+		{
+			if (V.IsValid()) EnabledChecks.Add(V->AsString().ToUpper());
+		}
+	}
+	auto CheckEnabled = [&EnabledChecks](const TCHAR* Id) -> bool
+	{
+		if (EnabledChecks.Num() == 0) return true;
+		FString Key(Id);
+		int32 Sep;
+		if (Key.FindChar(TEXT(' '), Sep)) Key = Key.Left(Sep);
+		return EnabledChecks.Contains(Key.ToUpper()) || EnabledChecks.Contains(FString(Id).ToUpper());
+	};
+
+	TArray<FFinding> Findings;
+	TArray<TSharedPtr<FJsonValue>> Blockers;
+	auto AddBlocker = [&Blockers](const TCHAR* Check, const FString& Message)
+	{
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("check"), Check);
+		O->SetStringField(TEXT("message"), Message);
+		Blockers.Add(MakeShared<FJsonValueObject>(O));
+	};
+
+	FRefPoseInfo Ref;
+	const bool bRefValid = BuildRefPose(PhysAsset, Ref);
+
+	const int32 NumBodies = PhysAsset->SkeletalBodySetups.Num();
+	const int32 NumConstraints = PhysAsset->ConstraintSetup.Num();
+
+	// ---------------------------------------------------------------
+	// C0 — asset integrity (gate). A critical here makes every number below unreliable.
+	// ---------------------------------------------------------------
+	bool bAnalysisReliable = true;
+	if (CheckEnabled(TEXT("C0")))
+	{
+		if (!Ref.PreviewMesh)
+		{
+			bAnalysisReliable = false;
+			AddBlocker(TEXT("C0 asset_integrity"),
+				TEXT("PhysicsAsset has no preview mesh. CalculateDefaultParentTransform silently returns Identity, so every ref-pose / frame figure is meaningless AND snap_constraint_to_bone would COLLAPSE every parent frame and destroy the rig."));
+			FFinding F;
+			F.Check = TEXT("C0 asset_integrity");
+			F.Severity = TEXT("critical");
+			F.Message = TEXT("No preview mesh set on the physics asset — ref-pose analysis is impossible and snapping is unsafe.");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			Findings.Add(F);
+		}
+
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS)
+			{
+				bAnalysisReliable = false;
+				AddBlocker(TEXT("C0 asset_integrity"), FString::Printf(TEXT("SkeletalBodySetups[%d] is null."), b));
+				continue;
+			}
+
+			if (bRefValid && Ref.BodyBoneIndex[b] == INDEX_NONE)
+			{
+				bAnalysisReliable = false;
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("critical");
+				F.Subject = SubjectBody(BS->BoneName.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Message = FString::Printf(TEXT("Orphan body: bone '%s' does not exist in the preview mesh's ref skeleton. It never simulates, and it shifts CollisionDisableTable index assumptions."), *BS->BoneName.ToString());
+				F.SuggestedFix = MakeFix(TEXT("animation.remove_physics_body"), nullptr);
+				Findings.Add(F);
+			}
+
+			if (BS->AggGeom.GetElementCount() == 0)
+			{
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("critical");
+				F.Subject = SubjectBody(BS->BoneName.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Message = TEXT("Body has no collision shapes (Epic's own IsDataValid rule: a body requires at least one collision shape).");
+				F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+				Findings.Add(F);
+			}
+			else
+			{
+				bool bAnyMass = false;
+				for (const FPrimView& V : Ref.BodyPrims[b])
+				{
+					if (V.bContributesToMass) { bAnyMass = true; break; }
+				}
+				if (!bAnyMass && BS->PhysicsType != PhysType_Kinematic)
+				{
+					FFinding F;
+					F.Check = TEXT("C0 asset_integrity");
+					F.Severity = TEXT("critical");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeShared<FJsonObject>();
+					F.Message = TEXT("Simulated body has no shape with 'Contribute to Mass' — inertia is uncomputable (Epic's IsDataValid rule).");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+				}
+			}
+		}
+
+		// Dead / duplicate constraints + graph shape.
+		TMap<FString, int32> SeenPairs;
+		TMap<FName, int32> SeenChild;
+		TArray<int32> Parent;   // union-find over bodies
+		Parent.SetNum(FMath::Max(NumBodies, 1));
+		for (int32 i = 0; i < Parent.Num(); ++i) Parent[i] = i;
+		TFunction<int32(int32)> FindRoot = [&Parent, &FindRoot](int32 X) -> int32
+		{
+			while (Parent[X] != X) { Parent[X] = Parent[Parent[X]]; X = Parent[X]; }
+			return X;
+		};
+
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const int32 B1 = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+			const int32 B2 = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+
+			const bool bBone1InSkel = bRefValid && Ref.RefSkel->FindBoneIndex(CI.ConstraintBone1) != INDEX_NONE;
+			const bool bBone2InSkel = bRefValid && Ref.RefSkel->FindBoneIndex(CI.ConstraintBone2) != INDEX_NONE;
+
+			if (B1 == INDEX_NONE || B2 == INDEX_NONE || (bRefValid && (!bBone1InSkel || !bBone2InSkel)))
+			{
+				bAnalysisReliable = false;
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("critical");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Message = TEXT("Dead joint: one of its bones has no body or does not resolve in the ref skeleton. snap_constraint_to_bone would check()-CRASH the editor on this constraint (CalculateRelativeBoneTransform asserts).");
+				Findings.Add(F);
+				continue;
+			}
+
+			const FString PairKey = FString::Printf(TEXT("%d|%d"), FMath::Min(B1, B2), FMath::Max(B1, B2));
+			if (int32* Existing = SeenPairs.Find(PairKey))
+			{
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("critical");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetNumberField(TEXT("duplicate_of_constraint_index"), *Existing);
+				F.Message = FString::Printf(TEXT("Duplicate constraint on the same bone pair (also constraint %d) — the solver runs both and they fight."), *Existing);
+				Findings.Add(F);
+			}
+			else
+			{
+				SeenPairs.Add(PairKey, c);
+			}
+
+			if (int32* ExistingChild = SeenChild.Find(CI.ConstraintBone1))
+			{
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("critical");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetNumberField(TEXT("other_constraint_index"), *ExistingChild);
+				F.Message = FString::Printf(TEXT("Two constraints name '%s' as the CHILD bone (also constraint %d) — over-constrained joint."), *CI.ConstraintBone1.ToString(), *ExistingChild);
+				Findings.Add(F);
+			}
+			else
+			{
+				SeenChild.Add(CI.ConstraintBone1, c);
+			}
+
+			const int32 R1 = FindRoot(B1);
+			const int32 R2 = FindRoot(B2);
+			if (R1 == R2)
+			{
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("warning");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Message = TEXT("Constraint closes a CYCLE in the body graph — a ragdoll loop is over-constrained and is a classic explosion source.");
+				Findings.Add(F);
+			}
+			else
+			{
+				Parent[R1] = R2;
+			}
+		}
+
+		// Islands: bodies not connected to the body on the highest ref-skeleton bone.
+		if (bRefValid && NumBodies > 1)
+		{
+			int32 RootBody = INDEX_NONE, BestBoneIdx = MAX_int32;
+			for (int32 b = 0; b < NumBodies; ++b)
+			{
+				const int32 BoneIdx = Ref.BodyBoneIndex[b];
+				if (BoneIdx != INDEX_NONE && BoneIdx < BestBoneIdx) { BestBoneIdx = BoneIdx; RootBody = b; }
+			}
+			if (RootBody != INDEX_NONE)
+			{
+				const int32 RootSet = FindRoot(RootBody);
+				TArray<FString> IslandBones;
+				for (int32 b = 0; b < NumBodies; ++b)
+				{
+					if (!PhysAsset->SkeletalBodySetups[b]) continue;
+					if (FindRoot(b) != RootSet)
+					{
+						IslandBones.Add(PhysAsset->SkeletalBodySetups[b]->BoneName.ToString());
+					}
+				}
+				if (IslandBones.Num() > 0)
+				{
+					FFinding F;
+					F.Check = TEXT("C0 asset_integrity");
+					F.Severity = TEXT("warning");
+					F.Subject = SubjectAsset();
+					F.Measured = MakeShared<FJsonObject>();
+					WriteStringArray(F.Measured, TEXT("island_bones"), IslandBones);
+					F.Message = FString::Printf(TEXT("%d bodies have no constraint path to the root body — disconnected islands."), IslandBones.Num());
+					Findings.Add(F);
+				}
+			}
+		}
+
+		// Non-unit ref-pose scale — FKSphylElem scaling clamps radius/length SILENTLY.
+		if (bRefValid)
+		{
+			const TArray<FTransform>& BonePose = Ref.RefSkel->GetRefBonePose();
+			TArray<FString> ScaledBones;
+			for (int32 b = 0; b < NumBodies; ++b)
+			{
+				const int32 BoneIdx = Ref.BodyBoneIndex[b];
+				if (!BonePose.IsValidIndex(BoneIdx)) continue;
+				const FVector S = BonePose[BoneIdx].GetScale3D();
+				if (FMath::Abs(S.X - 1.0) > 1e-3 || FMath::Abs(S.Y - 1.0) > 1e-3 || FMath::Abs(S.Z - 1.0) > 1e-3)
+				{
+					ScaledBones.Add(Ref.RefSkel->GetBoneName(BoneIdx).ToString());
+				}
+			}
+			if (ScaledBones.Num() > 0)
+			{
+				FFinding F;
+				F.Check = TEXT("C0 asset_integrity");
+				F.Severity = TEXT("warning");
+				F.Subject = SubjectAsset();
+				F.Measured = MakeShared<FJsonObject>();
+				WriteStringArray(F.Measured, TEXT("scaled_bones"), ScaledBones);
+				F.Message = TEXT("Ref-pose bones with non-unit scale carry a body. Primitive scaling clamps radius/length silently, so authored and simulated geometry diverge.");
+				Findings.Add(F);
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C1 — degenerate geometry
+	// ---------------------------------------------------------------
+	if (CheckEnabled(TEXT("C1")))
+	{
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			for (const FPrimView& V : Ref.BodyPrims[b])
+			{
+				auto MakeMeasured = [&V]()
+				{
+					TSharedPtr<FJsonObject> M = MakeShared<FJsonObject>();
+					M->SetStringField(TEXT("shape_type"), ShapeTypeToString(V.Type));
+					M->SetNumberField(TEXT("primitive_index"), V.Index);
+					M->SetNumberField(TEXT("radius"), V.Radius);
+					M->SetNumberField(TEXT("length"), V.Length);
+					return M;
+				};
+
+				const bool bFinite = FMath::IsFinite(V.Radius) && FMath::IsFinite(V.Length)
+					&& V.Local.GetTranslation().ContainsNaN() == false
+					&& FMath::IsFinite(V.Extents.X) && FMath::IsFinite(V.Extents.Y) && FMath::IsFinite(V.Extents.Z);
+				if (!bFinite || !V.Local.GetRotation().IsNormalized() || V.Local.GetTranslation().GetAbsMax() > 1e5)
+				{
+					FFinding F;
+					F.Check = TEXT("C1 degenerate_geometry");
+					F.Severity = TEXT("critical");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeMeasured();
+					F.Measured->SetObjectField(TEXT("center"), WriteVec(V.Local.GetTranslation()));
+					F.Message = TEXT("Primitive has a NaN / non-normalized / absurd transform or dimension.");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+					continue;
+				}
+
+				if (V.Type == EAggCollisionShape::Box)
+				{
+					if (V.Extents.X <= 0.f || V.Extents.Y <= 0.f || V.Extents.Z <= 0.f)
+					{
+						FFinding F;
+						F.Check = TEXT("C1 degenerate_geometry");
+						F.Severity = TEXT("critical");
+						F.Subject = SubjectBody(BS->BoneName.ToString());
+						F.Measured = MakeMeasured();
+						F.Measured->SetObjectField(TEXT("extents"), WriteVec(V.Extents));
+						F.Message = TEXT("Box has a zero or negative FULL extent.");
+						F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+						Findings.Add(F);
+					}
+					continue;
+				}
+
+				if (V.Radius <= 0.f)
+				{
+					FFinding F;
+					F.Check = TEXT("C1 degenerate_geometry");
+					F.Severity = TEXT("critical");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeMeasured();
+					F.Message = TEXT("Primitive radius is zero or negative.");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+					continue;
+				}
+
+				// Only RADIUS participates in the clamp checks. FKSphylElem::ScaleElem
+				// (BodySetup.cpp) clamps Radius to MinPrimSize but clamps length only with
+				// FMath::Max(0.f, Length) — a zero-length sphyl is a legal sphere, and PhAT's
+				// own resize gizmo permits dragging a capsule down to exactly that. Including
+				// Length here reported every hand-shrunk capsule as "critical" with a blown-up
+				// ratio, which outranked real faults on any manually-tuned rig.
+				const bool bBelowHardClamp = (V.Radius < HardPrimClamp);
+				const bool bBelowMinPrim = (V.Radius < MinPrimSize);
+				if (bBelowHardClamp || bBelowMinPrim)
+				{
+					FFinding F;
+					F.Check = TEXT("C1 degenerate_geometry");
+					F.Severity = bBelowHardClamp ? TEXT("critical") : TEXT("warning");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeMeasured();
+					F.Threshold = bBelowHardClamp ? HardPrimClamp : MinPrimSize;
+					F.Ratio = F.Threshold > 0.0 ? (F.Threshold / FMath::Max(0.0001f, V.Radius)) : 0.0;
+					F.Message = bBelowHardClamp
+						? TEXT("Primitive RADIUS is below the engine's hard runtime clamp (0.1) — the sim silently uses a different size than the Details panel shows.")
+						: TEXT("Primitive RADIUS is below the engine's authoring floor MinPrimSize (0.5).");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+				}
+
+				// A capsule collapsed to (near) zero length is a sphere. Legal and often
+				// deliberate, but worth surfacing because the body no longer spans its bone.
+				if (V.Type == EAggCollisionShape::Sphyl && V.Length < HardPrimClamp && V.Radius >= MinPrimSize)
+				{
+					FFinding F;
+					F.Check = TEXT("C1 degenerate_geometry");
+					F.Severity = TEXT("info");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeMeasured();
+					F.Threshold = HardPrimClamp;
+					F.Ratio = 0.0;
+					F.Message = TEXT("Capsule length is ~0, so this body is effectively a sphere. Legal (the engine clamps length only to >= 0), but it no longer covers the length of its bone — check for collision gaps.");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+				}
+
+				// Silent clamp: FKSphylElem clamps radius into [0.1, half-length].
+				if (V.Type == EAggCollisionShape::Sphyl
+					&& (!FMath::IsNearlyEqual(V.Radius, V.EffectiveRadius, 1e-3f)
+						|| !FMath::IsNearlyEqual(V.Length, V.EffectiveLength, 1e-3f)))
+				{
+					FFinding F;
+					F.Check = TEXT("C1 degenerate_geometry");
+					F.Severity = TEXT("warning");
+					F.Subject = SubjectBody(BS->BoneName.ToString());
+					F.Measured = MakeMeasured();
+					F.Measured->SetNumberField(TEXT("effective_radius"), V.EffectiveRadius);
+					F.Measured->SetNumberField(TEXT("effective_length"), V.EffectiveLength);
+					F.Message = TEXT("Authored capsule dimensions are silently CLAMPED by the engine (radius > half-length, or below the floor). What you see is not what simulates.");
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+					Findings.Add(F);
+				}
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C2 — constraint frame orthonormality
+	// ---------------------------------------------------------------
+	if (CheckEnabled(TEXT("C2")))
+	{
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+
+			for (int32 FrameIdx = 0; FrameIdx < 2; ++FrameIdx)
+			{
+				const FVector Pri = (FrameIdx == 0) ? CI.PriAxis1 : CI.PriAxis2;
+				const FVector Sec = (FrameIdx == 0) ? CI.SecAxis1 : CI.SecAxis2;
+				const EConstraintFrame::Type Frame = (FrameIdx == 0) ? EConstraintFrame::Frame1 : EConstraintFrame::Frame2;
+
+				const double ErrPri = FMath::Abs(Pri.Size() - 1.0);
+				const double ErrSec = FMath::Abs(Sec.Size() - 1.0);
+				const double ErrDot = FMath::Abs(FVector::DotProduct(Pri, Sec));
+				const double ErrDet = FMath::Abs(CI.GetRefFrame(Frame).ToMatrixWithScale().Determinant() - 1.0);
+
+				if (ErrDet > 0.01 || ErrPri > 1e-3 || ErrSec > 1e-3 || ErrDot > 1e-3)
+				{
+					FFinding F;
+					F.Check = TEXT("C2 constraint_frame_orthonormality");
+					F.Severity = (ErrDet > 0.01) ? TEXT("critical") : TEXT("warning");
+					F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+					F.Measured = MakeShared<FJsonObject>();
+					F.Measured->SetNumberField(TEXT("frame"), FrameIdx + 1);
+					F.Measured->SetNumberField(TEXT("pri_axis_length_error"), ErrPri);
+					F.Measured->SetNumberField(TEXT("sec_axis_length_error"), ErrSec);
+					F.Measured->SetNumberField(TEXT("axis_dot"), ErrDot);
+					F.Measured->SetNumberField(TEXT("determinant_error"), ErrDet);
+					F.Threshold = (ErrDet > 0.01) ? 0.01 : 1e-3;
+					F.Ratio = FMath::Max3(ErrPri, ErrSec, ErrDot) / 1e-3;
+					F.Message = (ErrDet > 0.01)
+						? TEXT("Frame basis contains SCALE/SHEAR (the engine's own |det-1| > 0.01 test) — it feeds straight into the Chaos joint and the engine only logs a warning.")
+						: TEXT("Frame axes are not unit-length / not perpendicular. GetRefFrame rebuilds the basis from them, so this injects scale into the joint.");
+					TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+					FixParams->SetNumberField(TEXT("constraint_index"), c);
+					F.SuggestedFix = MakeFix(TEXT("animation.snap_constraint_to_bone"), FixParams);
+					Findings.Add(F);
+				}
+			}
+
+			if (!CI.AngularRotationOffset.IsNearlyZero())
+			{
+				FFinding F;
+				F.Check = TEXT("C2 constraint_frame_orthonormality");
+				F.Severity = TEXT("info");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetObjectField(TEXT("angular_rotation_offset"), WriteRot(CI.AngularRotationOffset));
+				F.Message = TEXT("Non-zero AngularRotationOffset silently biases the rest orientation on top of the frames.");
+				TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+				FixParams->SetNumberField(TEXT("constraint_index"), c);
+				F.SuggestedFix = MakeFix(TEXT("animation.set_physics_constraint_frames"), FixParams);
+				Findings.Add(F);
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C3 / C4 — ref-pose joint pre-load + limit violation (need the ref pose)
+	// ---------------------------------------------------------------
+	if (bRefValid && (CheckEnabled(TEXT("C3")) || CheckEnabled(TEXT("C4"))))
+	{
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const FConstraintProfileProperties& Profile = CI.ProfileInstance;
+
+			FTransform Con1, Con2;
+			if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame1, Con1)) continue;
+			if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame2, Con2)) continue;
+
+			const double LinearErrorCm = FVector::Dist(Con1.GetTranslation(), Con2.GetTranslation());
+			FQuat ParentQ = Con2.GetRotation();
+			FQuat ChildQ = Con1.GetRotation();
+			ChildQ.EnforceShortestArcWith(ParentQ);
+			const double AngularErrorDeg = FMath::RadiansToDegrees(ParentQ.AngularDistance(ChildQ));
+
+			double TwistRad = 0.0, Swing1Rad = 0.0, Swing2Rad = 0.0;
+			GetSwingTwistAngles(ParentQ, ChildQ, TwistRad, Swing1Rad, Swing2Rad);
+			const double TwistDeg = FMath::RadiansToDegrees(TwistRad);
+			const double Swing1Deg = FMath::RadiansToDegrees(Swing1Rad);
+			const double Swing2Deg = FMath::RadiansToDegrees(Swing2Rad);
+
+			if (CheckEnabled(TEXT("C3")))
+			{
+				// Deviation-from-snapped isolates ROOT CAUSE (a dragged constraint gizmo, or a
+				// snap done against a missing preview mesh) from SYMPTOM (a pre-loaded joint).
+				// Never flagged on its own — a hand-authored non-default frame is legitimate.
+				double Frame1PosDelta = 0.0, Frame1RotDelta = 0.0, Frame2PosDelta = 0.0, Frame2RotDelta = 0.0;
+#if WITH_EDITORONLY_DATA
+				const FTransform DefChild = CI.CalculateDefaultChildTransform();
+				const FTransform DefParent = CI.CalculateDefaultParentTransform(PhysAsset);
+				const FTransform Cur1 = CI.GetRefFrame(EConstraintFrame::Frame1);
+				const FTransform Cur2 = CI.GetRefFrame(EConstraintFrame::Frame2);
+				Frame1PosDelta = FVector::Dist(Cur1.GetTranslation(), DefChild.GetTranslation());
+				Frame1RotDelta = FMath::RadiansToDegrees(Cur1.GetRotation().AngularDistance(DefChild.GetRotation()));
+				Frame2PosDelta = FVector::Dist(Cur2.GetTranslation(), DefParent.GetTranslation());
+				Frame2RotDelta = FMath::RadiansToDegrees(Cur2.GetRotation().AngularDistance(DefParent.GetRotation()));
+#endif
+				// Smallest active angular limit — the point past which the pre-load leaves the limit.
+				double SmallestLimit = TNumericLimits<double>::Max();
+				if (Profile.ConeLimit.Swing1Motion == ACM_Limited) SmallestLimit = FMath::Min(SmallestLimit, (double)Profile.ConeLimit.Swing1LimitDegrees);
+				if (Profile.ConeLimit.Swing2Motion == ACM_Limited) SmallestLimit = FMath::Min(SmallestLimit, (double)Profile.ConeLimit.Swing2LimitDegrees);
+				if (Profile.TwistLimit.TwistMotion == ACM_Limited) SmallestLimit = FMath::Min(SmallestLimit, (double)Profile.TwistLimit.TwistLimitDegrees);
+
+				FString LinSeverity;
+				double LinThreshold = 0.1;
+				if (LinearErrorCm > Profile.ProjectionLinearTolerance) { LinSeverity = TEXT("critical"); LinThreshold = Profile.ProjectionLinearTolerance; }
+				else if (LinearErrorCm > 1.0) { LinSeverity = TEXT("warning"); LinThreshold = 1.0; }
+				else if (LinearErrorCm > 0.1) { LinSeverity = TEXT("info"); LinThreshold = 0.1; }
+
+				FString AngSeverity;
+				double AngThreshold = 1.0;
+				if (AngularErrorDeg > SmallestLimit) { AngSeverity = TEXT("critical"); AngThreshold = SmallestLimit; }
+				else if (AngularErrorDeg > 5.0) { AngSeverity = TEXT("warning"); AngThreshold = 5.0; }
+				else if (AngularErrorDeg > 1.0) { AngSeverity = TEXT("info"); AngThreshold = 1.0; }
+
+				if (!LinSeverity.IsEmpty() || !AngSeverity.IsEmpty())
+				{
+					FFinding F;
+					F.Check = TEXT("C3 constraint_frame_preload");
+					F.Severity = (SeverityRank(LinSeverity.IsEmpty() ? TEXT("info") : LinSeverity)
+						>= SeverityRank(AngSeverity.IsEmpty() ? TEXT("info") : AngSeverity))
+						? (LinSeverity.IsEmpty() ? AngSeverity : LinSeverity)
+						: (AngSeverity.IsEmpty() ? LinSeverity : AngSeverity);
+					F.bContactGated = false;   // a pre-loaded joint misbehaves in MID-AIR on frame 1
+					F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+					F.Measured = MakeShared<FJsonObject>();
+					F.Measured->SetNumberField(TEXT("ref_pose_linear_error_cm"), LinearErrorCm);
+					F.Measured->SetNumberField(TEXT("ref_pose_angular_error_deg"), AngularErrorDeg);
+					F.Measured->SetNumberField(TEXT("ref_pose_twist_deg"), TwistDeg);
+					F.Measured->SetNumberField(TEXT("ref_pose_swing1_deg"), Swing1Deg);
+					F.Measured->SetNumberField(TEXT("ref_pose_swing2_deg"), Swing2Deg);
+					F.Measured->SetNumberField(TEXT("frame1_delta_from_snapped_cm"), Frame1PosDelta);
+					F.Measured->SetNumberField(TEXT("frame1_delta_from_snapped_deg"), Frame1RotDelta);
+					F.Measured->SetNumberField(TEXT("frame2_delta_from_snapped_cm"), Frame2PosDelta);
+					F.Measured->SetNumberField(TEXT("frame2_delta_from_snapped_deg"), Frame2RotDelta);
+					F.Threshold = LinSeverity.IsEmpty() ? AngThreshold : LinThreshold;
+					F.Ratio = F.Threshold > 0.0
+						? FMath::Max(LinearErrorCm / FMath::Max(LinThreshold, UE_KINDA_SMALL_NUMBER),
+							AngularErrorDeg / FMath::Max(AngThreshold, UE_KINDA_SMALL_NUMBER))
+						: 0.0;
+					F.Message = FString::Printf(
+						TEXT("Joint is pre-loaded in the reference pose: %.3f cm / %.2f deg between Frame1 (child) and Frame2 (parent). NOTE moving or resizing a BODY cannot cause this — only dragging the constraint gizmo, or snapping while the preview mesh was unset, can."),
+						LinearErrorCm, AngularErrorDeg);
+					TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+					FixParams->SetNumberField(TEXT("constraint_index"), c);
+					FixParams->SetBoolField(TEXT("dry_run"), true);
+					F.SuggestedFix = MakeFix(TEXT("animation.snap_constraint_to_bone"), FixParams);
+					Findings.Add(F);
+				}
+			}
+
+			if (CheckEnabled(TEXT("C4")))
+			{
+				struct FAxisCheck { const TCHAR* Name; EAngularConstraintMotion Motion; double LimitDeg; double AngleDeg; };
+				const FAxisCheck Axes[3] = {
+					{ TEXT("twist"),  static_cast<EAngularConstraintMotion>(Profile.TwistLimit.TwistMotion.GetValue()), Profile.TwistLimit.TwistLimitDegrees,  TwistDeg  },
+					{ TEXT("swing1"), static_cast<EAngularConstraintMotion>(Profile.ConeLimit.Swing1Motion.GetValue()), Profile.ConeLimit.Swing1LimitDegrees, Swing1Deg },
+					{ TEXT("swing2"), static_cast<EAngularConstraintMotion>(Profile.ConeLimit.Swing2Motion.GetValue()), Profile.ConeLimit.Swing2LimitDegrees, Swing2Deg },
+				};
+
+				for (const FAxisCheck& A : Axes)
+				{
+					if (A.Motion == ACM_Free)
+					{
+						FFinding F;
+						F.Check = TEXT("C4 refpose_limit_violation");
+						F.Severity = TEXT("info");
+						F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+						F.Measured = MakeShared<FJsonObject>();
+						F.Measured->SetStringField(TEXT("axis"), A.Name);
+						F.Message = FString::Printf(TEXT("Ragdoll joint axis '%s' is Free (unbounded)."), A.Name);
+						Findings.Add(F);
+						continue;
+					}
+					if (A.Motion != ACM_Limited) continue;
+
+					if (A.LimitDeg <= 0.0)
+					{
+						FFinding F;
+						F.Check = TEXT("C4 refpose_limit_violation");
+						F.Severity = TEXT("warning");
+						F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+						F.Measured = MakeShared<FJsonObject>();
+						F.Measured->SetStringField(TEXT("axis"), A.Name);
+						F.Measured->SetNumberField(TEXT("limit_deg"), A.LimitDeg);
+						F.Message = FString::Printf(TEXT("Axis '%s' is Limited with a 0 deg limit — it should be Locked."), A.Name);
+						Findings.Add(F);
+						continue;
+					}
+
+					const double Margin = A.LimitDeg - FMath::Abs(A.AngleDeg);
+					if (Margin < 0.0 || Margin < 2.0)
+					{
+						FFinding F;
+						F.Check = TEXT("C4 refpose_limit_violation");
+						F.Severity = (Margin < 0.0) ? TEXT("critical") : TEXT("warning");
+						F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+						F.Measured = MakeShared<FJsonObject>();
+						F.Measured->SetStringField(TEXT("axis"), A.Name);
+						F.Measured->SetNumberField(TEXT("angle_deg"), A.AngleDeg);
+						F.Measured->SetNumberField(TEXT("limit_deg"), A.LimitDeg);
+						F.Measured->SetNumberField(TEXT("margin_deg"), Margin);
+						F.Threshold = A.LimitDeg;
+						F.Ratio = (A.LimitDeg > 0.0) ? FMath::Abs(A.AngleDeg) / A.LimitDeg : 0.0;
+						F.Message = (Margin < 0.0)
+							? FString::Printf(TEXT("Reference pose VIOLATES the '%s' limit (%.2f deg vs %.2f deg) — the solver corrects from frame 0."), A.Name, A.AngleDeg, A.LimitDeg)
+							: FString::Printf(TEXT("Only %.2f deg of margin on the '%s' limit — no tolerance for retarget error."), Margin, A.Name);
+						TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+						FixParams->SetNumberField(TEXT("constraint_index"), c);
+						F.SuggestedFix = MakeFix(TEXT("animation.set_constraint_properties"), FixParams);
+						Findings.Add(F);
+					}
+				}
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C5 — body overlap matrix / stale CollisionDisableTable
+	// ---------------------------------------------------------------
+	TArray<TSharedPtr<FJsonValue>> OverlapRows;
+	if (bRefValid && CheckEnabled(TEXT("C5")))
+	{
+		// Which body pairs are joined by a constraint, and does that joint disable collision.
+		TMap<FString, int32> ConstraintByPair;
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const int32 B1 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone1);
+			const int32 B2 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone2);
+			if (B1 == INDEX_NONE || B2 == INDEX_NONE) continue;
+			ConstraintByPair.Add(FString::Printf(TEXT("%d|%d"), FMath::Min(B1, B2), FMath::Max(B1, B2)), c);
+		}
+
+		// Pre-build component-space colliders.
+		TArray<TArray<FPrimCollider>> BodyColliders;
+		BuildBodyColliders(Ref, BodyColliders);
+
+		for (int32 i = 0; i < NumBodies; ++i)
+		{
+			if (!PhysAsset->SkeletalBodySetups[i]) continue;
+			for (int32 j = i + 1; j < NumBodies; ++j)
+			{
+				if (!PhysAsset->SkeletalBodySetups[j]) continue;
+
+				const FString Bone1 = PhysAsset->SkeletalBodySetups[i]->BoneName.ToString();
+				const FString Bone2 = PhysAsset->SkeletalBodySetups[j]->BoneName.ToString();
+
+				const FString PairKey = FString::Printf(TEXT("%d|%d"), i, j);
+				const int32* JoinConstraint = ConstraintByPair.Find(PairKey);
+
+				// Adjacent = constraint-joined OR nearest-body-bearing-ancestor related.
+				// Raw parent/child bone adjacency is WRONG here — physics assets skip bones.
+				const bool bAdjacent = (JoinConstraint != nullptr)
+					|| (Ref.NearestBodyAncestor.IsValidIndex(i) && Ref.NearestBodyAncestor[i] == j)
+					|| (Ref.NearestBodyAncestor.IsValidIndex(j) && Ref.NearestBodyAncestor[j] == i);
+
+				const bool bTableEnabled = PhysAsset->IsCollisionEnabled(i, j);
+				const bool bJointDisables = (JoinConstraint != nullptr)
+					&& PhysAsset->ConstraintSetup[*JoinConstraint]->DefaultInstance.ProfileInstance.bDisableCollision;
+				const bool bEffective = bTableEnabled && !bJointDisables;
+
+				double BestSurfaceDist = 0.0;
+				bool bApproximate = false;
+				if (!BodyPairSurfaceDistance(BodyColliders[i], BodyColliders[j], BestSurfaceDist, bApproximate)) continue;
+
+				const double Penetration = (BestSurfaceDist < 0.0) ? -BestSurfaceDist : 0.0;
+				const double ClosestDist = FMath::Max(0.0, BestSurfaceDist);
+
+				const bool bInteresting = (Penetration > OverlapTolerance) || (bEffective && ClosestDist < 1.0);
+				if (bIncludeMatrix || bInteresting)
+				{
+					TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+					Row->SetNumberField(TEXT("body_i"), i);
+					Row->SetNumberField(TEXT("body_j"), j);
+					Row->SetStringField(TEXT("bone_1"), Bone1);
+					Row->SetStringField(TEXT("bone_2"), Bone2);
+					Row->SetBoolField(TEXT("adjacent"), bAdjacent);
+					Row->SetBoolField(TEXT("table_collision_enabled"), bTableEnabled);
+					Row->SetBoolField(TEXT("joint_disable_collision"), bJointDisables);
+					Row->SetBoolField(TEXT("effective_collision"), bEffective);
+					Row->SetNumberField(TEXT("penetration_cm"), Penetration);
+					Row->SetNumberField(TEXT("closest_dist_cm"), ClosestDist);
+					Row->SetBoolField(TEXT("approximate"), bApproximate);
+					OverlapRows.Add(MakeShared<FJsonValueObject>(Row));
+				}
+
+				if (!bEffective || Penetration <= OverlapTolerance) continue;
+
+				// Smallest radius across the two bodies, for the "deep" test.
+				double MinRadius = TNumericLimits<double>::Max();
+				for (const FPrimCollider& A : BodyColliders[i]) if (A.Radius > 0.0) MinRadius = FMath::Min(MinRadius, A.Radius);
+				for (const FPrimCollider& B : BodyColliders[j]) if (B.Radius > 0.0) MinRadius = FMath::Min(MinRadius, B.Radius);
+
+				FFinding F;
+				F.Check = TEXT("C5 body_overlap_matrix");
+				F.bContactGated = true;   // dormant in free-fall, armed by the floor
+				if (bAdjacent)
+				{
+					F.Severity = TEXT("critical");
+					F.Message = FString::Printf(TEXT("ADJACENT bodies '%s' and '%s' interpenetrate by %.3f cm with collision still ENABLED — a joint holding two bodies together while a contact shoves them apart is the textbook explosion."), *Bone1, *Bone2, Penetration);
+				}
+				else
+				{
+					const bool bDeep = (MinRadius < TNumericLimits<double>::Max()) && (Penetration > 0.25 * MinRadius);
+					F.Severity = bDeep ? TEXT("critical") : TEXT("warning");
+					F.Message = FString::Printf(TEXT("Non-adjacent bodies '%s' and '%s' interpenetrate by %.3f cm in the reference pose and still collide. UE builds CollisionDisableTable ONCE at auto-generation; capsules moved/resized afterwards create new overlapping pairs that were never table-disabled."), *Bone1, *Bone2, Penetration);
+				}
+				F.Subject = SubjectPair(i, j, Bone1, Bone2);
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetNumberField(TEXT("penetration_cm"), Penetration);
+				F.Measured->SetBoolField(TEXT("adjacent"), bAdjacent);
+				F.Measured->SetBoolField(TEXT("approximate"), bApproximate);
+				F.Threshold = OverlapTolerance;
+				F.Ratio = (OverlapTolerance > 0.0) ? Penetration / OverlapTolerance : Penetration;
+				{
+					TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+					FixParams->SetBoolField(TEXT("disable_overlapping"), true);
+					F.SuggestedFix = MakeFix(TEXT("animation.set_physics_collision_pairs"), FixParams);
+				}
+				Findings.Add(F);
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C6 — collision state disagreement (INFO only; exists to stop a false lead)
+	// ---------------------------------------------------------------
+	if (CheckEnabled(TEXT("C6")))
+	{
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const int32 B1 = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+			const int32 B2 = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+			if (B1 == INDEX_NONE || B2 == INDEX_NONE) continue;
+
+			const bool bJointDisables = CI.ProfileInstance.bDisableCollision;
+			const bool bTableEnabled = PhysAsset->IsCollisionEnabled(B1, B2);
+			if (bJointDisables == !bTableEnabled) continue;   // agree
+
+			FFinding F;
+			F.Check = TEXT("C6 collision_state_disagreement");
+			F.Severity = TEXT("info");
+			F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetBoolField(TEXT("joint_disable_collision"), bJointDisables);
+			F.Measured->SetBoolField(TEXT("table_collision_enabled"), bTableEnabled);
+			F.Measured->SetBoolField(TEXT("effective_collision"), bTableEnabled && !bJointDisables);
+			F.Message = TEXT("The constraint's disable_collision checkbox and CollisionDisableTable disagree. They are INDEPENDENT switches — PhAT's checkbox never writes the table, and both must allow collision for the pair to actually collide. Reporting hazard, not a defect.");
+			Findings.Add(F);
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C7 — mass ratio (+ inertia anisotropy)
+	// ---------------------------------------------------------------
+	TArray<TSharedPtr<FJsonValue>> MassRows;
+	double TotalMass = 0.0;
+	{
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			const float M = BS->CalculateMass(nullptr);
+			TotalMass += M;
+			TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+			Row->SetStringField(TEXT("bone_name"), BS->BoneName.ToString());
+			Row->SetNumberField(TEXT("computed_mass_kg"), M);
+			MassRows.Add(MakeShared<FJsonValueObject>(Row));
+		}
+	}
+	if (CheckEnabled(TEXT("C7")))
+	{
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const int32 ChildIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+			const int32 ParentIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+			if (ChildIdx == INDEX_NONE || ParentIdx == INDEX_NONE) continue;
+			const USkeletalBodySetup* ChildBS = PhysAsset->SkeletalBodySetups[ChildIdx];
+			const USkeletalBodySetup* ParentBS = PhysAsset->SkeletalBodySetups[ParentIdx];
+			if (!ChildBS || !ParentBS) continue;
+
+			const double MChild = ChildBS->CalculateMass(nullptr);
+			const double MParent = ParentBS->CalculateMass(nullptr);
+			if (MChild <= 0.0 || MParent <= 0.0) continue;
+
+			const double Ratio = FMath::Max(MChild, MParent) / FMath::Min(MChild, MParent);
+			const bool bChildLighter = MChild < MParent;
+			if (Ratio <= 5.0) continue;
+
+			FFinding F;
+			F.Check = TEXT("C7 mass_ratio");
+			F.bContactGated = true;
+			if (bChildLighter)
+			{
+				// Bands are set ABOVE anatomical norms, not at the solver conditioning
+					// threshold. A healthy human rig routinely exceeds 5:1 and even 30:1 by
+					// capsule volume (upper chest vs neck, or vs clavicle), so banding at 5/20
+					// made every CORRECT rig report criticals - and because this check is
+					// contact-gated it then outranked genuine faults. Only a ratio well outside
+					// anatomical range is evidence of an authoring slip rather than a real body.
+					F.Severity = (Ratio > 100.0) ? TEXT("critical")
+						: (Ratio > 30.0) ? TEXT("warning")
+						: TEXT("info");
+				F.Message = FString::Printf(
+					TEXT("Heavy parent '%s' (%.3f kg) vs light child '%s' (%.3f kg), ratio %.1f. Chaos only conditions the parent-LIGHTER direction (ConditionParentMass, MinParentMassRatio 0.2) — this direction is unprotected, and NO mass conditioning applies to contact impulses. NOTE: ratios up to ~30:1 are anatomically normal (torso vs neck/clavicle) - treat as a cause only if far above that, or if corroborated by another finding on the same bodies."),
+					*ParentBS->BoneName.ToString(), MParent, *ChildBS->BoneName.ToString(), MChild, Ratio);
+			}
+			else
+			{
+				F.Severity = TEXT("info");
+				F.Message = FString::Printf(
+					TEXT("Light parent '%s' (%.3f kg) vs heavy child '%s' (%.3f kg), ratio %.1f. Chaos silently conditions this direction, but the mass distribution is upside-down."),
+					*ParentBS->BoneName.ToString(), MParent, *ChildBS->BoneName.ToString(), MChild, Ratio);
+			}
+			F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("child_mass_kg"), MChild);
+			F.Measured->SetNumberField(TEXT("parent_mass_kg"), MParent);
+			F.Measured->SetNumberField(TEXT("ratio"), Ratio);
+			F.Measured->SetStringField(TEXT("heavier_side"), bChildLighter ? TEXT("parent") : TEXT("child"));
+			// Report the band that actually gates severity (see the rebanding above),
+			// otherwise threshold/ratio would contradict the severity string.
+			F.Threshold = 30.0;
+			F.Ratio = Ratio / 30.0;
+			{
+				TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+				FixParams->SetStringField(TEXT("bone_name"), bChildLighter ? CI.ConstraintBone1.ToString() : CI.ConstraintBone2.ToString());
+				F.SuggestedFix = MakeFix(TEXT("animation.set_body_properties"), FixParams);
+			}
+			Findings.Add(F);
+		}
+
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			double Anisotropy = 0.0;
+			if (ComputeInertiaAnisotropy(Ref.BodyPrims[b], Anisotropy) && Anisotropy > 5.0)
+			{
+				FFinding F;
+				F.Check = TEXT("C7 mass_ratio");
+				F.Severity = TEXT("info");
+				F.Subject = SubjectBody(BS->BoneName.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetNumberField(TEXT("inertia_anisotropy"), Anisotropy);
+				F.Measured->SetBoolField(TEXT("approximate"), true);
+				F.Threshold = 5.0;
+				F.Ratio = Anisotropy / 5.0;
+				F.Message = FString::Printf(TEXT("Inertia anisotropy ~%.1f:1 (analytic, single-primitive estimate) — Chaos ConditionInertia clamps at 5:1, so the SOLVER REWRITES this body's inertia."), Anisotropy);
+				Findings.Add(F);
+			}
+		}
+
+		if (TotalMass < 5.0 || TotalMass > 300.0)
+		{
+			FFinding F;
+			F.Check = TEXT("C7 mass_ratio");
+			F.Severity = TEXT("warning");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("total_mass_kg"), TotalMass);
+			F.Threshold = (TotalMass < 5.0) ? 5.0 : 300.0;
+			F.Ratio = (TotalMass < 5.0) ? (5.0 / FMath::Max(TotalMass, 0.001)) : (TotalMass / 300.0);
+			F.Message = FString::Printf(TEXT("Total ragdoll mass %.2f kg is outside the plausible human range [5, 300] — suspect a global density or scale mistake."), TotalMass);
+			Findings.Add(F);
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C8 — COM / connector lever arm
+	// ---------------------------------------------------------------
+	if (bRefValid && CheckEnabled(TEXT("C8")))
+	{
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			const double CharSize = ComputeCharacteristicSize(Ref.BodyPrims[b]);
+			if (CharSize <= 0.0) continue;
+			const double ComOffset = ComputeBodyCOMBoneSpace(Ref.BodyPrims[b]).Size();
+			if (ComOffset > 0.5 * CharSize)
+			{
+				FFinding F;
+				F.Check = TEXT("C8 com_lever_arm");
+				F.Severity = TEXT("info");
+				F.bContactGated = true;
+				F.Subject = SubjectBody(BS->BoneName.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetNumberField(TEXT("com_offset_cm"), ComOffset);
+				F.Measured->SetNumberField(TEXT("characteristic_size_cm"), CharSize);
+				F.Threshold = 0.5 * CharSize;
+				F.Ratio = ComOffset / FMath::Max(0.5 * CharSize, UE_KINDA_SMALL_NUMBER);
+				F.Message = FString::Printf(TEXT("Body centre of mass sits %.2f cm off its bone origin (%.0f%% of its own size). Chaos solves joints in the CoM frame, so this lengthens the lever between joint anchor and CoM."), ComOffset, 100.0 * ComOffset / CharSize);
+				Findings.Add(F);
+			}
+		}
+
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const int32 ChildIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+			const int32 ParentIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+			if (ChildIdx == INDEX_NONE || ParentIdx == INDEX_NONE) continue;
+
+			FTransform Con1, Con2;
+			if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame1, Con1)) continue;
+			if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame2, Con2)) continue;
+
+			struct FSide { int32 BodyIdx; const FTransform* Frame; const TCHAR* Label; };
+			const FSide Sides[2] = { { ChildIdx, &Con1, TEXT("child") }, { ParentIdx, &Con2, TEXT("parent") } };
+
+			for (const FSide& S : Sides)
+			{
+				const int32 BoneIdx = Ref.BodyBoneIndex[S.BodyIdx];
+				if (!Ref.BoneCS.IsValidIndex(BoneIdx)) continue;
+				const double CharSize = ComputeCharacteristicSize(Ref.BodyPrims[S.BodyIdx]);
+				if (CharSize <= 0.0) continue;
+
+				const FVector ComCS = Ref.BoneCS[BoneIdx].TransformPosition(ComputeBodyCOMBoneSpace(Ref.BodyPrims[S.BodyIdx]));
+				const double ConnectorLen = FVector::Dist(S.Frame->GetTranslation(), ComCS);
+				const double LeverRatio = ConnectorLen / CharSize;
+				if (LeverRatio <= 1.5) continue;
+
+				FFinding F;
+				F.Check = TEXT("C8 com_lever_arm");
+				F.Severity = (LeverRatio > 3.0) ? TEXT("critical") : TEXT("warning");
+				F.bContactGated = true;
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetStringField(TEXT("side"), S.Label);
+				F.Measured->SetNumberField(TEXT("connector_len_cm"), ConnectorLen);
+				F.Measured->SetNumberField(TEXT("characteristic_size_cm"), CharSize);
+				F.Measured->SetNumberField(TEXT("lever_ratio"), LeverRatio);
+				F.Threshold = 1.5;
+				F.Ratio = LeverRatio / 1.5;
+				F.Message = FString::Printf(TEXT("Joint anchor sits %.2f cm from the %s body's centre of mass (%.1fx its own size) — every contact impulse becomes a proportionally larger torque about this joint."), ConnectorLen, S.Label, LeverRatio);
+				F.SuggestedFix = MakeFix(TEXT("animation.set_physics_body_geometry"), nullptr);
+				Findings.Add(F);
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C9 — kinematic pairing
+	// ---------------------------------------------------------------
+	if (CheckEnabled(TEXT("C9")))
+	{
+		int32 NumDefault = 0, NumExplicit = 0;
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			if (BS->PhysicsType == PhysType_Default) NumDefault++; else NumExplicit++;
+		}
+
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const int32 ChildIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone1);
+			const int32 ParentIdx = PhysAsset->FindBodyIndex(CI.ConstraintBone2);
+			if (ChildIdx == INDEX_NONE || ParentIdx == INDEX_NONE) continue;
+			const USkeletalBodySetup* ChildBS = PhysAsset->SkeletalBodySetups[ChildIdx];
+			const USkeletalBodySetup* ParentBS = PhysAsset->SkeletalBodySetups[ParentIdx];
+			if (!ChildBS || !ParentBS) continue;
+
+			const bool bChildKinematic = ChildBS->PhysicsType == PhysType_Kinematic;
+			const bool bParentKinematic = ParentBS->PhysicsType == PhysType_Kinematic;
+			const bool bChildSim = ChildBS->PhysicsType == PhysType_Simulated;
+			const bool bParentSim = ParentBS->PhysicsType == PhysType_Simulated;
+
+			FFinding F;
+			F.Check = TEXT("C9 kinematic_pairing");
+			F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetStringField(TEXT("child_physics_type"), PhysicsTypeToString(ChildBS->PhysicsType));
+			F.Measured->SetStringField(TEXT("parent_physics_type"), PhysicsTypeToString(ParentBS->PhysicsType));
+
+			if (bChildKinematic && bParentKinematic)
+			{
+				F.Severity = TEXT("critical");
+				F.Message = TEXT("Both bodies are Kinematic — this joint can never be solved.");
+			}
+			else if (bParentSim && bChildKinematic)
+			{
+				F.Severity = TEXT("critical");
+				F.Message = TEXT("Simulated parent driving a Kinematic child. Chaos bails out of projection early on a kinematic child (`if (!IsDynamic(1)) return;`), so joint error is never cleaned up and accumulates.");
+			}
+			else if (bParentKinematic && bChildSim)
+			{
+				F.Severity = TEXT("info");
+				F.Message = FString::Printf(TEXT("Kinematic parent '%s' anchors a simulated child — normal pinning."), *ParentBS->BoneName.ToString());
+			}
+			else
+			{
+				continue;
+			}
+			Findings.Add(F);
+		}
+
+		if (NumDefault > 0 && NumExplicit > 0)
+		{
+			FFinding F;
+			F.Check = TEXT("C9 kinematic_pairing");
+			F.Severity = TEXT("warning");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("default_bodies"), NumDefault);
+			F.Measured->SetNumberField(TEXT("explicit_bodies"), NumExplicit);
+			F.Message = TEXT("Asset mixes explicit Kinematic/Simulated bodies with PhysType_Default. Default inherits from the owning component, so PhAT Simulate and gameplay will DIVERGE.");
+			Findings.Add(F);
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C10 — projection energy risk (the AMPLIFIER; never the root cause)
+	// ---------------------------------------------------------------
+	int32 NumProjecting = 0, NumShock = 0;
+	for (int32 c = 0; c < NumConstraints; ++c)
+	{
+		UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+		if (!CT) continue;
+		const FConstraintProfileProperties& P = CT->DefaultInstance.ProfileInstance;
+		if (P.bEnableProjection && P.ProjectionLinearAlpha > 0.f) NumProjecting++;
+		if (P.bEnableShockPropagation) NumShock++;
+	}
+	if (CheckEnabled(TEXT("C10")))
+	{
+		const bool bAnyAmplifiable = Findings.ContainsByPredicate([](const FFinding& F)
+		{
+			return F.Check.StartsWith(TEXT("C5")) || F.Check.StartsWith(TEXT("C7"));
+		});
+
+		if (NumConstraints > 0 && NumProjecting == NumConstraints && bAnyAmplifiable)
+		{
+			FFinding F;
+			F.Check = TEXT("C10 projection_energy_risk");
+			F.Severity = TEXT("warning");
+			F.bContactGated = true;
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("projecting_constraints"), NumProjecting);
+			F.Measured->SetNumberField(TEXT("constraint_count"), NumConstraints);
+			F.Message = TEXT("AMPLIFIER, not a root cause. Projection is enabled on EVERY joint and Chaos converts the projection position delta into real injected velocity (DV1 = DP * p.Chaos.Joint.VelProjectionAlpha / Dt, alpha 0.1). In free-fall DP is ~0; once contacts stop the joints resolving it pumps energy every frame. Fix the C5/C7 findings FIRST, then lower projection_linear_alpha.");
+			{
+				TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+				FixParams->SetBoolField(TEXT("apply_to_all"), true);
+				FixParams->SetNumberField(TEXT("projection_linear_alpha"), 0.3);
+				F.SuggestedFix = MakeFix(TEXT("animation.set_constraint_properties"), FixParams);
+			}
+			Findings.Add(F);
+		}
+
+		if (NumShock > 0)
+		{
+			FFinding F;
+			F.Check = TEXT("C10 projection_energy_risk");
+			F.Severity = TEXT("warning");
+			F.bContactGated = true;
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("shock_propagation_constraints"), NumShock);
+			F.Message = TEXT("Shock propagation is enabled. Epic's own header: it 'is prone to introducing energy down the chain especially at high alpha' and 'does not work well if there are collisions on the bodies'.");
+			{
+				TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+				FixParams->SetBoolField(TEXT("apply_to_all"), true);
+				FixParams->SetBoolField(TEXT("enable_shock_propagation"), false);
+				F.SuggestedFix = MakeFix(TEXT("animation.set_constraint_properties"), FixParams);
+			}
+			Findings.Add(F);
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// C11 — solver / profile posture
+	// ---------------------------------------------------------------
+	if (CheckEnabled(TEXT("C11")))
+	{
+		const FPhysicsAssetSolverSettings& SS = PhysAsset->SolverSettings;
+		const bool bRBAN = PhysAsset->SolverType == EPhysicsAssetSolverType::RBAN;
+
+		if (!bRBAN)
+		{
+			FFinding F;
+			F.Check = TEXT("C11 solver_and_profile_posture");
+			F.Severity = TEXT("info");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetStringField(TEXT("solver_type"), SolverTypeToString(PhysAsset->SolverType));
+			F.Message = TEXT("SolverType is World, so FPhysicsAssetSolverSettings (PositionIterations etc.) are a documented NO-OP here — tuning them will change nothing. They only drive the RBAN anim-node solver.");
+			Findings.Add(F);
+		}
+		else if (SS.PositionIterations < 6)
+		{
+			FFinding F;
+			F.Check = TEXT("C11 solver_and_profile_posture");
+			F.Severity = TEXT("warning");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("position_iterations"), SS.PositionIterations);
+			F.Threshold = 6.0;
+			F.Message = TEXT("RBAN PositionIterations below the engine default of 6 — raise it if collision and joints are fighting or joint chains stretch.");
+			Findings.Add(F);
+		}
+
+		if (SS.MaxDepenetrationVelocity == 0.f)
+		{
+			FFinding F;
+			F.Check = TEXT("C11 solver_and_profile_posture");
+			F.Severity = TEXT("info");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("max_depenetration_velocity"), 0.0);
+			F.Message = TEXT("MaxDepenetrationVelocity is 0 = UNLIMITED pushout speed: a deep penetration can be resolved at any velocity.");
+			Findings.Add(F);
+		}
+
+		for (int32 c = 0; c < NumConstraints; ++c)
+		{
+			UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+			if (!CT) continue;
+			const FConstraintInstance& CI = CT->DefaultInstance;
+			const FLinearConstraint& L = CI.ProfileInstance.LinearLimit;
+
+			struct FDof { const TCHAR* Name; ELinearConstraintMotion Motion; };
+			const FDof Dofs[3] = {
+				{ TEXT("x"), static_cast<ELinearConstraintMotion>(L.XMotion.GetValue()) },
+				{ TEXT("y"), static_cast<ELinearConstraintMotion>(L.YMotion.GetValue()) },
+				{ TEXT("z"), static_cast<ELinearConstraintMotion>(L.ZMotion.GetValue()) },
+			};
+			for (const FDof& D : Dofs)
+			{
+				if (D.Motion == LCM_Locked) continue;
+				FFinding F;
+				F.Check = TEXT("C11 solver_and_profile_posture");
+				F.Severity = TEXT("warning");
+				F.Subject = SubjectConstraint(c, CI.ConstraintBone1.ToString(), CI.ConstraintBone2.ToString());
+				F.Measured = MakeShared<FJsonObject>();
+				F.Measured->SetStringField(TEXT("dof"), D.Name);
+				F.Measured->SetStringField(TEXT("motion"), LinearMotionToString(D.Motion));
+				F.Measured->SetNumberField(TEXT("limit"), L.Limit);
+				F.Message = (D.Motion == LCM_Limited && L.Limit <= 0.f)
+					? FString::Printf(TEXT("Linear DOF '%s' is Limited with a 0 limit — it should be Locked."), D.Name)
+					: FString::Printf(TEXT("Linear DOF '%s' is %s; a ragdoll joint wants all three Locked."), D.Name, *LinearMotionToString(D.Motion));
+				TSharedPtr<FJsonObject> FixParams = MakeShared<FJsonObject>();
+				FixParams->SetNumberField(TEXT("constraint_index"), c);
+				FixParams->SetStringField(FString::Printf(TEXT("linear_%s_motion"), D.Name), TEXT("Locked"));
+				F.SuggestedFix = MakeFix(TEXT("animation.set_constraint_properties"), FixParams);
+				Findings.Add(F);
+			}
+		}
+
+		bool bAllZeroAngularDamping = NumBodies > 0;
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+			if (!BS) continue;
+			if (BS->DefaultInstance.AngularDamping > 0.f) { bAllZeroAngularDamping = false; break; }
+		}
+		if (bAllZeroAngularDamping)
+		{
+			FFinding F;
+			F.Check = TEXT("C11 solver_and_profile_posture");
+			F.Severity = TEXT("info");
+			F.Subject = SubjectAsset();
+			F.Measured = MakeShared<FJsonObject>();
+			F.Measured->SetNumberField(TEXT("angular_damping"), 0.0);
+			F.Message = TEXT("Every body has AngularDamping 0 — nothing dissipates rotational energy, which is why the failure reads as explosive rather than as decaying jitter. 1-5 is normal for a ragdoll and is the cheapest mitigation lever.");
+			F.SuggestedFix = MakeFix(TEXT("animation.set_body_properties"), nullptr);
+			Findings.Add(F);
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Ranking
+	// ---------------------------------------------------------------
+	const bool bAnyContactGatedCritical = Findings.ContainsByPredicate([](const FFinding& F)
+	{
+		return F.bContactGated && F.Severity == TEXT("critical");
+	});
+	const bool bPromoteContactGated = Symptom.Equals(TEXT("launch_on_contact"), ESearchCase::IgnoreCase)
+		|| Symptom.Equals(TEXT("sinks_through_floor"), ESearchCase::IgnoreCase)
+		|| (Symptom.Equals(TEXT("none"), ESearchCase::IgnoreCase) && bAnyContactGatedCritical);
+	const bool bPromoteImmediate = Symptom.Equals(TEXT("explodes_immediately"), ESearchCase::IgnoreCase);
+
+	auto Score = [bPromoteContactGated, bPromoteImmediate](const FFinding& F) -> int32
+	{
+		int32 S = SeverityRank(F.Severity);
+		if (bPromoteContactGated && F.bContactGated) S += 1;
+		if (bPromoteImmediate && !F.bContactGated) S += 1;
+		return S;
+	};
+
+	Findings.Sort([&Score](const FFinding& A, const FFinding& B)
+	{
+		const int32 SA = Score(A), SB = Score(B);
+		if (SA != SB) return SA > SB;
+		if (!FMath::IsNearlyEqual(A.Ratio, B.Ratio, 1e-6)) return A.Ratio > B.Ratio;
+		return CausePriority(A.Check) > CausePriority(B.Check);
+	});
+
+	int32 NumCritical = 0, NumWarning = 0, NumInfo = 0, NumContactGated = 0;
+	for (const FFinding& F : Findings)
+	{
+		if (F.Severity == TEXT("critical")) NumCritical++;
+		else if (F.Severity == TEXT("warning")) NumWarning++;
+		else NumInfo++;
+		if (F.bContactGated) NumContactGated++;
+	}
+
+	// ---------------------------------------------------------------
+	// Payload
+	// ---------------------------------------------------------------
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), PhysAsset->GetPathName());
+	Root->SetStringField(TEXT("preview_mesh"), Ref.PreviewMesh ? Ref.PreviewMesh->GetPathName() : FString());
+	Root->SetStringField(TEXT("symptom"), Symptom);
+	Root->SetBoolField(TEXT("analysis_reliable"), bAnalysisReliable);
+	Root->SetArrayField(TEXT("blockers"), Blockers);
+
+	TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+	Summary->SetNumberField(TEXT("critical"), NumCritical);
+	Summary->SetNumberField(TEXT("warning"), NumWarning);
+	Summary->SetNumberField(TEXT("info"), NumInfo);
+	Summary->SetNumberField(TEXT("contact_gated"), NumContactGated);
+	Summary->SetNumberField(TEXT("total"), Findings.Num());
+	Root->SetObjectField(TEXT("summary"), Summary);
+
+	TArray<TSharedPtr<FJsonValue>> FindingsArr;
+	for (int32 i = 0; i < Findings.Num() && i < MaxFindings; ++i)
+	{
+		const FFinding& F = Findings[i];
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("rank"), i + 1);
+		O->SetStringField(TEXT("check"), F.Check);
+		O->SetStringField(TEXT("severity"), F.Severity);
+		O->SetBoolField(TEXT("contact_gated"), F.bContactGated);
+		O->SetBoolField(TEXT("reliable"), bAnalysisReliable);
+		O->SetObjectField(TEXT("subject"), F.Subject.IsValid() ? F.Subject : SubjectAsset());
+		O->SetObjectField(TEXT("measured"), F.Measured.IsValid() ? F.Measured : MakeShared<FJsonObject>());
+		O->SetNumberField(TEXT("threshold"), F.Threshold);
+		O->SetNumberField(TEXT("ratio"), F.Ratio);
+		O->SetStringField(TEXT("message"), F.Message);
+		if (F.SuggestedFix.IsValid()) O->SetObjectField(TEXT("suggested_fix"), F.SuggestedFix);
+		FindingsArr.Add(MakeShared<FJsonValueObject>(O));
+	}
+	Root->SetArrayField(TEXT("findings"), FindingsArr);
+	Root->SetNumberField(TEXT("findings_truncated"), FMath::Max(0, Findings.Num() - FindingsArr.Num()));
+
+	// ranked_causes — one line per mechanism, with the finding ranks that support it.
+	TArray<TSharedPtr<FJsonValue>> Causes;
+	auto AddCause = [&Causes, &Findings, MaxFindings](const TCHAR* CheckPrefix, const TCHAR* CauseName,
+		const TCHAR* OneLine)
+	{
+		TArray<TSharedPtr<FJsonValue>> Ranks;
+		int32 CriticalCount = 0;
+		for (int32 i = 0; i < Findings.Num() && i < MaxFindings; ++i)
+		{
+			if (!Findings[i].Check.StartsWith(CheckPrefix)) continue;
+			Ranks.Add(MakeShared<FJsonValueNumber>(i + 1));
+			if (Findings[i].Severity == TEXT("critical")) CriticalCount++;
+		}
+		if (Ranks.Num() == 0) return;
+
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("cause"), CauseName);
+		O->SetStringField(TEXT("confidence"), CriticalCount > 0 ? TEXT("high") : (Ranks.Num() > 1 ? TEXT("medium") : TEXT("low")));
+		O->SetStringField(TEXT("one_line"), OneLine);
+		O->SetArrayField(TEXT("evidence_finding_ranks"), Ranks);
+		Causes.Add(MakeShared<FJsonValueObject>(O));
+	};
+	AddCause(TEXT("C0"), TEXT("asset_integrity"),        TEXT("The asset itself is malformed — fix this before trusting any other number."));
+	AddCause(TEXT("C5"), TEXT("stale_collision_table"),  TEXT("Bodies interpenetrate in the ref pose while still allowed to collide; the table was computed once at auto-generation and never recomputed after the capsules were edited."));
+	AddCause(TEXT("C7"), TEXT("mass_distribution"),      TEXT("A connected pair has an extreme mass ratio; resizing a capsule silently rewrites its mass and Chaos does not condition the heavy-parent direction, nor contacts at all."));
+	AddCause(TEXT("C8"), TEXT("com_lever_arm"),          TEXT("Primitive centres pushed away from their bone origins lengthen the joint-to-CoM lever, so contact impulses become larger torques."));
+	AddCause(TEXT("C10"), TEXT("projection_energy_pump"),TEXT("AMPLIFIER: projection injects velocity once contacts stop the joints resolving. Never fix this first."));
+	AddCause(TEXT("C3"), TEXT("joint_frame_preload"),    TEXT("Constraint frames do not coincide in the reference pose, so the joint is born violated. Note this misbehaves in MID-AIR, so it is a weak explanation for a contact-gated launch."));
+	AddCause(TEXT("C4"), TEXT("refpose_limit_violation"),TEXT("The reference pose starts outside a joint's own angular limit."));
+	AddCause(TEXT("C2"), TEXT("corrupt_frame_basis"),    TEXT("Constraint frame axes are non-orthonormal, injecting scale/shear into the Chaos joint."));
+	AddCause(TEXT("C1"), TEXT("degenerate_geometry"),    TEXT("A collision primitive is degenerate or silently clamped by the engine."));
+	AddCause(TEXT("C9"), TEXT("kinematic_pairing"),      TEXT("A joint spans a kinematic/simulated boundary in a way the solver cannot clean up."));
+	AddCause(TEXT("C11"), TEXT("solver_profile_posture"),TEXT("Solver / linear-DOF / damping posture that makes a marginal asset unstable."));
+	AddCause(TEXT("C6"), TEXT("collision_state_reporting"), TEXT("The constraint checkbox and the collision table disagree — a reporting hazard, not a defect."));
+	Root->SetArrayField(TEXT("ranked_causes"), Causes);
+
+	TArray<FString> NextSteps;
+	NextSteps.Add(TEXT("A/B TEST: run PhAT Simulate with `p.Chaos.Joint.VelProjectionAlpha 0`. If the launch stops, the projection velocity pump (C10) is confirmed as the amplifier — fix the C5/C7 findings that feed it."));
+	NextSteps.Add(TEXT("A/B TEST: temporarily disable collision on ALL body pairs (set_physics_collision_pairs). If the launch disappears entirely it is a body-collision problem, not a joint problem."));
+	NextSteps.Add(TEXT("MEASURE, do not assume: snap_constraint_to_bone with dry_run:true prints each frame's exact delta from its bone-derived default. Moving/resizing a BODY cannot desync a constraint frame — only dragging the constraint gizmo can."));
+	NextSteps.Add(TEXT("PhAT Simulate is NOT fully determined by this asset: EditorOptions->PhysicsBlend, the preview animation and the preview floor live in editor options, outside the .uasset."));
+	NextSteps.Add(TEXT("Nothing here saves the package. After applying any fix run editor.list_dirty_packages then editor.save_packages."));
+	WriteStringArray(Root, TEXT("next_steps"), NextSteps);
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetArrayField(TEXT("overlap_matrix"), OverlapRows);
+	Data->SetArrayField(TEXT("masses"), MassRows);
+	Data->SetNumberField(TEXT("total_mass_kg"), TotalMass);
+	Data->SetNumberField(TEXT("projecting_constraints"), NumProjecting);
+	Root->SetObjectField(TEXT("data"), Data);
+
+	return FMonolithActionResult::Success(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 17 — Physics Asset mutators (geometry / frames / collision table / bodies)
+// ---------------------------------------------------------------------------
+//
+// NONE of these save the package — the caller must run editor.list_dirty_packages
+// then editor.save_packages or the fix is lost when the editor exits.
+
+namespace MonolithPhysics
+{
+	/** Engine's own seed size for a freshly created primitive (PhysicsAssetUtils.cpp DefaultPrimSize). */
+	static const float DefaultPrimSize = 15.0f;
+
+	/**
+	 * Which element array a primitive_index refers to. An explicit shape_type always wins;
+	 * otherwise the body's dominant analytic type, using GetShapeTypeString's precedence so
+	 * a single-capsule body needs no shape_type at all.
+	 */
+	static bool ResolvePrimitiveShapeType(const FKAggregateGeom& Geom, const TSharedPtr<FJsonObject>& Params,
+		EAggCollisionShape::Type& Out, FString& OutError)
+	{
+		FString ShapeStr;
+		if (Params->TryGetStringField(TEXT("shape_type"), ShapeStr) && !ShapeStr.IsEmpty())
+		{
+			if (!StringToWritableShapeType(ShapeStr, Out))
+			{
+				OutError = FString::Printf(TEXT("Unsupported shape_type '%s'. Writable types: Capsule, Sphere, Box, TaperedCapsule (Convex/LevelSet are read-only)."), *ShapeStr);
+				return false;
+			}
+			return true;
+		}
+
+		if (Geom.SphylElems.Num() > 0)          { Out = EAggCollisionShape::Sphyl;          return true; }
+		if (Geom.SphereElems.Num() > 0)         { Out = EAggCollisionShape::Sphere;         return true; }
+		if (Geom.BoxElems.Num() > 0)            { Out = EAggCollisionShape::Box;            return true; }
+		if (Geom.TaperedCapsuleElems.Num() > 0) { Out = EAggCollisionShape::TaperedCapsule; return true; }
+
+		OutError = TEXT("Body has no writable analytic primitives. Pass operation:'add' with shape_type to create one (Convex/LevelSet bodies are read-only).");
+		return false;
+	}
+
+	static int32 WritableElemCount(const FKAggregateGeom& Geom, EAggCollisionShape::Type Type)
+	{
+		switch (Type)
+		{
+			case EAggCollisionShape::Sphere:         return Geom.SphereElems.Num();
+			case EAggCollisionShape::Box:            return Geom.BoxElems.Num();
+			case EAggCollisionShape::Sphyl:          return Geom.SphylElems.Num();
+			case EAggCollisionShape::TaperedCapsule: return Geom.TaperedCapsuleElems.Num();
+			default:                                 return 0;
+		}
+	}
+
+	/** FPrimView for ONE element, so before/after echo the exact shape get_physics_asset_info emits. */
+	static bool ViewSingle(const FKAggregateGeom& Geom, EAggCollisionShape::Type Type, int32 Index, FPrimView& Out)
+	{
+		TArray<FPrimView> All;
+		GatherPrimitives(Geom, All);
+		for (const FPrimView& V : All)
+		{
+			if (V.Type == Type && V.Index == Index) { Out = V; return true; }
+		}
+		return false;
+	}
+
+	/** Mutable FKShapeElem base pointer for a writable analytic element (nullptr on a bad index). */
+	static FKShapeElem* GetWritableElem(FKAggregateGeom& Geom, EAggCollisionShape::Type Type, int32 Index)
+	{
+		switch (Type)
+		{
+			case EAggCollisionShape::Sphere:         return Geom.SphereElems.IsValidIndex(Index)         ? static_cast<FKShapeElem*>(&Geom.SphereElems[Index])         : nullptr;
+			case EAggCollisionShape::Box:            return Geom.BoxElems.IsValidIndex(Index)            ? static_cast<FKShapeElem*>(&Geom.BoxElems[Index])            : nullptr;
+			case EAggCollisionShape::Sphyl:          return Geom.SphylElems.IsValidIndex(Index)          ? static_cast<FKShapeElem*>(&Geom.SphylElems[Index])          : nullptr;
+			case EAggCollisionShape::TaperedCapsule: return Geom.TaperedCapsuleElems.IsValidIndex(Index) ? static_cast<FKShapeElem*>(&Geom.TaperedCapsuleElems[Index]) : nullptr;
+			default:                                 return nullptr;
+		}
+	}
+
+	/** Post-write sanity pass. The engine clamps SILENTLY, so authored != simulated is a warning. */
+	static void CollectGeometryWarnings(const FPrimView& V, TArray<FString>& Warnings)
+	{
+		auto WarnSmall = [&Warnings](const TCHAR* What, float Value)
+		{
+			if (Value < HardPrimClamp)
+			{
+				Warnings.Add(FString::Printf(TEXT("%s %.4f is below the hard runtime clamp %.2f — the sim will use the clamped value, not this one."), What, Value, HardPrimClamp));
+			}
+			else if (Value < MinPrimSize)
+			{
+				Warnings.Add(FString::Printf(TEXT("%s %.4f is below the engine authoring floor MinPrimSize %.2f (what PhAT's own gizmo clamps to)."), What, Value, MinPrimSize));
+			}
+		};
+
+		switch (V.Type)
+		{
+			case EAggCollisionShape::Sphere:
+				WarnSmall(TEXT("radius"), V.Radius);
+				break;
+			case EAggCollisionShape::Sphyl:
+				WarnSmall(TEXT("radius"), V.Radius);
+				WarnSmall(TEXT("length"), V.Length);
+				if (!FMath::IsNearlyEqual(V.Radius, V.EffectiveRadius, 1e-3f))
+				{
+					Warnings.Add(FString::Printf(TEXT("Authored radius %.4f is silently clamped to %.4f at simulate time (FKSphylElem::GetScaledRadius clamps into [0.1, half-length]); the Details panel will keep showing the authored value."), V.Radius, V.EffectiveRadius));
+				}
+				if (!FMath::IsNearlyEqual(V.Length, V.EffectiveLength, 1e-3f))
+				{
+					Warnings.Add(FString::Printf(TEXT("Authored length %.4f is silently clamped to %.4f at simulate time (FKSphylElem::GetScaledCylinderLength)."), V.Length, V.EffectiveLength));
+				}
+				break;
+			case EAggCollisionShape::Box:
+				if (V.Extents.X <= 0.0 || V.Extents.Y <= 0.0 || V.Extents.Z <= 0.0)
+				{
+					Warnings.Add(TEXT("Box has a non-positive extent — the body is degenerate and will not simulate correctly. Note X/Y/Z are FULL extents, not half-extents."));
+				}
+				WarnSmall(TEXT("extent_x"), static_cast<float>(V.Extents.X));
+				WarnSmall(TEXT("extent_y"), static_cast<float>(V.Extents.Y));
+				WarnSmall(TEXT("extent_z"), static_cast<float>(V.Extents.Z));
+				break;
+			case EAggCollisionShape::TaperedCapsule:
+				WarnSmall(TEXT("radius_0"), V.Radius0);
+				WarnSmall(TEXT("radius_1"), V.Radius1);
+				WarnSmall(TEXT("length"), V.Length);
+				Warnings.Add(TEXT("TaperedCapsule is a cloth-only shape — it does not contribute to rigid-body sim mass."));
+				break;
+			default:
+				break;
+		}
+
+		if (!FMath::IsFinite(V.Local.GetTranslation().X) || !FMath::IsFinite(V.Local.GetTranslation().Y) || !FMath::IsFinite(V.Local.GetTranslation().Z))
+		{
+			Warnings.Add(TEXT("Primitive center contains a non-finite component (NaN/Inf)."));
+		}
+	}
+
+	/** Shortest-arc angle between two rotations, in degrees. */
+	static double AngleBetweenDeg(const FQuat& A, const FQuat& B)
+	{
+		FQuat Bn = B;
+		Bn.EnforceShortestArcWith(A);
+		return FMath::RadiansToDegrees(A.AngularDistance(Bn));
+	}
+
+	/**
+	 * Normalize PriAxis and Gram-Schmidt SecAxis against it, so this module can never author
+	 * the non-orthonormal basis that check C2 flags (FConstraintInstance rebuilds the frame as
+	 * FTransform(Pri, Sec, Pri ^ Sec, Pos) and only WARNS when that contains scale/shear).
+	 * Returns false when the pair is degenerate (zero-length or parallel).
+	 */
+	static bool OrthonormalizeFrameAxes(FVector& Pri, FVector& Sec, bool& bOutAdjusted)
+	{
+		bOutAdjusted = false;
+
+		const FVector OrigPri = Pri;
+		const FVector OrigSec = Sec;
+
+		if (!Pri.Normalize(UE_SMALL_NUMBER)) return false;
+
+		FVector NewSec = Sec - (Sec | Pri) * Pri;
+		if (!NewSec.Normalize(UE_SMALL_NUMBER)) return false;
+		Sec = NewSec;
+
+		bOutAdjusted = !OrigPri.Equals(Pri, UE_KINDA_SMALL_NUMBER) || !OrigSec.Equals(Sec, UE_KINDA_SMALL_NUMBER);
+		return true;
+	}
+
+	/** Ref-pose joint error for one constraint. false when there is no usable ref pose. */
+	static bool MeasureConstraintRefPoseError(const FRefPoseInfo& Ref, const FConstraintInstance& CI,
+		double& OutLinearCm, double& OutAngularDeg)
+	{
+		FTransform F1CS, F2CS;
+		if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame1, F1CS)) return false;
+		if (!GetConstraintFrameCS(Ref, CI, EConstraintFrame::Frame2, F2CS)) return false;
+		OutLinearCm = FVector::Dist(F1CS.GetTranslation(), F2CS.GetTranslation());
+		OutAngularDeg = AngleBetweenDeg(F2CS.GetRotation(), F1CS.GetRotation());
+		return true;
+	}
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleSetPhysicsBodyGeometry(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	FString BoneName = Params->GetStringField(TEXT("bone_name"));
+	if (BoneName.IsEmpty()) return FMonolithActionResult::Error(TEXT("bone_name is required"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	int32 BodyIdx = INDEX_NONE;
+	USkeletalBodySetup* BodySetup = ResolveBody(PhysAsset, BoneName, BodyIdx);
+	if (!BodySetup) return FMonolithActionResult::Error(FString::Printf(TEXT("Body not found for bone: %s"), *BoneName));
+
+	FString Operation = TEXT("modify");
+	Params->TryGetStringField(TEXT("operation"), Operation);
+	const bool bAdd    = Operation.Equals(TEXT("add"), ESearchCase::IgnoreCase);
+	const bool bRemove = Operation.Equals(TEXT("remove"), ESearchCase::IgnoreCase);
+	if (!bAdd && !bRemove && !Operation.Equals(TEXT("modify"), ESearchCase::IgnoreCase))
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Unknown operation '%s'. Use modify, add, or remove."), *Operation));
+
+	FKAggregateGeom& Geom = BodySetup->AggGeom;
+
+	// --- Resolve the target element array. All validation happens BEFORE the transaction. ---
+	EAggCollisionShape::Type ShapeType = EAggCollisionShape::Unknown;
+	if (bAdd)
+	{
+		FString ShapeStr;
+		if (!Params->TryGetStringField(TEXT("shape_type"), ShapeStr) || ShapeStr.IsEmpty())
+			return FMonolithActionResult::Error(TEXT("operation 'add' requires shape_type (Capsule, Sphere, Box, or TaperedCapsule)"));
+		if (!StringToWritableShapeType(ShapeStr, ShapeType))
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Unsupported shape_type '%s'. Writable types: Capsule, Sphere, Box, TaperedCapsule (Convex/LevelSet are read-only)."), *ShapeStr));
+	}
+	else
+	{
+		FString ShapeError;
+		if (!ResolvePrimitiveShapeType(Geom, Params, ShapeType, ShapeError))
+			return FMonolithActionResult::Error(ShapeError);
+	}
+
+	int32 PrimIndex = 0;
+	double PrimIndexVal;
+	const bool bPrimIndexGiven = Params->TryGetNumberField(TEXT("primitive_index"), PrimIndexVal);
+	if (bPrimIndexGiven) PrimIndex = static_cast<int32>(PrimIndexVal);
+
+	if (!bAdd)
+	{
+		const int32 Count = WritableElemCount(Geom, ShapeType);
+		if (PrimIndex < 0 || PrimIndex >= Count)
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid primitive_index %d for %s on bone '%s' (body has %d of that shape)"),
+				PrimIndex, *ShapeTypeToString(ShapeType), *BoneName, Count));
+	}
+
+	ECollisionEnabled::Type CollisionEnabledVal = ECollisionEnabled::QueryAndPhysics;
+	FString CollisionEnabledStr;
+	const bool bHasCollisionEnabled = Params->TryGetStringField(TEXT("collision_enabled"), CollisionEnabledStr) && !CollisionEnabledStr.IsEmpty();
+	if (bHasCollisionEnabled && !StringToCollisionEnabled(CollisionEnabledStr, CollisionEnabledVal))
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Unknown collision_enabled '%s'. Use NoCollision, QueryOnly, PhysicsOnly, or QueryAndPhysics."), *CollisionEnabledStr));
+
+	double ScaleVal = 1.0;
+	const bool bHasScale = Params->TryGetNumberField(TEXT("scale"), ScaleVal);
+	if (bHasScale && ScaleVal <= 0.0)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("scale must be > 0 (got %.4f)"), ScaleVal));
+
+	FVector CenterVal = FVector::ZeroVector;
+	const bool bHasCenter = MonolithParamUtils::ParseVector(Params, TEXT("center"), CenterVal);
+	FRotator RotationVal = FRotator::ZeroRotator;
+	const bool bHasRotation = MonolithParamUtils::ParseRotator(Params, TEXT("rotation"), RotationVal);
+
+	const float MassBefore = BodySetup->CalculateMass(nullptr);
+	FPrimView BeforeView;
+	const bool bHaveBefore = !bAdd && ViewSingle(Geom, ShapeType, PrimIndex, BeforeView);
+
+	TArray<FString> ModifiedProps;
+	TArray<FString> Warnings;
+	if (bAdd && bPrimIndexGiven)
+	{
+		Warnings.Add(TEXT("primitive_index is ignored for operation 'add'; the new element is appended and its index is returned."));
+	}
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Set Physics Body Geometry")));
+	BodySetup->Modify();
+
+	if (bRemove)
+	{
+		switch (ShapeType)
+		{
+			case EAggCollisionShape::Sphere:         Geom.SphereElems.RemoveAt(PrimIndex);         break;
+			case EAggCollisionShape::Box:            Geom.BoxElems.RemoveAt(PrimIndex);            break;
+			case EAggCollisionShape::Sphyl:          Geom.SphylElems.RemoveAt(PrimIndex);          break;
+			case EAggCollisionShape::TaperedCapsule: Geom.TaperedCapsuleElems.RemoveAt(PrimIndex); break;
+			default: break;
+		}
+		ModifiedProps.Add(TEXT("removed"));
+		if (Geom.GetElementCount() == 0)
+		{
+			Warnings.Add(TEXT("Body now has ZERO collision shapes — Epic's own IsDataValid rule requires at least one. Add a primitive or remove the body."));
+		}
+	}
+	else
+	{
+		if (bAdd)
+		{
+			// Seed at the engine's own DefaultPrimSize so the writers below have something valid
+			// to edit even when the caller supplies only a subset of the dimensions.
+			switch (ShapeType)
+			{
+				case EAggCollisionShape::Sphere:
+				{
+					FKSphereElem E;
+					E.Radius = DefaultPrimSize;
+					PrimIndex = Geom.SphereElems.Add(E);
+					break;
+				}
+				case EAggCollisionShape::Box:
+				{
+					FKBoxElem E;
+					E.X = E.Y = E.Z = DefaultPrimSize;   // FULL extents
+					PrimIndex = Geom.BoxElems.Add(E);
+					break;
+				}
+				case EAggCollisionShape::Sphyl:
+				{
+					FKSphylElem E;
+					E.Radius = DefaultPrimSize * 0.5f;
+					E.Length = DefaultPrimSize;
+					PrimIndex = Geom.SphylElems.Add(E);
+					break;
+				}
+				case EAggCollisionShape::TaperedCapsule:
+				{
+					FKTaperedCapsuleElem E;
+					E.Radius0 = E.Radius1 = DefaultPrimSize * 0.5f;
+					E.Length = DefaultPrimSize;
+					PrimIndex = Geom.TaperedCapsuleElems.Add(E);
+					break;
+				}
+				default: break;
+			}
+			ModifiedProps.Add(TEXT("added"));
+		}
+
+		// --- Shared FKShapeElem fields ---
+		if (FKShapeElem* Elem = GetWritableElem(Geom, ShapeType, PrimIndex))
+		{
+			FString NewName;
+			if (Params->TryGetStringField(TEXT("name"), NewName) && !NewName.IsEmpty())
+			{
+				Elem->SetName(FName(*NewName));
+				ModifiedProps.Add(TEXT("name"));
+			}
+			double RestOffsetVal;
+			if (Params->TryGetNumberField(TEXT("rest_offset"), RestOffsetVal))
+			{
+				Elem->RestOffset = static_cast<float>(RestOffsetVal);
+				ModifiedProps.Add(TEXT("rest_offset"));
+			}
+			bool bContributes;
+			if (Params->TryGetBoolField(TEXT("contributes_to_mass"), bContributes))
+			{
+				Elem->SetContributeToMass(bContributes);
+				ModifiedProps.Add(TEXT("contributes_to_mass"));
+			}
+			if (bHasCollisionEnabled)
+			{
+				Elem->SetCollisionEnabled(CollisionEnabledVal);
+				ModifiedProps.Add(TEXT("collision_enabled"));
+			}
+		}
+
+		// --- Per-shape geometry. `scale` is applied AFTER the explicit values. ---
+		switch (ShapeType)
+		{
+			case EAggCollisionShape::Sphere:
+			{
+				FKSphereElem& E = Geom.SphereElems[PrimIndex];
+				if (bHasCenter)   { E.Center = CenterVal; ModifiedProps.Add(TEXT("center")); }
+				if (bHasRotation) { Warnings.Add(TEXT("Sphere has no rotation; the rotation param was ignored.")); }
+				double R;
+				if (Params->TryGetNumberField(TEXT("radius"), R)) { E.Radius = static_cast<float>(R); ModifiedProps.Add(TEXT("radius")); }
+				if (bHasScale)    { E.Radius *= static_cast<float>(ScaleVal); ModifiedProps.Add(TEXT("scale")); }
+				break;
+			}
+			case EAggCollisionShape::Box:
+			{
+				FKBoxElem& E = Geom.BoxElems[PrimIndex];
+				if (bHasCenter)   { E.Center = CenterVal;     ModifiedProps.Add(TEXT("center")); }
+				if (bHasRotation) { E.Rotation = RotationVal; ModifiedProps.Add(TEXT("rotation")); }
+				double V;
+				if (Params->TryGetNumberField(TEXT("extent_x"), V)) { E.X = static_cast<float>(V); ModifiedProps.Add(TEXT("extent_x")); }
+				if (Params->TryGetNumberField(TEXT("extent_y"), V)) { E.Y = static_cast<float>(V); ModifiedProps.Add(TEXT("extent_y")); }
+				if (Params->TryGetNumberField(TEXT("extent_z"), V)) { E.Z = static_cast<float>(V); ModifiedProps.Add(TEXT("extent_z")); }
+				if (bHasScale)
+				{
+					E.X *= static_cast<float>(ScaleVal);
+					E.Y *= static_cast<float>(ScaleVal);
+					E.Z *= static_cast<float>(ScaleVal);
+					ModifiedProps.Add(TEXT("scale"));
+				}
+				break;
+			}
+			case EAggCollisionShape::Sphyl:
+			{
+				FKSphylElem& E = Geom.SphylElems[PrimIndex];
+				if (bHasCenter)   { E.Center = CenterVal;     ModifiedProps.Add(TEXT("center")); }
+				if (bHasRotation) { E.Rotation = RotationVal; ModifiedProps.Add(TEXT("rotation")); }
+				double V;
+				if (Params->TryGetNumberField(TEXT("radius"), V)) { E.Radius = static_cast<float>(V); ModifiedProps.Add(TEXT("radius")); }
+				// Length is the LINE-SEGMENT length; total capsule length is Length + 2*Radius.
+				if (Params->TryGetNumberField(TEXT("length"), V)) { E.Length = static_cast<float>(V); ModifiedProps.Add(TEXT("length")); }
+				if (bHasScale)
+				{
+					E.Radius *= static_cast<float>(ScaleVal);
+					E.Length *= static_cast<float>(ScaleVal);
+					ModifiedProps.Add(TEXT("scale"));
+				}
+				break;
+			}
+			case EAggCollisionShape::TaperedCapsule:
+			{
+				FKTaperedCapsuleElem& E = Geom.TaperedCapsuleElems[PrimIndex];
+				if (bHasCenter)   { E.Center = CenterVal;     ModifiedProps.Add(TEXT("center")); }
+				if (bHasRotation) { E.Rotation = RotationVal; ModifiedProps.Add(TEXT("rotation")); }
+				double V;
+				if (Params->TryGetNumberField(TEXT("radius_0"), V)) { E.Radius0 = static_cast<float>(V); ModifiedProps.Add(TEXT("radius_0")); }
+				if (Params->TryGetNumberField(TEXT("radius_1"), V)) { E.Radius1 = static_cast<float>(V); ModifiedProps.Add(TEXT("radius_1")); }
+				if (Params->TryGetNumberField(TEXT("radius"), V))
+				{
+					E.Radius0 = E.Radius1 = static_cast<float>(V);
+					ModifiedProps.Add(TEXT("radius"));
+				}
+				if (Params->TryGetNumberField(TEXT("length"), V)) { E.Length = static_cast<float>(V); ModifiedProps.Add(TEXT("length")); }
+				if (bHasScale)
+				{
+					E.Radius0 *= static_cast<float>(ScaleVal);
+					E.Radius1 *= static_cast<float>(ScaleVal);
+					E.Length  *= static_cast<float>(ScaleVal);
+					ModifiedProps.Add(TEXT("scale"));
+				}
+				break;
+			}
+			default: break;
+		}
+	}
+
+	GEditor->EndTransaction();
+
+	// Analytic shapes deliberately get NO InvalidatePhysicsData/CreatePhysicsMeshes — PhAT
+	// re-cooks only for Convex (PhysicsAssetEditorEditMode.cpp HandleEndTransform). They DO
+	// need every live preview/PhAT component rebuilt, which is what RefreshPhysicsAssetChange does.
+#if WITH_EDITOR
+	PhysAsset->RefreshPhysicsAssetChange();
+#endif
+	PhysAsset->MarkPackageDirty();
+
+	FPrimView AfterView;
+	const bool bHaveAfter = !bRemove && ViewSingle(Geom, ShapeType, PrimIndex, AfterView);
+	if (bHaveAfter) CollectGeometryWarnings(AfterView, Warnings);
+
+	const float MassAfter = BodySetup->CalculateMass(nullptr);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("bone_name"), BoneName);
+	Root->SetNumberField(TEXT("body_index"), BodyIdx);
+	Root->SetStringField(TEXT("operation"), bAdd ? TEXT("add") : (bRemove ? TEXT("remove") : TEXT("modify")));
+	Root->SetNumberField(TEXT("primitive_index"), PrimIndex);
+	Root->SetStringField(TEXT("shape_type"), ShapeTypeToString(ShapeType));
+	Root->SetNumberField(TEXT("primitive_count"), Geom.GetElementCount());
+	if (bHaveBefore) Root->SetObjectField(TEXT("before"), WritePrimitive(BeforeView));
+	if (bHaveAfter)  Root->SetObjectField(TEXT("after"), WritePrimitive(AfterView));
+	// Resizing a capsule silently rewrites its mass — mass = (volume*density)^0.75 — so surface it.
+	Root->SetNumberField(TEXT("computed_mass_kg_before"), MassBefore);
+	Root->SetNumberField(TEXT("computed_mass_kg_after"), MassAfter);
+
+	TArray<TSharedPtr<FJsonValue>> ModArr;
+	for (const FString& P : ModifiedProps)
+	{
+		ModArr.Add(MakeShared<FJsonValueString>(P));
+	}
+	Root->SetArrayField(TEXT("modified"), ModArr);
+	WriteStringArray(Root, TEXT("warnings"), Warnings);
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleSnapConstraintToBone(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+#if !WITH_EDITORONLY_DATA
+	return FMonolithActionResult::Error(TEXT("snap_constraint_to_bone requires editor-only data (FConstraintInstance::SnapTransformsToDefault)"));
+#else
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	FString ComponentsStr = TEXT("All");
+	Params->TryGetStringField(TEXT("components"), ComponentsStr);
+	EConstraintTransformComponentFlags SnapFlags = EConstraintTransformComponentFlags::All;
+	if (!StringToSnapFlags(ComponentsStr, SnapFlags))
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Unknown components '%s'. Use All, AllChild, AllParent, AllPosition, AllRotation, ChildPosition, ChildRotation, ParentPosition, ParentRotation, or None."), *ComponentsStr));
+
+	bool bDryRun = false;
+	Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+
+	// PRECONDITION 1 — with no preview mesh CalculateDefaultParentTransform silently returns
+	// Identity, so snapping would COLLAPSE every parent frame and destroy a working rig.
+	USkeletalMesh* PreviewMesh = PhysAsset->GetPreviewMesh();
+	if (!PreviewMesh)
+		return FMonolithActionResult::Error(TEXT("Physics asset has no preview mesh. CalculateDefaultParentTransform would silently return Identity and the snap would collapse every parent frame onto the bone origin. Set the preview mesh first."));
+
+	const FReferenceSkeleton& RefSkel = PreviewMesh->GetRefSkeleton();
+
+	// Omit constraint_index AND bone_1/bone_2 to target every constraint — snap's natural
+	// form is bulk, which is why it is a separate action from set_physics_constraint_frames.
+	TArray<int32> Targets;
+	if (Params->HasField(TEXT("constraint_index")) || Params->HasField(TEXT("bone_1")) || Params->HasField(TEXT("bone_2")))
+	{
+		const int32 Idx = ResolveConstraintIndex(PhysAsset, Params);
+		if (Idx == INDEX_NONE || !PhysAsset->ConstraintSetup.IsValidIndex(Idx))
+			return FMonolithActionResult::Error(TEXT("Constraint not found. Provide constraint_index or bone_1+bone_2 pair, or omit all three to snap every constraint."));
+		Targets.Add(Idx);
+	}
+	else
+	{
+		for (int32 i = 0; i < PhysAsset->ConstraintSetup.Num(); ++i)
+		{
+			if (PhysAsset->ConstraintSetup[i]) Targets.Add(i);
+		}
+		if (Targets.Num() == 0) return FMonolithActionResult::Error(TEXT("Physics asset has no constraints"));
+	}
+
+	// PRECONDITION 2 — CalculateRelativeBoneTransform check()s BOTH bone indices, so a
+	// constraint naming a bone absent from the ref skeleton hard-asserts (editor crash)
+	// rather than failing gracefully. Validate every target BEFORE touching anything.
+	for (int32 Idx : Targets)
+	{
+		const UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[Idx];
+		if (!CT) return FMonolithActionResult::Error(FString::Printf(TEXT("Constraint template %d is null"), Idx));
+		const FConstraintInstance& CI = CT->DefaultInstance;
+		if (RefSkel.FindBoneIndex(CI.ConstraintBone1) == INDEX_NONE || RefSkel.FindBoneIndex(CI.ConstraintBone2) == INDEX_NONE)
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Constraint %d names bone(s) absent from the ref skeleton ('%s' child / '%s' parent). CalculateRelativeBoneTransform would assert and crash the editor — fix or remove that constraint first."),
+				Idx, *CI.ConstraintBone1.ToString(), *CI.ConstraintBone2.ToString()));
+		}
+	}
+
+	const bool bSnapChildPos = EnumHasAnyFlags(SnapFlags, EConstraintTransformComponentFlags::ChildPosition);
+	const bool bSnapChildRot = EnumHasAnyFlags(SnapFlags, EConstraintTransformComponentFlags::ChildRotation);
+	const bool bSnapParentPos = EnumHasAnyFlags(SnapFlags, EConstraintTransformComponentFlags::ParentPosition);
+	const bool bSnapParentRot = EnumHasAnyFlags(SnapFlags, EConstraintTransformComponentFlags::ParentRotation);
+
+	if (!bDryRun)
+	{
+		GEditor->BeginTransaction(FText::FromString(TEXT("Snap Constraint To Bone")));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ConstraintRows;
+	int32 ChangedCount = 0;
+
+	for (int32 Idx : Targets)
+	{
+		UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[Idx];
+		FConstraintInstance& CI = CT->DefaultInstance;
+
+		const FTransform ChildDefault  = CI.CalculateDefaultChildTransform();
+		const FTransform ParentDefault = CI.CalculateDefaultParentTransform(PhysAsset);
+		const FTransform Frame1 = CI.GetRefFrame(EConstraintFrame::Frame1);
+		const FTransform Frame2 = CI.GetRefFrame(EConstraintFrame::Frame2);
+
+		const double F1Pos = FVector::Dist(Frame1.GetTranslation(), ChildDefault.GetTranslation());
+		const double F1Rot = AngleBetweenDeg(Frame1.GetRotation(), ChildDefault.GetRotation());
+		const double F2Pos = FVector::Dist(Frame2.GetTranslation(), ParentDefault.GetTranslation());
+		const double F2Rot = AngleBetweenDeg(Frame2.GetRotation(), ParentDefault.GetRotation());
+
+		const bool bWouldChange =
+			(bSnapChildPos  && F1Pos > 1e-4) || (bSnapChildRot  && F1Rot > 1e-3) ||
+			(bSnapParentPos && F2Pos > 1e-4) || (bSnapParentRot && F2Rot > 1e-3);
+
+		if (!bDryRun && bWouldChange)
+		{
+			CT->Modify();
+			CI.SnapTransformsToDefault(SnapFlags, PhysAsset);
+		}
+		if (bWouldChange) ChangedCount++;
+
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetNumberField(TEXT("index"), Idx);
+		Row->SetStringField(TEXT("joint_name"), CI.JointName.ToString());
+		Row->SetStringField(TEXT("bone_1"), CI.ConstraintBone1.ToString());
+		Row->SetStringField(TEXT("bone_2"), CI.ConstraintBone2.ToString());
+		Row->SetNumberField(TEXT("frame1_pos_delta_cm"), F1Pos);
+		Row->SetNumberField(TEXT("frame1_rot_delta_deg"), F1Rot);
+		Row->SetNumberField(TEXT("frame2_pos_delta_cm"), F2Pos);
+		Row->SetNumberField(TEXT("frame2_rot_delta_deg"), F2Rot);
+		Row->SetBoolField(TEXT("changed"), bWouldChange && !bDryRun);
+		ConstraintRows.Add(MakeShared<FJsonValueObject>(Row));
+	}
+
+	if (!bDryRun)
+	{
+		GEditor->EndTransaction();
+		// NO UpdateProfileInstance() here: the frame vectors (Pos1/PriAxis1/... ) live on
+		// FConstraintInstance directly, OUTSIDE ProfileInstance, so they are not subject to
+		// the Serialize() DefaultProfile swap that eats un-mirrored profile edits.
+#if WITH_EDITOR
+		PhysAsset->RefreshPhysicsAssetChange();
+#endif
+		PhysAsset->MarkPackageDirty();
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetBoolField(TEXT("dry_run"), bDryRun);
+	Root->SetStringField(TEXT("components"), ComponentsStr);
+	Root->SetStringField(TEXT("preview_mesh"), PreviewMesh->GetPathName());
+	Root->SetArrayField(TEXT("constraints"), ConstraintRows);
+	Root->SetNumberField(TEXT("changed_count"), ChangedCount);
+	Root->SetNumberField(TEXT("total_count"), Targets.Num());
+	return FMonolithActionResult::Success(Root);
+#endif
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleSetPhysicsConstraintFrames(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	const int32 ConstraintIdx = ResolveConstraintIndex(PhysAsset, Params);
+	if (ConstraintIdx == INDEX_NONE || !PhysAsset->ConstraintSetup.IsValidIndex(ConstraintIdx))
+		return FMonolithActionResult::Error(TEXT("Constraint not found. Provide constraint_index or bone_1+bone_2 pair."));
+
+	UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[ConstraintIdx];
+	if (!CT) return FMonolithActionResult::Error(TEXT("Constraint template is null"));
+
+	FConstraintInstance& CI = CT->DefaultInstance;
+
+	// Resolve every requested value BEFORE the transaction so a degenerate axis pair can be
+	// rejected without leaving a half-written frame behind.
+	struct FFrameEdit
+	{
+		bool bTouched = false;
+		bool bPosTouched = false;
+		bool bAxesTouched = false;
+		FVector Pos = FVector::ZeroVector;
+		FVector Pri = FVector::ForwardVector;
+		FVector Sec = FVector::RightVector;
+	};
+
+	TArray<FString> ModifiedProps;
+	TArray<FString> Warnings;
+
+	FFrameEdit Edits[2];
+	static const TCHAR* FramePrefix[2] = { TEXT("frame1"), TEXT("frame2") };
+
+	for (int32 f = 0; f < 2; ++f)
+	{
+		FFrameEdit& E = Edits[f];
+
+		E.Pos = (f == 0) ? CI.Pos1 : CI.Pos2;
+		E.Pri = (f == 0) ? CI.PriAxis1 : CI.PriAxis2;
+		E.Sec = (f == 0) ? CI.SecAxis1 : CI.SecAxis2;
+
+		FVector Vec;
+		if (MonolithParamUtils::ParseVector(Params, FString::Printf(TEXT("%s_position"), FramePrefix[f]), Vec))
+		{
+			E.Pos = Vec;
+			E.bTouched = E.bPosTouched = true;
+			ModifiedProps.Add(FString::Printf(TEXT("%s_position"), FramePrefix[f]));
+		}
+
+		// The friendly form: a rotator whose X axis is PriAxis and Y axis is SecAxis.
+		FRotator Rot;
+		if (MonolithParamUtils::ParseRotator(Params, FString::Printf(TEXT("%s_rotation"), FramePrefix[f]), Rot))
+		{
+			const FQuat Q = Rot.Quaternion();
+			E.Pri = Q.GetAxisX();
+			E.Sec = Q.GetAxisY();
+			E.bTouched = E.bAxesTouched = true;
+			ModifiedProps.Add(FString::Printf(TEXT("%s_rotation"), FramePrefix[f]));
+		}
+		if (MonolithParamUtils::ParseVector(Params, FString::Printf(TEXT("%s_pri_axis"), FramePrefix[f]), Vec))
+		{
+			E.Pri = Vec;
+			E.bTouched = E.bAxesTouched = true;
+			ModifiedProps.Add(FString::Printf(TEXT("%s_pri_axis"), FramePrefix[f]));
+		}
+		if (MonolithParamUtils::ParseVector(Params, FString::Printf(TEXT("%s_sec_axis"), FramePrefix[f]), Vec))
+		{
+			E.Sec = Vec;
+			E.bTouched = E.bAxesTouched = true;
+			ModifiedProps.Add(FString::Printf(TEXT("%s_sec_axis"), FramePrefix[f]));
+		}
+
+		if (E.bAxesTouched)
+		{
+			bool bAdjusted = false;
+			if (!OrthonormalizeFrameAxes(E.Pri, E.Sec, bAdjusted))
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("%s axes are degenerate (zero-length or parallel): pri=(%.4f, %.4f, %.4f) sec=(%.4f, %.4f, %.4f). FConstraintInstance builds the basis as FTransform(pri, sec, pri ^ sec, pos), so the pair must be non-parallel."),
+					FramePrefix[f], E.Pri.X, E.Pri.Y, E.Pri.Z, E.Sec.X, E.Sec.Y, E.Sec.Z));
+			}
+			if (bAdjusted)
+			{
+				Warnings.Add(FString::Printf(TEXT("%s axes were not orthonormal; normalized pri_axis and Gram-Schmidt'd sec_axis against it (a non-orthonormal pair injects scale/shear straight into the Chaos joint and the engine only logs a warning)."), FramePrefix[f]));
+			}
+		}
+	}
+
+	FRotator AngularOffset = FRotator::ZeroRotator;
+	const bool bHasAngularOffset = MonolithParamUtils::ParseRotator(Params, TEXT("angular_rotation_offset"), AngularOffset);
+	if (bHasAngularOffset) ModifiedProps.Add(TEXT("angular_rotation_offset"));
+
+	if (!Edits[0].bTouched && !Edits[1].bTouched && !bHasAngularOffset)
+		return FMonolithActionResult::Error(TEXT("Nothing to write. Provide frame1_/frame2_ position, rotation, pri_axis or sec_axis, or angular_rotation_offset."));
+
+	// Ref-pose joint error before/after, so the caller sees whether the edit reduced the pre-load.
+	FRefPoseInfo Ref;
+	const bool bRefValid = BuildRefPose(PhysAsset, Ref);
+	if (!bRefValid)
+	{
+		Warnings.Add(TEXT("No preview mesh on the physics asset — ref_pose_*_before/after are omitted because every ref-pose figure would be meaningless."));
+	}
+	double LinBefore = 0.0, AngBefore = 0.0;
+	const bool bHaveBefore = bRefValid && MeasureConstraintRefPoseError(Ref, CI, LinBefore, AngBefore);
+
+	TSharedPtr<FJsonObject> Before = MakeShared<FJsonObject>();
+	{
+		TSharedPtr<FJsonObject> F1 = MakeShared<FJsonObject>();
+		F1->SetObjectField(TEXT("position"), WriteVec(CI.Pos1));
+		F1->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis1));
+		F1->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis1));
+		TSharedPtr<FJsonObject> F2 = MakeShared<FJsonObject>();
+		F2->SetObjectField(TEXT("position"), WriteVec(CI.Pos2));
+		F2->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis2));
+		F2->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis2));
+		Before->SetObjectField(TEXT("frame1"), F1);
+		Before->SetObjectField(TEXT("frame2"), F2);
+		Before->SetObjectField(TEXT("angular_rotation_offset"), WriteRot(CI.AngularRotationOffset));
+	}
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Set Physics Constraint Frames")));
+	CT->Modify();
+
+	for (int32 f = 0; f < 2; ++f)
+	{
+		const EConstraintFrame::Type Frame = (f == 0) ? EConstraintFrame::Frame1 : EConstraintFrame::Frame2;
+		const FFrameEdit& E = Edits[f];
+		if (E.bPosTouched)  CI.SetRefPosition(Frame, E.Pos);
+		if (E.bAxesTouched) CI.SetRefOrientation(Frame, E.Pri, E.Sec);
+	}
+	if (bHasAngularOffset) CI.AngularRotationOffset = AngularOffset;
+
+	GEditor->EndTransaction();
+	// Frames live on FConstraintInstance directly, outside ProfileInstance — no
+	// UpdateProfileInstance() needed (that is only for FConstraintProfileProperties edits).
+#if WITH_EDITOR
+	PhysAsset->RefreshPhysicsAssetChange();
+#endif
+	PhysAsset->MarkPackageDirty();
+
+	double LinAfter = 0.0, AngAfter = 0.0;
+	const bool bHaveAfter = bRefValid && MeasureConstraintRefPoseError(Ref, CI, LinAfter, AngAfter);
+
+	TSharedPtr<FJsonObject> After = MakeShared<FJsonObject>();
+	{
+		TSharedPtr<FJsonObject> F1 = MakeShared<FJsonObject>();
+		F1->SetObjectField(TEXT("position"), WriteVec(CI.Pos1));
+		F1->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis1));
+		F1->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis1));
+		TSharedPtr<FJsonObject> F2 = MakeShared<FJsonObject>();
+		F2->SetObjectField(TEXT("position"), WriteVec(CI.Pos2));
+		F2->SetObjectField(TEXT("pri_axis"), WriteVec(CI.PriAxis2));
+		F2->SetObjectField(TEXT("sec_axis"), WriteVec(CI.SecAxis2));
+		After->SetObjectField(TEXT("frame1"), F1);
+		After->SetObjectField(TEXT("frame2"), F2);
+		After->SetObjectField(TEXT("angular_rotation_offset"), WriteRot(CI.AngularRotationOffset));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetNumberField(TEXT("constraint_index"), ConstraintIdx);
+	Root->SetStringField(TEXT("joint_name"), CI.JointName.ToString());
+	Root->SetStringField(TEXT("bone_1"), CI.ConstraintBone1.ToString());
+	Root->SetStringField(TEXT("bone_2"), CI.ConstraintBone2.ToString());
+	Root->SetObjectField(TEXT("before"), Before);
+	Root->SetObjectField(TEXT("after"), After);
+	if (bHaveBefore)
+	{
+		Root->SetNumberField(TEXT("ref_pose_linear_error_cm_before"), LinBefore);
+		Root->SetNumberField(TEXT("ref_pose_angular_error_deg_before"), AngBefore);
+	}
+	if (bHaveAfter)
+	{
+		Root->SetNumberField(TEXT("ref_pose_linear_error_cm_after"), LinAfter);
+		Root->SetNumberField(TEXT("ref_pose_angular_error_deg_after"), AngAfter);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ModArr;
+	for (const FString& P : ModifiedProps)
+	{
+		ModArr.Add(MakeShared<FJsonValueString>(P));
+	}
+	Root->SetArrayField(TEXT("modified"), ModArr);
+	WriteStringArray(Root, TEXT("warnings"), Warnings);
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleSetPhysicsCollisionPairs(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	bool bDisableOverlapping = false;
+	Params->TryGetBoolField(TEXT("disable_overlapping"), bDisableOverlapping);
+
+	bool bIncludeAdjacent = true;
+	Params->TryGetBoolField(TEXT("include_adjacent"), bIncludeAdjacent);
+
+	bool bDryRun = false;
+	Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+
+	double OverlapTolerance = 0.01;
+	Params->TryGetNumberField(TEXT("overlap_tolerance"), OverlapTolerance);
+
+	// One planned change per pair: index pair + the state we want it to end in.
+	struct FPairChange
+	{
+		int32 I = INDEX_NONE;
+		int32 J = INDEX_NONE;
+		FString Bone1;
+		FString Bone2;
+		bool bEnabledBefore = false;
+		bool bEnabledAfter = false;
+		double Penetration = 0.0;
+	};
+	TArray<FPairChange> Planned;
+
+	// --- Explicit pairs ---
+	const TArray<TSharedPtr<FJsonValue>>* PairsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("pairs"), PairsArr) && PairsArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PairsArr)
+		{
+			const TSharedPtr<FJsonObject>* Obj = nullptr;
+			if (!V.IsValid() || !V->TryGetObject(Obj) || !Obj) continue;
+
+			FString Bone1, Bone2;
+			if (!(*Obj)->TryGetStringField(TEXT("bone_1"), Bone1) || !(*Obj)->TryGetStringField(TEXT("bone_2"), Bone2)
+				|| Bone1.IsEmpty() || Bone2.IsEmpty())
+			{
+				return FMonolithActionResult::Error(TEXT("Each entry of 'pairs' requires bone_1, bone_2 and enabled."));
+			}
+			bool bEnabled = false;
+			if (!(*Obj)->TryGetBoolField(TEXT("enabled"), bEnabled))
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Pair %s/%s is missing the boolean 'enabled' field."), *Bone1, *Bone2));
+			}
+
+			const int32 I = PhysAsset->FindBodyIndex(FName(*Bone1));
+			const int32 J = PhysAsset->FindBodyIndex(FName(*Bone2));
+			if (I == INDEX_NONE) return FMonolithActionResult::Error(FString::Printf(TEXT("Body not found for bone: %s"), *Bone1));
+			if (J == INDEX_NONE) return FMonolithActionResult::Error(FString::Printf(TEXT("Body not found for bone: %s"), *Bone2));
+			if (I == J) return FMonolithActionResult::Error(FString::Printf(TEXT("Pair %s/%s resolves to the same body index %d."), *Bone1, *Bone2, I));
+
+			FPairChange PC;
+			PC.I = I; PC.J = J;
+			PC.Bone1 = Bone1; PC.Bone2 = Bone2;
+			PC.bEnabledBefore = PhysAsset->IsCollisionEnabled(I, J);
+			PC.bEnabledAfter = bEnabled;
+			Planned.Add(PC);
+		}
+	}
+
+	// --- disable_overlapping: re-run the engine's generation-time overlap pass analytically. ---
+	// UE builds CollisionDisableTable ONCE, in a temp FPreviewScene, at auto-generation time.
+	// Capsules moved or resized afterwards create newly-overlapping pairs it never saw. We use
+	// the analytic segment/segment test rather than spawning a world inside an MCP action.
+	TArray<TSharedPtr<FJsonValue>> StillColliding;
+	FRefPoseInfo Ref;
+	const bool bRefValid = BuildRefPose(PhysAsset, Ref);
+
+	if (bDisableOverlapping)
+	{
+		if (!bRefValid)
+			return FMonolithActionResult::Error(TEXT("disable_overlapping needs the reference pose, but the physics asset has no preview mesh. Set the preview mesh, or pass explicit 'pairs' instead."));
+
+		TMap<FString, int32> ConstraintByPair;
+		BuildConstraintPairMap(PhysAsset, ConstraintByPair);
+
+		TArray<TArray<FPrimCollider>> BodyColliders;
+		BuildBodyColliders(Ref, BodyColliders);
+
+		const int32 NumBodies = PhysAsset->SkeletalBodySetups.Num();
+		for (int32 i = 0; i < NumBodies; ++i)
+		{
+			if (!PhysAsset->SkeletalBodySetups[i]) continue;
+			for (int32 j = i + 1; j < NumBodies; ++j)
+			{
+				if (!PhysAsset->SkeletalBodySetups[j]) continue;
+
+				const bool bAdjacent =
+					ConstraintByPair.Contains(FString::Printf(TEXT("%d|%d"), i, j))
+					|| (Ref.NearestBodyAncestor.IsValidIndex(i) && Ref.NearestBodyAncestor[i] == j)
+					|| (Ref.NearestBodyAncestor.IsValidIndex(j) && Ref.NearestBodyAncestor[j] == i);
+				if (bAdjacent && !bIncludeAdjacent) continue;
+
+				double SurfaceDist = 0.0;
+				bool bApprox = false;
+				if (!BodyPairSurfaceDistance(BodyColliders[i], BodyColliders[j], SurfaceDist, bApprox)) continue;
+
+				const double Penetration = (SurfaceDist < 0.0) ? -SurfaceDist : 0.0;
+				if (Penetration <= OverlapTolerance) continue;
+
+				const FString Bone1 = PhysAsset->SkeletalBodySetups[i]->BoneName.ToString();
+				const FString Bone2 = PhysAsset->SkeletalBodySetups[j]->BoneName.ToString();
+
+				// An explicit `pairs` entry always wins over the automatic pass.
+				const bool bAlreadyPlanned = Planned.ContainsByPredicate([i, j](const FPairChange& P)
+				{
+					return (P.I == i && P.J == j) || (P.I == j && P.J == i);
+				});
+				if (bAlreadyPlanned) continue;
+
+				FPairChange PC;
+				PC.I = i; PC.J = j;
+				PC.Bone1 = Bone1; PC.Bone2 = Bone2;
+				PC.bEnabledBefore = PhysAsset->IsCollisionEnabled(i, j);
+				PC.bEnabledAfter = false;
+				PC.Penetration = Penetration;
+				Planned.Add(PC);
+			}
+		}
+	}
+
+	if (Planned.Num() == 0 && !bDisableOverlapping)
+		return FMonolithActionResult::Error(TEXT("Nothing to do. Provide 'pairs' or set disable_overlapping:true."));
+
+	const int32 TableSizeBefore = PhysAsset->CollisionDisableTable.Num();
+
+	if (!bDryRun)
+	{
+		GEditor->BeginTransaction(FText::FromString(TEXT("Set Physics Collision Pairs")));
+		// NOTE: CollisionDisableTable is a plain TMap, NOT a UPROPERTY, so the transaction
+		// cannot roll it back — Ctrl+Z will not restore it. Same limitation as PhAT's own
+		// Collision On/Off commands, which use exactly this pattern.
+		PhysAsset->Modify();
+
+		for (const FPairChange& PC : Planned)
+		{
+			if (PC.bEnabledBefore == PC.bEnabledAfter) continue;
+			if (PC.bEnabledAfter) PhysAsset->EnableCollision(PC.I, PC.J);
+			else                  PhysAsset->DisableCollision(PC.I, PC.J);
+		}
+
+		GEditor->EndTransaction();
+#if WITH_EDITOR
+		PhysAsset->RefreshPhysicsAssetChange();
+#endif
+		PhysAsset->MarkPackageDirty();
+	}
+
+	// still_colliding — pairs left ENABLED that still interpenetrate. Empty is the success condition.
+	if (bRefValid)
+	{
+		TMap<FString, int32> ConstraintByPair;
+		BuildConstraintPairMap(PhysAsset, ConstraintByPair);
+
+		TArray<TArray<FPrimCollider>> BodyColliders;
+		BuildBodyColliders(Ref, BodyColliders);
+
+		const int32 NumBodies = PhysAsset->SkeletalBodySetups.Num();
+		for (int32 i = 0; i < NumBodies; ++i)
+		{
+			if (!PhysAsset->SkeletalBodySetups[i]) continue;
+			for (int32 j = i + 1; j < NumBodies; ++j)
+			{
+				if (!PhysAsset->SkeletalBodySetups[j]) continue;
+
+				// In dry_run the table is untouched, so simulate the planned end state.
+				bool bEnabled = PhysAsset->IsCollisionEnabled(i, j);
+				if (bDryRun)
+				{
+					for (const FPairChange& PC : Planned)
+					{
+						if ((PC.I == i && PC.J == j) || (PC.I == j && PC.J == i)) { bEnabled = PC.bEnabledAfter; break; }
+					}
+				}
+				if (!bEnabled) continue;
+
+				// A joint that disables collision already resolves the pair.
+				if (const int32* C = ConstraintByPair.Find(FString::Printf(TEXT("%d|%d"), i, j)))
+				{
+					if (PhysAsset->ConstraintSetup[*C]->DefaultInstance.ProfileInstance.bDisableCollision) continue;
+				}
+
+				double SurfaceDist = 0.0;
+				bool bApprox = false;
+				if (!BodyPairSurfaceDistance(BodyColliders[i], BodyColliders[j], SurfaceDist, bApprox)) continue;
+				if (SurfaceDist >= -OverlapTolerance) continue;
+
+				TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+				Row->SetStringField(TEXT("bone_1"), PhysAsset->SkeletalBodySetups[i]->BoneName.ToString());
+				Row->SetStringField(TEXT("bone_2"), PhysAsset->SkeletalBodySetups[j]->BoneName.ToString());
+				Row->SetNumberField(TEXT("penetration_cm"), -SurfaceDist);
+				Row->SetBoolField(TEXT("approximate"), bApprox);
+				StillColliding.Add(MakeShared<FJsonValueObject>(Row));
+			}
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ChangedArr;
+	int32 ChangedCount = 0;
+	for (const FPairChange& PC : Planned)
+	{
+		if (PC.bEnabledBefore == PC.bEnabledAfter) continue;
+		ChangedCount++;
+
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetNumberField(TEXT("body_i"), PC.I);
+		Row->SetNumberField(TEXT("body_j"), PC.J);
+		Row->SetStringField(TEXT("bone_1"), PC.Bone1);
+		Row->SetStringField(TEXT("bone_2"), PC.Bone2);
+		Row->SetBoolField(TEXT("enabled_before"), PC.bEnabledBefore);
+		Row->SetBoolField(TEXT("enabled_after"), PC.bEnabledAfter);
+		Row->SetNumberField(TEXT("penetration_cm"), PC.Penetration);
+		ChangedArr.Add(MakeShared<FJsonValueObject>(Row));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetBoolField(TEXT("dry_run"), bDryRun);
+	Root->SetArrayField(TEXT("changed"), ChangedArr);
+	Root->SetNumberField(TEXT("changed_count"), ChangedCount);
+	Root->SetNumberField(TEXT("table_size_before"), TableSizeBefore);
+	Root->SetNumberField(TEXT("table_size_after"), PhysAsset->CollisionDisableTable.Num());
+	Root->SetArrayField(TEXT("still_colliding"), StillColliding);
+	Root->SetNumberField(TEXT("pairs_evaluated"), Planned.Num());
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleAddPhysicsBody(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	FString BoneName = Params->GetStringField(TEXT("bone_name"));
+	if (BoneName.IsEmpty()) return FMonolithActionResult::Error(TEXT("bone_name is required"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	USkeletalMesh* PreviewMesh = PhysAsset->GetPreviewMesh();
+	if (!PreviewMesh)
+		return FMonolithActionResult::Error(TEXT("Physics asset has no preview mesh; the bone cannot be validated, auto_size cannot measure the bone, and the new constraint could not be snapped. Set the preview mesh first."));
+
+	const FReferenceSkeleton& RefSkel = PreviewMesh->GetRefSkeleton();
+	const int32 BoneIdx = RefSkel.FindBoneIndex(FName(*BoneName));
+	if (BoneIdx == INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Bone '%s' does not exist in the preview mesh's ref skeleton (%s)"), *BoneName, *PreviewMesh->GetPathName()));
+
+	const int32 Existing = PhysAsset->FindBodyIndex(FName(*BoneName));
+	if (Existing != INDEX_NONE)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Bone '%s' already has a body (index %d). Use set_physics_body_geometry to edit it, or remove_physics_body first."), *BoneName, Existing));
+
+	FString ShapeStr = TEXT("Capsule");
+	Params->TryGetStringField(TEXT("shape_type"), ShapeStr);
+	EAggCollisionShape::Type ShapeType = EAggCollisionShape::Sphyl;
+	if (!StringToWritableShapeType(ShapeStr, ShapeType))
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Unsupported shape_type '%s'. Writable types: Capsule, Sphere, Box, TaperedCapsule (Convex/LevelSet are read-only)."), *ShapeStr));
+
+	bool bAutoSize = true;
+	Params->TryGetBoolField(TEXT("auto_size"), bAutoSize);
+	bool bCreateConstraint = true;
+	Params->TryGetBoolField(TEXT("create_constraint"), bCreateConstraint);
+	bool bDisableWithParent = true;
+	Params->TryGetBoolField(TEXT("disable_collision_with_parent"), bDisableWithParent);
+	bool bDisableWithAll = false;
+	Params->TryGetBoolField(TEXT("disable_collision_with_all"), bDisableWithAll);
+
+	FString PhysTypeStr;
+	const bool bHasPhysType = Params->TryGetStringField(TEXT("physics_type"), PhysTypeStr) && !PhysTypeStr.IsEmpty();
+
+	TArray<FString> Warnings;
+
+	// --- auto_size: one capsule along the bone -> nearest-child axis, measured in the ref pose. ---
+	// Component-space ref pose, same construction the analyzer uses.
+	const FTransform BoneCS = FAnimationRuntime::GetComponentSpaceTransformRefPose(RefSkel, BoneIdx);
+	FVector DirBoneSpace = FVector::ZAxisVector;
+	double SpanCm = DefaultPrimSize;
+	if (bAutoSize)
+	{
+		int32 BestChild = INDEX_NONE;
+		int32 AnyChild = INDEX_NONE;
+		for (int32 b = 0; b < RefSkel.GetNum(); ++b)
+		{
+			if (RefSkel.GetParentIndex(b) != BoneIdx) continue;
+			if (AnyChild == INDEX_NONE) AnyChild = b;
+			if (PhysAsset->FindBodyIndex(RefSkel.GetBoneName(b)) != INDEX_NONE) { BestChild = b; break; }
+		}
+		const int32 UseChild = (BestChild != INDEX_NONE) ? BestChild : AnyChild;
+
+		FVector TargetCS = FVector::ZeroVector;
+		bool bHaveTarget = false;
+		if (UseChild != INDEX_NONE)
+		{
+			TargetCS = FAnimationRuntime::GetComponentSpaceTransformRefPose(RefSkel, UseChild).GetTranslation();
+			bHaveTarget = true;
+		}
+		else
+		{
+			// Leaf bone — fall back to half the distance back to the parent.
+			const int32 ParentIdx = RefSkel.GetParentIndex(BoneIdx);
+			if (ParentIdx != INDEX_NONE)
+			{
+				const FVector ParentCS = FAnimationRuntime::GetComponentSpaceTransformRefPose(RefSkel, ParentIdx).GetTranslation();
+				TargetCS = BoneCS.GetTranslation() + (BoneCS.GetTranslation() - ParentCS) * 0.5;
+				bHaveTarget = true;
+				Warnings.Add(TEXT("Leaf bone: auto_size used half the distance back to the parent bone, since there is no child bone to measure against."));
+			}
+		}
+
+		if (bHaveTarget)
+		{
+			const FVector DeltaCS = TargetCS - BoneCS.GetTranslation();
+			SpanCm = DeltaCS.Size();
+			if (SpanCm > UE_KINDA_SMALL_NUMBER)
+			{
+				DirBoneSpace = BoneCS.InverseTransformVector(DeltaCS).GetSafeNormal();
+				if (DirBoneSpace.IsNearlyZero()) DirBoneSpace = FVector::ZAxisVector;
+			}
+			else
+			{
+				SpanCm = DefaultPrimSize;
+				Warnings.Add(TEXT("Bone and its measurement target are coincident; auto_size fell back to the engine DefaultPrimSize 15."));
+			}
+		}
+		else
+		{
+			Warnings.Add(TEXT("Bone has neither a child nor a parent in the ref skeleton; auto_size fell back to the engine DefaultPrimSize 15."));
+		}
+	}
+
+	// FPhysicsAssetUtils keeps BodySetupIndexMap, BoundsBodies and CollisionDisableTable
+	// consistent — a bare SkeletalBodySetups.Add would silently corrupt all three.
+	FPhysAssetCreateParams CreateParams;
+	CreateParams.bDisableCollisionsByDefault = bDisableWithAll;
+	CreateParams.bCreateConstraints = false;   // we create + snap the constraint ourselves below
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Add Physics Body")));
+	PhysAsset->Modify();
+
+	const int32 NewBodyIdx = FPhysicsAssetUtils::CreateNewBody(PhysAsset, FName(*BoneName), CreateParams);
+	if (NewBodyIdx == INDEX_NONE || !PhysAsset->SkeletalBodySetups.IsValidIndex(NewBodyIdx))
+	{
+		GEditor->EndTransaction();
+		return FMonolithActionResult::Error(FString::Printf(TEXT("FPhysicsAssetUtils::CreateNewBody failed for bone '%s'"), *BoneName));
+	}
+
+	USkeletalBodySetup* NewBody = PhysAsset->SkeletalBodySetups[NewBodyIdx];
+	if (!NewBody)
+	{
+		GEditor->EndTransaction();
+		return FMonolithActionResult::Error(TEXT("CreateNewBody returned an index whose BodySetup is null"));
+	}
+	NewBody->Modify();
+
+	if (bHasPhysType) NewBody->PhysicsType = StringToPhysicsType(PhysTypeStr);
+
+	// --- Seed geometry. Explicit dimensions always override auto_size. ---
+	const double AutoLength = FMath::Max((double)MinPrimSize, SpanCm);
+	const double AutoRadius = FMath::Max((double)MinPrimSize, 0.25 * AutoLength);
+
+	double Radius = AutoRadius;
+	double Length = AutoLength;
+	double ExtX = AutoRadius * 2.0, ExtY = AutoRadius * 2.0, ExtZ = AutoLength;
+	double V;
+	if (Params->TryGetNumberField(TEXT("radius"), V))   Radius = V;
+	if (Params->TryGetNumberField(TEXT("length"), V))   Length = V;
+	if (Params->TryGetNumberField(TEXT("extent_x"), V)) ExtX = V;
+	if (Params->TryGetNumberField(TEXT("extent_y"), V)) ExtY = V;
+	if (Params->TryGetNumberField(TEXT("extent_z"), V)) ExtZ = V;
+
+	// Capsule axis is LOCAL Z, so rotate Z onto the bone->child direction and sit the
+	// capsule's midpoint halfway along the span.
+	const FQuat AlignQ = FQuat::FindBetweenNormals(FVector::ZAxisVector, DirBoneSpace);
+	const FVector SeedCenter = bAutoSize ? (DirBoneSpace * (SpanCm * 0.5)) : FVector::ZeroVector;
+
+	switch (ShapeType)
+	{
+		case EAggCollisionShape::Sphere:
+		{
+			FKSphereElem E;
+			E.Center = SeedCenter;
+			E.Radius = static_cast<float>(Radius);
+			NewBody->AggGeom.SphereElems.Add(E);
+			break;
+		}
+		case EAggCollisionShape::Box:
+		{
+			FKBoxElem E;
+			E.Center = SeedCenter;
+			E.Rotation = AlignQ.Rotator();
+			E.X = static_cast<float>(ExtX);   // FULL extents
+			E.Y = static_cast<float>(ExtY);
+			E.Z = static_cast<float>(ExtZ);
+			NewBody->AggGeom.BoxElems.Add(E);
+			break;
+		}
+		case EAggCollisionShape::TaperedCapsule:
+		{
+			FKTaperedCapsuleElem E;
+			E.Center = SeedCenter;
+			E.Rotation = AlignQ.Rotator();
+			E.Radius0 = E.Radius1 = static_cast<float>(Radius);
+			E.Length = static_cast<float>(Length);
+			NewBody->AggGeom.TaperedCapsuleElems.Add(E);
+			break;
+		}
+		case EAggCollisionShape::Sphyl:
+		default:
+		{
+			FKSphylElem E;
+			E.Center = SeedCenter;
+			E.Rotation = AlignQ.Rotator();
+			E.Radius = static_cast<float>(Radius);
+			E.Length = static_cast<float>(Length);   // SEGMENT length; total = Length + 2*Radius
+			NewBody->AggGeom.SphylElems.Add(E);
+			break;
+		}
+	}
+
+	// --- Constraint to the nearest body-bearing ancestor (PhAT's InitConstraintSetup). ---
+	int32 NewConstraintIdx = INDEX_NONE;
+	FName ParentBoneName = NAME_None;
+	int32 ParentBodyIdx = INDEX_NONE;
+	{
+		int32 Walk = RefSkel.GetParentIndex(BoneIdx);
+		while (Walk != INDEX_NONE)
+		{
+			const int32 Candidate = PhysAsset->FindBodyIndex(RefSkel.GetBoneName(Walk));
+			if (Candidate != INDEX_NONE && Candidate != NewBodyIdx)
+			{
+				ParentBodyIdx = Candidate;
+				ParentBoneName = RefSkel.GetBoneName(Walk);
+				break;
+			}
+			Walk = RefSkel.GetParentIndex(Walk);
+		}
+	}
+
+	if (bCreateConstraint)
+	{
+		if (ParentBodyIdx == INDEX_NONE)
+		{
+			Warnings.Add(TEXT("No body-bearing ancestor found, so no constraint was created — this body is a root/island. Bodies with no path to the root through the constraint graph do not hang off the ragdoll."));
+		}
+		else if (!FPhysicsAssetUtils::CanCreateConstraints())
+		{
+			Warnings.Add(TEXT("FPhysicsAssetUtils::CanCreateConstraints() returned false (asset-tools permission list); the body was created but the constraint was not."));
+		}
+		else
+		{
+			NewConstraintIdx = FPhysicsAssetUtils::CreateNewConstraint(PhysAsset, FName(*BoneName));
+			if (PhysAsset->ConstraintSetup.IsValidIndex(NewConstraintIdx))
+			{
+				UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[NewConstraintIdx];
+				CT->Modify();
+				// Frame1/ConstraintBone1 == CHILD, Frame2/ConstraintBone2 == PARENT.
+				CT->DefaultInstance.ConstraintBone1 = NewBody->BoneName;
+				CT->DefaultInstance.ConstraintBone2 = ParentBoneName;
+#if WITH_EDITORONLY_DATA
+				CT->DefaultInstance.SnapTransformsToDefault(EConstraintTransformComponentFlags::All, PhysAsset);
+#endif
+#if WITH_EDITOR
+				CT->SetDefaultProfile(CT->DefaultInstance);
+#endif
+			}
+			else
+			{
+				NewConstraintIdx = INDEX_NONE;
+				Warnings.Add(TEXT("FPhysicsAssetUtils::CreateNewConstraint did not return a valid index; no constraint was created."));
+			}
+		}
+	}
+
+	int32 DisabledPairs = 0;
+	if (bDisableWithAll)
+	{
+		// CreateNewBody already ran this pass via bDisableCollisionsByDefault; count it for the report.
+		for (int32 b = 0; b < PhysAsset->SkeletalBodySetups.Num(); ++b)
+		{
+			if (b != NewBodyIdx && !PhysAsset->IsCollisionEnabled(NewBodyIdx, b)) DisabledPairs++;
+		}
+	}
+	else if (bDisableWithParent && ParentBodyIdx != INDEX_NONE)
+	{
+		PhysAsset->DisableCollision(NewBodyIdx, ParentBodyIdx);
+		DisabledPairs = 1;
+	}
+
+	// Structural change: keep the BoneName->index map and the bounds body list in step.
+	PhysAsset->UpdateBodySetupIndexMap();
+	PhysAsset->UpdateBoundsBodiesArray();
+
+	GEditor->EndTransaction();
+#if WITH_EDITOR
+	PhysAsset->RefreshPhysicsAssetChange();
+#endif
+	PhysAsset->MarkPackageDirty();
+
+	FPrimView SeedView;
+	const bool bHaveSeed = ViewSingle(NewBody->AggGeom, ShapeType, 0, SeedView);
+	if (bHaveSeed) CollectGeometryWarnings(SeedView, Warnings);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("bone_name"), BoneName);
+	Root->SetNumberField(TEXT("body_index"), NewBodyIdx);
+	if (bHaveSeed) Root->SetObjectField(TEXT("created_geometry"), WritePrimitive(SeedView));
+	Root->SetNumberField(TEXT("computed_mass_kg"), NewBody->CalculateMass(nullptr));
+	if (NewConstraintIdx != INDEX_NONE)
+	{
+		TSharedPtr<FJsonObject> CObj = MakeShared<FJsonObject>();
+		CObj->SetNumberField(TEXT("index"), NewConstraintIdx);
+		CObj->SetStringField(TEXT("bone_1"), BoneName);
+		CObj->SetStringField(TEXT("bone_2"), ParentBoneName.ToString());
+		Root->SetObjectField(TEXT("constraint_created"), CObj);
+	}
+	else
+	{
+		Root->SetField(TEXT("constraint_created"), MakeShared<FJsonValueNull>());
+	}
+	Root->SetNumberField(TEXT("collision_disabled_pairs"), DisabledPairs);
+	Root->SetNumberField(TEXT("body_count"), PhysAsset->SkeletalBodySetups.Num());
+	Root->SetNumberField(TEXT("constraint_count"), PhysAsset->ConstraintSetup.Num());
+	WriteStringArray(Root, TEXT("warnings"), Warnings);
+	return FMonolithActionResult::Success(Root);
+}
+
+FMonolithActionResult FMonolithAnimationActions::HandleRemovePhysicsBody(const TSharedPtr<FJsonObject>& Params)
+{
+	using namespace MonolithPhysics;
+
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+
+	UPhysicsAsset* PhysAsset = FMonolithAssetUtils::LoadAssetByPath<UPhysicsAsset>(AssetPath);
+	if (!PhysAsset) return FMonolithActionResult::Error(FString::Printf(TEXT("Physics asset not found: %s"), *AssetPath));
+
+	int32 BodyIdx = INDEX_NONE;
+	FString BoneName;
+	if (Params->TryGetStringField(TEXT("bone_name"), BoneName) && !BoneName.IsEmpty())
+	{
+		BodyIdx = PhysAsset->FindBodyIndex(FName(*BoneName));
+		if (BodyIdx == INDEX_NONE)
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Body not found for bone: %s"), *BoneName));
+	}
+	else
+	{
+		double IdxVal;
+		if (!Params->TryGetNumberField(TEXT("body_index"), IdxVal))
+			return FMonolithActionResult::Error(TEXT("Provide bone_name or body_index."));
+		BodyIdx = static_cast<int32>(IdxVal);
+		if (!PhysAsset->SkeletalBodySetups.IsValidIndex(BodyIdx))
+			return FMonolithActionResult::Error(FString::Printf(TEXT("Invalid body_index %d (asset has %d bodies)"), BodyIdx, PhysAsset->SkeletalBodySetups.Num()));
+		const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[BodyIdx];
+		BoneName = BS ? BS->BoneName.ToString() : FString();
+	}
+
+	// Capture the attached constraints BEFORE DestroyBody, which silently destroys them.
+	TArray<int32> AttachedConstraints;
+	PhysAsset->BodyFindConstraints(BodyIdx, AttachedConstraints);
+
+	TArray<TSharedPtr<FJsonValue>> RemovedConstraints;
+	for (int32 c : AttachedConstraints)
+	{
+		if (!PhysAsset->ConstraintSetup.IsValidIndex(c) || !PhysAsset->ConstraintSetup[c]) continue;
+		const FConstraintInstance& CI = PhysAsset->ConstraintSetup[c]->DefaultInstance;
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetNumberField(TEXT("index"), c);
+		Row->SetStringField(TEXT("bone_1"), CI.ConstraintBone1.ToString());
+		Row->SetStringField(TEXT("bone_2"), CI.ConstraintBone2.ToString());
+		RemovedConstraints.Add(MakeShared<FJsonValueObject>(Row));
+	}
+
+	GEditor->BeginTransaction(FText::FromString(TEXT("Remove Physics Body")));
+	PhysAsset->Modify();
+
+	// MUST route through FPhysicsAssetUtils: DestroyBody re-indexes the index-keyed
+	// CollisionDisableTable, destroys the attached constraints, and calls
+	// UpdateBodySetupIndexMap + UpdateBoundsBodiesArray. A bare RemoveAt corrupts all three.
+	FPhysicsAssetUtils::DestroyBody(PhysAsset, BodyIdx);
+
+	GEditor->EndTransaction();
+#if WITH_EDITOR
+	PhysAsset->RefreshPhysicsAssetChange();
+#endif
+	PhysAsset->MarkPackageDirty();
+
+	// --- Orphan detection: deleting mid-chain silently disconnects everything below it. ---
+	TArray<FString> Orphaned;
+	TArray<FString> Warnings;
+	FRefPoseInfo Ref;
+	if (BuildRefPose(PhysAsset, Ref))
+	{
+		const int32 NumBodies = PhysAsset->SkeletalBodySetups.Num();
+
+		// Root = the body whose bone sits highest in the ref skeleton.
+		int32 RootBody = INDEX_NONE;
+		int32 BestBoneIdx = MAX_int32;
+		for (int32 b = 0; b < NumBodies; ++b)
+		{
+			const int32 BIdx = Ref.BodyBoneIndex.IsValidIndex(b) ? Ref.BodyBoneIndex[b] : INDEX_NONE;
+			if (BIdx == INDEX_NONE) continue;
+			if (BIdx < BestBoneIdx) { BestBoneIdx = BIdx; RootBody = b; }
+		}
+
+		if (RootBody != INDEX_NONE)
+		{
+			TArray<TArray<int32>> Adjacency;
+			Adjacency.SetNum(NumBodies);
+			for (int32 c = 0; c < PhysAsset->ConstraintSetup.Num(); ++c)
+			{
+				const UPhysicsConstraintTemplate* CT = PhysAsset->ConstraintSetup[c];
+				if (!CT) continue;
+				const int32 B1 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone1);
+				const int32 B2 = PhysAsset->FindBodyIndex(CT->DefaultInstance.ConstraintBone2);
+				if (B1 == INDEX_NONE || B2 == INDEX_NONE || B1 == B2) continue;
+				Adjacency[B1].AddUnique(B2);
+				Adjacency[B2].AddUnique(B1);
+			}
+
+			TArray<bool> Visited;
+			Visited.Init(false, NumBodies);
+			TArray<int32> Stack;
+			Stack.Add(RootBody);
+			Visited[RootBody] = true;
+			while (Stack.Num() > 0)
+			{
+				const int32 Cur = Stack.Pop();
+				for (int32 Next : Adjacency[Cur])
+				{
+					if (Visited[Next]) continue;
+					Visited[Next] = true;
+					Stack.Add(Next);
+				}
+			}
+
+			for (int32 b = 0; b < NumBodies; ++b)
+			{
+				if (Visited[b]) continue;
+				const USkeletalBodySetup* BS = PhysAsset->SkeletalBodySetups[b];
+				Orphaned.Add(BS ? BS->BoneName.ToString() : FString::Printf(TEXT("<null body %d>"), b));
+			}
+		}
+	}
+	else
+	{
+		Warnings.Add(TEXT("No preview mesh on the physics asset — orphaned-body detection was skipped."));
+	}
+	if (Orphaned.Num() > 0)
+	{
+		Warnings.Add(FString::Printf(TEXT("%d body/bodies now have NO path to the root body through the constraint graph — deleting mid-chain disconnects everything below it."), Orphaned.Num()));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("bone_name"), BoneName);
+	Root->SetNumberField(TEXT("body_index"), BodyIdx);
+	Root->SetArrayField(TEXT("removed_constraints"), RemovedConstraints);
+	Root->SetNumberField(TEXT("removed_constraint_count"), RemovedConstraints.Num());
+	Root->SetNumberField(TEXT("remaining_body_count"), PhysAsset->SkeletalBodySetups.Num());
+	Root->SetNumberField(TEXT("remaining_constraint_count"), PhysAsset->ConstraintSetup.Num());
+	WriteStringArray(Root, TEXT("orphaned_bodies"), Orphaned);
+	WriteStringArray(Root, TEXT("warnings"), Warnings);
 	return FMonolithActionResult::Success(Root);
 }
 
