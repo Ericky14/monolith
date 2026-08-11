@@ -1,6 +1,7 @@
 #include "MonolithNiagaraModule.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithNiagaraActions.h"
+#include "MonolithNiagaraDebugActions.h"
 #include "MonolithNiagaraLayoutActions.h"
 #include "MonolithNiagaraTimingActions.h"
 #include "MonolithNiagaraBulkFillAdapter.h"
@@ -12,6 +13,7 @@ void FMonolithNiagaraModule::StartupModule()
 {
 	FMonolithToolRegistry& Registry = FMonolithToolRegistry::Get();
 	FMonolithNiagaraActions::RegisterActions(Registry);
+	FMonolithNiagaraDebugActions::RegisterActions(Registry);
 	FMonolithNiagaraLayoutActions::RegisterActions(Registry);
 	FMonolithNiagaraTimingActions::RegisterActions(Registry);
 
