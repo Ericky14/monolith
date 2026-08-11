@@ -67,6 +67,7 @@
 #include "Editor.h"
 #include "Misc/PackageName.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UObjectIterator.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -4361,6 +4362,141 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetCustomHLSLText(const TSh
 	return NA_SuccessObj(R);
 }
 
+namespace MonolithNiagaraHelpers
+{
+	// Transitive reachability: does Graph (through nested function/dynamic-input calls) reach
+	// TargetGraph? Mirrors UNiagaraGraph::GetAllReferencedGraphs, which lacks NIAGARAEDITOR_API,
+	// via the exported UNiagaraNodeFunctionCall::GetCalledGraph().
+	bool GraphTransitivelyCalls(const UNiagaraGraph* Graph, const UNiagaraGraph* TargetGraph, TSet<const UNiagaraGraph*>& Visited)
+	{
+		if (!Graph || Visited.Contains(Graph)) return false;
+		Visited.Add(Graph);
+		for (const UEdGraphNode* Node : Graph->Nodes)
+		{
+			const UNiagaraNodeFunctionCall* Call = Cast<const UNiagaraNodeFunctionCall>(Node);
+			if (!Call) continue;
+			const UNiagaraGraph* CalledGraph = Call->GetCalledGraph();
+			if (CalledGraph == TargetGraph || GraphTransitivelyCalls(CalledGraph, TargetGraph, Visited))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Dependency propagation after a standalone module/function/dynamic-input script's graph
+	// was mutated (set_custom_hlsl_text, create_module_from_hlsl over an existing asset).
+	//
+	// THE BUG THIS PREVENTS (reproduced 3x, 2026-08): mutating a module script's graph bumps
+	// that graph's ChangeId, but every UNiagaraNodeFunctionCall referencing the script in
+	// loaded emitter/system graphs still carries the OLD CachedChangeId and the pin/override
+	// layout built against the old graph. The in-session compile still passes (it translates
+	// the same live objects), but the SAVE persists that stale caller state; on the next
+	// editor boot the load-time recompile fails per-emitter with
+	// "Error compiling Pin - Node: Output Particle Update Pin: Out - " (empty message,
+	// op_count 0 — FNiagaraCompilationNode::CompileInputPins, NiagaraGraphDigest.cpp).
+	// Removing + re-adding the module "fixed" it because that rebuilt the caller node —
+	// which is exactly what RefreshFromExternalChanges does in place.
+	//
+	// The engine performs this propagation on module-script Apply:
+	// FNiagaraScriptToolkit::UpdateOriginalNiagaraScript → FNiagaraEditorUtilities::
+	// RefreshAllScriptsFromExternalChanges ("Now there might be other Scripts with functions
+	// that referenced this script. So let's update them. They'll need a recompile.") →
+	// CompileExistingEmitters. That utility lacks NIAGARAEDITOR_API, so it is mirrored here
+	// using only exported/virtual surface: UNiagaraNode::GetReferencedAsset /
+	// RefreshFromExternalChanges (virtual), UNiagaraNode::MarkNodeRequiresSynchronization +
+	// UNiagaraNodeFunctionCall::GetCalledGraph (NIAGARAEDITOR_API), and
+	// UNiagaraSystem::RequestCompile (NIAGARA_API). RequestCompile(false) is async by design:
+	// UNiagaraSystem::PreSave → WaitForCompilationComplete() blocks any save until it lands,
+	// and get_system_diagnostics{compile_first} remains the blocking verify.
+	//
+	// Returns the number of caller nodes refreshed; OutSystemsRecompiled counts the systems
+	// queued for recompile.
+	int32 RefreshDependentsOfNiagaraScript(UNiagaraScript* ChangedScript, const TCHAR* Reason, int32* OutSystemsRecompiled = nullptr)
+	{
+		if (OutSystemsRecompiled) *OutSystemsRecompiled = 0;
+		if (!ChangedScript) return 0;
+
+		UNiagaraScriptSource* ChangedSource = Cast<UNiagaraScriptSource>(ChangedScript->GetLatestSource());
+		UNiagaraGraph* ChangedGraph = ChangedSource ? ChangedSource->NodeGraph.Get() : nullptr;
+
+		// Emitter/system scripts share one UNiagaraScriptSource per emitter (particle spawn +
+		// update, etc.) — cache per graph so shared graphs are refreshed exactly once.
+		TMap<const UNiagaraGraph*, bool> GraphAffectedCache;
+		TSet<UNiagaraSystem*> SystemsToRecompile;
+		int32 RefreshedNodeCount = 0;
+
+		for (TObjectIterator<UNiagaraScript> It; It; ++It)
+		{
+			UNiagaraScript* Candidate = *It;
+			if (Candidate == ChangedScript || !IsValidChecked(Candidate)) continue;
+
+			UNiagaraScriptSource* CandidateSource = Cast<UNiagaraScriptSource>(Candidate->GetLatestSource());
+			UNiagaraGraph* CandidateGraph = CandidateSource ? CandidateSource->NodeGraph.Get() : nullptr;
+			if (!CandidateGraph) continue;
+
+			bool bAffected = false;
+			if (const bool* Cached = GraphAffectedCache.Find(CandidateGraph))
+			{
+				bAffected = *Cached;
+			}
+			else
+			{
+				// Direct dependents: rebuild each caller node against the new module graph
+				// (ReallocatePins + override-map-pin sync + CachedChangeId update), then bump
+				// the OWNING graph's ChangeId so its stale cached compile data is invalidated
+				// before any save. Matches UNiagaraNodeFunctionCall::RefreshFromExternalChanges.
+				TArray<UNiagaraNode*> GraphNodes;
+				CandidateGraph->GetNodesOfClass<UNiagaraNode>(GraphNodes);
+				for (UNiagaraNode* GraphNode : GraphNodes)
+				{
+					if (!GraphNode || GraphNode->GetReferencedAsset() != ChangedScript) continue;
+					GraphNode->Modify();
+					GraphNode->RefreshFromExternalChanges();
+					GraphNode->MarkNodeRequiresSynchronization(Reason, /*bRaiseGraphNeedsRecompile*/ true);
+					++RefreshedNodeCount;
+					bAffected = true;
+				}
+
+				// Transitive dependents (stack module → dynamic input → changed script): no
+				// caller node to refresh — the direct callee's interface didn't change — but
+				// the owner still needs a recompile against the new leaf graph.
+				if (!bAffected && ChangedGraph)
+				{
+					TSet<const UNiagaraGraph*> Visited;
+					bAffected = GraphTransitivelyCalls(CandidateGraph, ChangedGraph, Visited);
+				}
+				GraphAffectedCache.Add(CandidateGraph, bAffected);
+			}
+
+			if (bAffected)
+			{
+				if (UNiagaraSystem* OwnerSystem = Candidate->GetTypedOuter<UNiagaraSystem>())
+				{
+					SystemsToRecompile.Add(OwnerSystem);
+				}
+				// Standalone dependents (other module/function assets) need no VM compile of
+				// their own — modules compile inline into their callers; the Modify() above
+				// already dirtied their packages so they re-save consistent.
+			}
+		}
+
+		for (UNiagaraSystem* System : SystemsToRecompile)
+		{
+			System->RequestCompile(false);
+		}
+
+		if (OutSystemsRecompiled) *OutSystemsRecompiled = SystemsToRecompile.Num();
+		if (RefreshedNodeCount > 0 || SystemsToRecompile.Num() > 0)
+		{
+			UE_LOG(LogMonolithNiagara, Log,
+				TEXT("RefreshDependentsOfNiagaraScript('%s'): refreshed %d caller node(s), queued %d system recompile(s). Reason: %s"),
+				*ChangedScript->GetPathName(), RefreshedNodeCount, SystemsToRecompile.Num(), Reason);
+		}
+		return RefreshedNodeCount;
+	}
+} // namespace MonolithNiagaraHelpers
+
 FMonolithActionResult FMonolithNiagaraActions::HandleSetCustomHLSLText(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ScriptPath = Params->GetStringField(TEXT("script_path"));
@@ -4430,8 +4566,20 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCustomHLSLText(const TSh
 	Src->NodeGraph->Modify();
 	TargetNode->Modify();
 	HlslProp->SetPropertyValue_InContainer(TargetNode, HlslText);
+	// Match UNiagaraNodeCustomHlsl::SetCustomHlsl (NiagaraNodeCustomHlsl.cpp): assign →
+	// RefreshFromExternalChanges (rebuild the node's pins from its Signature) → mark dirty.
+	// The reflection write above skips the setter, so replicate its side effects in order.
+	TargetNode->RefreshFromExternalChanges();
 	TargetNode->MarkNodeRequiresSynchronization(TEXT("MonolithSetCustomHlslText"), true);
 	GEditor->EndTransaction();
+
+	// Propagate to every loaded caller of this module script BEFORE anything can be saved —
+	// otherwise emitters get persisted with stale call-site state and fail to compile on the
+	// next editor boot ("Error compiling Pin - Node: Output Particle Update Pin: Out - ").
+	// See RefreshDependentsOfNiagaraScript above for the full failure analysis.
+	int32 SystemsRecompiled = 0;
+	const int32 DependentsRefreshed = MonolithNiagaraHelpers::RefreshDependentsOfNiagaraScript(
+		Script, TEXT("Monolith: module script HLSL changed"), &SystemsRecompiled);
 
 	Script->MarkPackageDirty();
 	Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
@@ -4441,6 +4589,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCustomHLSLText(const TSh
 	R->SetStringField(TEXT("script_path"), ScriptPath);
 	R->SetStringField(TEXT("node_guid"), TargetNode->NodeGuid.ToString());
 	R->SetNumberField(TEXT("length"), HlslText.Len());
+	R->SetNumberField(TEXT("dependent_nodes_refreshed"), DependentsRefreshed);
+	R->SetNumberField(TEXT("dependent_systems_recompiled"), SystemsRecompiled);
+	if (SystemsRecompiled > 0)
+	{
+		R->SetStringField(TEXT("note"), TEXT(
+			"Dependent systems were refreshed and queued for recompile. Save them together with "
+			"this script (editor.list_dirty_packages -> save_packages) so callers stay in sync."));
+	}
 	return NA_SuccessObj(R);
 }
 
@@ -5832,6 +5988,14 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 	// Set source on script — compilation happens when the module is added to a system
 	Script->SetLatestSource(Source);
 
+	// Overwrite guard: if save_path pointed at an EXISTING script, NewObject reused the object
+	// identity in place, so loaded caller nodes still point at it — but against a brand-new
+	// graph. Refresh them (same stale-call-site failure as set_custom_hlsl_text; see
+	// RefreshDependentsOfNiagaraScript). No-op for a genuinely new asset (no callers exist).
+	int32 SystemsRecompiled = 0;
+	const int32 DependentsRefreshed = MonolithNiagaraHelpers::RefreshDependentsOfNiagaraScript(
+		Script, TEXT("Monolith: script re-created from HLSL"), &SystemsRecompiled);
+
 	// === Register and save ===
 	FAssetRegistryModule::AssetCreated(Script);
 	Pkg->MarkPackageDirty();
@@ -5860,6 +6024,15 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 		OutputPinNames.Add(MakeShared<FJsonValueString>(P.Name));
 	Result->SetArrayField(TEXT("input_pins"), InputPinNames);
 	Result->SetArrayField(TEXT("output_pins"), OutputPinNames);
+
+	if (DependentsRefreshed > 0 || SystemsRecompiled > 0)
+	{
+		Result->SetNumberField(TEXT("dependent_nodes_refreshed"), DependentsRefreshed);
+		Result->SetNumberField(TEXT("dependent_systems_recompiled"), SystemsRecompiled);
+		Result->SetStringField(TEXT("note"), TEXT(
+			"save_path pointed at an existing script; loaded callers were refreshed and their "
+			"systems queued for recompile. Save them together with this script."));
+	}
 
 	return NA_SuccessObj(Result);
 }
