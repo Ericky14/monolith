@@ -41,6 +41,15 @@ void FMonolithBlueprintStructActions::RegisterActions(FMonolithToolRegistry& Reg
 			.Required(TEXT("values"),    TEXT("array"),  TEXT("Array of enumerator display name strings, e.g. [\"Idle\", \"Running\", \"Jumping\"]"))
 			.Build());
 
+	Registry.RegisterAction(TEXT("blueprint"), TEXT("add_enum_entry"),
+		TEXT("Append one enumerator to an EXISTING User Defined Enum asset (FEnumEditorUtils — the editing API the Python surface never exposed). Dependent Blueprints (SwitchEnum nodes, compares) pick the new entry up on their next compile."),
+		FMonolithActionHandler::CreateStatic(&HandleAddEnumEntry),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("UserDefinedEnum asset path, e.g. /Game/Data/E_MyEnum"))
+			.Required(TEXT("display_name"), TEXT("string"), TEXT("Display name for the new enumerator, e.g. \"Core\""))
+			.Optional(TEXT("save"), TEXT("boolean"), TEXT("Save the package after adding (default true)"), TEXT("true"))
+			.Build());
+
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("read_enum"),
 		TEXT("Read a UEnum's entries: index, value, internal name, and DISPLAY NAME. Works for UserDefinedEnum (Blueprint) assets via asset_path and for native enums by name. Skips the auto-generated _MAX sentinel unless include_hidden=true. Solves the gap where Blueprint enum display names live in a protected DisplayNameMap not reachable from the Python API."),
 		FMonolithActionHandler::CreateStatic(&HandleReadEnum),
@@ -372,6 +381,69 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleCreateUserDefinedEn
 	Root->SetStringField(TEXT("asset_name"), AssetName);
 	Root->SetNumberField(TEXT("enumerator_count"), NumValues);
 	Root->SetArrayField(TEXT("values"), ValueResults);
+	Root->SetBoolField(TEXT("saved"), bSaved);
+	Root->SetBoolField(TEXT("success"), true);
+	return FMonolithActionResult::Success(Root);
+}
+
+// ============================================================
+//  add_enum_entry
+// ============================================================
+
+FMonolithActionResult FMonolithBlueprintStructActions::HandleAddEnumEntry(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	if (AssetPath.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: asset_path"));
+	}
+	FString DisplayName = Params->GetStringField(TEXT("display_name"));
+	if (DisplayName.IsEmpty())
+	{
+		return FMonolithActionResult::Error(TEXT("Missing required parameter: display_name"));
+	}
+	bool bSave = true;
+	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	UObject* Loaded = UEditorAssetLibrary::LoadAsset(AssetPath);
+	UUserDefinedEnum* Enum = Cast<UUserDefinedEnum>(Loaded);
+	if (!Enum)
+	{
+		return FMonolithActionResult::Error(FString::Printf(
+			TEXT("Not a UserDefinedEnum asset: %s"), *AssetPath));
+	}
+
+	// Refuse duplicates by display name — a second "Core" entry would be indistinguishable
+	// at every BP call site.
+	const int32 ExistingCount = Enum->NumEnums() - 1; // trailing _MAX sentinel
+	for (int32 i = 0; i < ExistingCount; ++i)
+	{
+		if (Enum->GetDisplayNameTextByIndex(i).ToString().Equals(DisplayName, ESearchCase::IgnoreCase))
+		{
+			return FMonolithActionResult::Error(FString::Printf(
+				TEXT("Enum '%s' already has an enumerator displayed as '%s' (index %d)."),
+				*AssetPath, *DisplayName, i));
+		}
+	}
+
+	// Appends one real enumerator ahead of the re-appended _MAX; FEnumEditorUtils drives the
+	// engine's change broadcast, so dependent Blueprints resync on their next compile.
+	FEnumEditorUtils::AddNewEnumeratorForUserDefinedEnum(Enum);
+	const int32 NewIndex = ExistingCount;
+	FEnumEditorUtils::SetEnumeratorDisplayName(Enum, NewIndex, FText::FromString(DisplayName));
+
+	bool bSaved = false;
+	if (bSave)
+	{
+		bSaved = UEditorAssetLibrary::SaveLoadedAsset(Enum, false);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetNumberField(TEXT("index"), NewIndex);
+	Root->SetStringField(TEXT("internal_name"), Enum->GetNameStringByIndex(NewIndex));
+	Root->SetStringField(TEXT("display_name"), DisplayName);
+	Root->SetNumberField(TEXT("enumerator_count"), Enum->NumEnums() - 1);
 	Root->SetBoolField(TEXT("saved"), bSaved);
 	Root->SetBoolField(TEXT("success"), true);
 	return FMonolithActionResult::Success(Root);

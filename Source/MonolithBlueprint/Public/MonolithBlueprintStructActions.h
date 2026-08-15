@@ -9,6 +9,7 @@ public:
 
 	static FMonolithActionResult HandleCreateUserDefinedStruct(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleCreateUserDefinedEnum(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleAddEnumEntry(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleReadEnum(const TSharedPtr<FJsonObject>& Params);
 
 	// DataTable actions (Phase 3C)

@@ -101,6 +101,9 @@
 // run_pie_smoke / poll_pie_smoke / stop_pie_smoke / capture_pie_movement_clip:
 // async session-based PIE smoke advanced by the editor's real frame loop.
 #include "MonolithPieSmokeSession.h"
+// C1: PIE-lifetime suppression of the editor's background-CPU throttle (the #1 false-negative
+// source for MCP-driven combat verification — see the header for why RAII cannot work here).
+#include "MonolithPieThrottleGuard.h"
 #include "Animation/AnimInstance.h"
 #include "GameFramework/Pawn.h"
 #include "Misc/ScopeExit.h"           // ON_SCOPE_EXIT (always-unbind the PostPIEStarted handle)
@@ -522,9 +525,11 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("start_pie"),
-		TEXT("Start a Play-In-Editor session (equivalent to pressing Cmd+P in the editor)."),
+		TEXT("Start a Play-In-Editor session (equivalent to pressing Cmd+P in the editor). Editor background-CPU throttling is suppressed for the lifetime of the session by default (suppress_throttle) and restored when PIE ends; the response echoes {throttle_suppressed, was_throttled}."),
 		FMonolithActionHandler::CreateStatic(&HandleStartPIE),
-		MakeShared<FJsonObject>());
+		FParamSchemaBuilder()
+			.Optional(TEXT("suppress_throttle"), TEXT("bool"), TEXT("Suppress the editor's \"Use Less CPU when in Background\" setting (UEditorPerformanceSettings.bThrottleCPUWhenNotForeground) for the LIFETIME of this PIE session, restoring the original on every end path (stop_pie, PIE ending on its own, module shutdown). Default true — leave it on: with the editor unfocused (the normal state when MCP drives it) throttling drops PIE to ~3 FPS, melee hit windows open and close between frames, and verification reports a working ability as a miss. Echoed back as {throttle_suppressed, was_throttled} (was_throttled=true means throttling really was on)."), TEXT("true"))
+			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("stop_pie"),
 		TEXT("Stop the active Play-In-Editor session."),
@@ -575,6 +580,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("actor_setup"), TEXT("array"), TEXT("Declarative spawn/apply/move block executed ONCE against the live PIE world on the first ready tick (after BeginPlay). [{class:\"/Game/.../BP_Foo\" (BP or native class path; _C suffix optional), count:<int, default 1>, locations:[[x,y,z],...] (per-actor spawn; index falls back to origin), apply_data_asset:\"/Game/.../DA_Bar\" (optional — copies the DataAsset's reflected fields onto matching-named actor properties of a COMPATIBLE type; the field->prop map is NOT 1:1), move_to:[x,y,z] (optional — AAIController::MoveToLocation via the spawned pawn's controller)}]. Reported under 'actor_setup' as {class, class_resolved, requested_count, spawned_count, data_asset_loaded?, actors:[{spawned, name, runtime_class, applied:[...], unmatched:[...], move_to:{issued,result}}]} so partial-vs-full apply is programmatically distinguishable."))
 			.Optional(TEXT("csv_profile"), TEXT("bool"), TEXT("If true, start the engine CSV profiler on session start (first post-BeginPlay tick) and stop it on completion, bracketing the capture to EXACTLY the PIE window. The .csv is written to <project>/Saved/Profiling and its path is reported under 'profiling.csv_path'. Stopped on EVERY end path (success/failure/abort). Reports profiling.csv.available=false when the build config disables the CSV profiler (CSV_PROFILER off). Default false."), TEXT("false"))
 			.Optional(TEXT("trace_channels"), TEXT("array"), TEXT("Channel names (e.g. [\"cpu\",\"frame\",\"gpu\"]) for an Unreal Insights trace started on session start and stopped on completion, bracketing the capture to the PIE window. The .utrace is written to <project>/Saved/Profiling and its path is reported under 'profiling.trace_path'. Stopped on EVERY end path. Omit/empty to disable tracing. If a trace is already connected, this session does not start (or later stop) it."))
+			.Optional(TEXT("suppress_throttle"), TEXT("bool"), TEXT("Suppress the editor's \"Use Less CPU when in Background\" setting (UEditorPerformanceSettings.bThrottleCPUWhenNotForeground) for the LIFETIME of this session, restoring the original on every end path. Default true — leave it on: with the editor unfocused (the normal state when MCP drives it) throttling drops PIE to ~3 FPS, hit windows open and close between frames, and the session reports a working ability as a miss. Echoed here and in poll_pie_smoke as {throttle_suppressed, was_throttled}."), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("list_errored_blueprints"),
@@ -597,6 +603,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Required(TEXT("probe_scripts"), TEXT("array"), TEXT("Timeline steps: [{at_seconds:number, python?:string, console?:[string]}, ...]. Times are offsets from the schedule call, not from each other. Use a module-level dict/builtins to carry state between steps."))
 			.Optional(TEXT("tail_seconds"), TEXT("number"), TEXT("Extra seconds the session stays alive after the last probe, so its output is captured. Default 1.0."), TEXT("1.0"))
 			.Optional(TEXT("label"), TEXT("string"), TEXT("Short label folded into the log marker for this run."))
+			.Optional(TEXT("suppress_throttle"), TEXT("bool"), TEXT("Suppress the editor's \"Use Less CPU when in Background\" setting (UEditorPerformanceSettings.bThrottleCPUWhenNotForeground) for the lifetime of this probe timeline; the original is restored once the timeline goes idle (the developer's PIE is never ended by this action). Default true — leave it on: an unfocused editor throttles PIE to ~3 FPS, so timed probes measure a stalled game and report a working ability as a miss. Echoed here and in poll_pie_smoke as {throttle_suppressed, was_throttled}."), TEXT("true"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("poll_pie_smoke"),
@@ -638,6 +645,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("actor_setup"), TEXT("array"), TEXT("Declarative spawn/apply/move block executed ONCE against the live PIE world on the first ready tick (after BeginPlay). [{class, count, locations:[[x,y,z],...], apply_data_asset, move_to:[x,y,z]}] — see run_pie_smoke for full semantics. Reported under 'actor_setup' with per-actor applied/unmatched DataAsset fields + move-request result."))
 			.Optional(TEXT("csv_profile"), TEXT("bool"), TEXT("If true, start the engine CSV profiler on session start (first post-BeginPlay tick) and stop it on completion, bracketing the capture to EXACTLY the PIE window. The .csv is written to <project>/Saved/Profiling and its path is reported under 'profiling.csv_path'. Stopped on EVERY end path (success/failure/abort). Reports profiling.csv.available=false when the build config disables the CSV profiler (CSV_PROFILER off). Default false."), TEXT("false"))
 			.Optional(TEXT("trace_channels"), TEXT("array"), TEXT("Channel names (e.g. [\"cpu\",\"frame\",\"gpu\"]) for an Unreal Insights trace started on session start and stopped on completion, bracketing the capture to the PIE window. The .utrace is written to <project>/Saved/Profiling and its path is reported under 'profiling.trace_path'. Stopped on EVERY end path. Omit/empty to disable tracing. If a trace is already connected, this session does not start (or later stop) it."))
+			.Optional(TEXT("suppress_throttle"), TEXT("bool"), TEXT("Suppress the editor's \"Use Less CPU when in Background\" setting (UEditorPerformanceSettings.bThrottleCPUWhenNotForeground) for the LIFETIME of this session, restoring the original on every end path. Default true — leave it on: an unfocused editor throttles PIE to ~3 FPS, which both starves the capture of real frames and closes hit windows between them. Echoed here and in poll_pie_smoke as {throttle_suppressed, was_throttled}."), TEXT("true"))
 			.Build());
 
 	// --- Nav harness map builder (F4: PIE/profiling harness plan 2026-06-04) ---
@@ -1851,9 +1859,22 @@ namespace
 		}
 		return Items;
 	}
+
+	// C1: read the shared `suppress_throttle` param. Defaults TRUE on every PIE-driving action —
+	// opting out is a deliberate choice (e.g. measuring throttled behaviour), never the default.
+	bool ResolveSuppressThrottle(const TSharedPtr<FJsonObject>& Params)
+	{
+		bool bSuppress = true;
+		if (Params.IsValid())
+		{
+			Params->TryGetBoolField(TEXT("suppress_throttle"), bSuppress);
+		}
+		return bSuppress;
+	}
 }
 
-bool FMonolithEditorActions::StartPieInternal(FString& OutError, bool bSuppressModals)
+bool FMonolithEditorActions::StartPieInternal(FString& OutError, bool bSuppressModals,
+	bool bSuppressThrottle, bool* OutWasThrottled)
 {
 	if (!GUnrealEd)
 	{
@@ -1892,6 +1913,18 @@ bool FMonolithEditorActions::StartPieInternal(FString& OutError, bool bSuppressM
 	TGuardValue<bool> UnattendedScriptGuard(GIsRunningUnattendedScript,
 		bSuppressModals ? true : GIsRunningUnattendedScript);
 
+	// C1: kill background-CPU throttling for the lifetime of the session about to start. Placed
+	// after every early-out so a refused start doesn't leave the setting suppressed with no PIE
+	// end to undo it; the module's PIE-end hook + the explicit stop paths restore it.
+	if (bSuppressThrottle)
+	{
+		const bool bWasThrottled = FMonolithPieThrottleGuard::Suppress();
+		if (OutWasThrottled)
+		{
+			*OutWasThrottled = bWasThrottled;
+		}
+	}
+
 	GUnrealEd->RequestPlaySession(SessionParams);
 	GUnrealEd->StartQueuedPlaySessionRequest();
 	return true;
@@ -1909,6 +1942,12 @@ bool FMonolithEditorActions::StopPieInternal()
 	{
 		GEditor->RequestEndPlayMap();
 	}
+
+	// C1: hand the throttle setting back on the explicit stop path. RequestEndPlayMap only
+	// QUEUES teardown, so the PIE-end delegate is a tick away — and when nothing was running it
+	// never fires at all. Restore() is idempotent, so the delegate re-running it is harmless.
+	FMonolithPieThrottleGuard::Restore();
+
 	return bWasRunning;
 }
 
@@ -1922,11 +1961,18 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 		TSharedPtr<FJsonObject> AlreadyRunning = MakeShared<FJsonObject>();
 		AlreadyRunning->SetBoolField(TEXT("started"), false);
 		AlreadyRunning->SetStringField(TEXT("reason"), TEXT("PIE already running"));
+		// Keep the response shape stable, and report the LIVE guard state rather than a flat
+		// false — the running PIE this call collided with may well be one we suppressed for.
+		AlreadyRunning->SetBoolField(TEXT("throttle_suppressed"), FMonolithPieThrottleGuard::IsSuppressed());
+		AlreadyRunning->SetBoolField(TEXT("was_throttled"), FMonolithPieThrottleGuard::WasThrottled());
 		return FMonolithActionResult::Success(AlreadyRunning);
 	}
 
+	const bool bSuppressThrottle = ResolveSuppressThrottle(Params);
+
 	FString StartError;
-	if (!StartPieInternal(StartError))
+	bool bWasThrottled = false;
+	if (!StartPieInternal(StartError, /*bSuppressModals=*/false, bSuppressThrottle, &bWasThrottled))
 	{
 		return FMonolithActionResult::Error(StartError);
 	}
@@ -1934,6 +1980,10 @@ FMonolithActionResult FMonolithEditorActions::HandleStartPIE(const TSharedPtr<FJ
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("started"), true);
 	Root->SetStringField(TEXT("mode"), TEXT("in_viewport"));
+	// C1: report the suppression so a caller can SEE the session is not throttle-poisoned,
+	// instead of inferring it from suspiciously bad results.
+	Root->SetBoolField(TEXT("throttle_suppressed"), bSuppressThrottle);
+	Root->SetBoolField(TEXT("was_throttled"), bWasThrottled);
 	return FMonolithActionResult::Success(Root);
 }
 
@@ -1941,10 +1991,14 @@ FMonolithActionResult FMonolithEditorActions::HandleStopPIE(const TSharedPtr<FJs
 {
 	if (!GEditor) return FMonolithActionResult::Error(TEXT("GEditor not available"));
 
+	// C1: sample the guard BEFORE stopping — StopPieInternal restores it, so afterwards there is
+	// nothing left to observe. Lets a caller confirm the suppression actually round-tripped.
+	const bool bThrottleWasSuppressed = FMonolithPieThrottleGuard::IsSuppressed();
 	const bool bWasRunning = StopPieInternal();
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("stopped"), bWasRunning);
+	Root->SetBoolField(TEXT("throttle_restored"), bThrottleWasSuppressed);
 	return FMonolithActionResult::Success(Root);
 }
 
@@ -5557,6 +5611,11 @@ namespace MonolithEditorPieSmoke
 		Root->SetBoolField(TEXT("pie_ready"), S.bReady);
 		Root->SetStringField(TEXT("lifecycle"), DeriveLifecycle(S)); // #11 explicit lifecycle
 		Root->SetNumberField(TEXT("sample_count"), S.Samples.Num());
+		// C1: was this session's frame rate protected? Without these two fields a caller cannot
+		// distinguish "the ability missed" from "the editor was throttled to ~3 FPS and the hit
+		// window fell between frames".
+		Root->SetBoolField(TEXT("throttle_suppressed"), S.bThrottleSuppressed);
+		Root->SetBoolField(TEXT("was_throttled"), S.bWasThrottled);
 
 		const double EndTime = (S.Status == EPieSmokeStatus::Running)
 			? FPlatformTime::Seconds() : S.LastObservedSeconds;
@@ -5984,8 +6043,11 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	// that work now happens on the editor's real frames via the session observer).
 	// bSuppressModals wraps the request in the unattended guard so a compile-error
 	// prompt resolves to its default instead of blocking.
+	const bool bSuppressThrottle = ResolveSuppressThrottle(Params);
+
 	FString StartError;
-	if (!StartPieInternal(StartError, bSuppressModals))
+	bool bWasThrottled = false;
+	if (!StartPieInternal(StartError, bSuppressModals, bSuppressThrottle, &bWasThrottled))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to start PIE: %s"), *StartError));
 	}
@@ -6008,6 +6070,8 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	Session.Marker = Marker;
 	Session.MapName = PieWorld ? PieWorld->GetMapName() : TEXT("<current>");
 	ApplySmokeParams(Params, Session); // #3 groups + #10 bucketing + #4 probes + #8/#9/#7
+	Session.bThrottleSuppressed = bSuppressThrottle; // C1: carried into the poll report
+	Session.bWasThrottled = bWasThrottled;
 
 	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
 
@@ -6017,6 +6081,8 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	Result->SetBoolField(TEXT("started"), true);
 	Result->SetStringField(TEXT("marker"), Marker);
 	Result->SetNumberField(TEXT("duration"), Duration);
+	Result->SetBoolField(TEXT("throttle_suppressed"), bSuppressThrottle);
+	Result->SetBoolField(TEXT("was_throttled"), bWasThrottled);
 	return FMonolithActionResult::Success(Result);
 }
 
@@ -6064,8 +6130,17 @@ FMonolithActionResult FMonolithEditorActions::HandleScheduleProbes(const TShared
 	double Tail = 1.0;
 	Params->TryGetNumberField(TEXT("tail_seconds"), Tail);
 
+	// C1: this attaches to a PIE the developer started, so it never went through
+	// StartPieInternal — suppress here or the entire probe timeline runs at throttled frame
+	// rate, which is exactly the condition timed probes are supposed to measure honestly.
+	// Restored when the observer goes idle (TeardownObserverIfIdle) since no PIE end is coming.
+	const bool bSuppressThrottle = ResolveSuppressThrottle(Params);
+	const bool bWasThrottled = bSuppressThrottle ? FMonolithPieThrottleGuard::Suppress() : false;
+
 	FPieSmokeSession Session;
 	Session.bOwnsPie = false; // attach-only: never tear down the developer's PIE
+	Session.bThrottleSuppressed = bSuppressThrottle;
+	Session.bWasThrottled = bWasThrottled;
 	Session.Probes = MoveTemp(Probes);
 	Session.StartTimeSeconds = FPlatformTime::Seconds();
 	Session.DurationSeconds = LastAt + FMath::Max(0.0, Tail);
@@ -6090,6 +6165,8 @@ FMonolithActionResult FMonolithEditorActions::HandleScheduleProbes(const TShared
 	Result->SetStringField(TEXT("marker"), Marker);
 	Result->SetNumberField(TEXT("steps"), StepCount);
 	Result->SetNumberField(TEXT("duration"), Duration);
+	Result->SetBoolField(TEXT("throttle_suppressed"), bSuppressThrottle);
+	Result->SetBoolField(TEXT("was_throttled"), bWasThrottled);
 	Result->SetStringField(TEXT("poll_with"),
 		TEXT("editor.poll_pie_smoke {session_id} — read 'probes' for per-step fired_at_seconds + python output."));
 	return FMonolithActionResult::Success(Result);
@@ -6254,8 +6331,11 @@ FMonolithActionResult FMonolithEditorActions::StartTimeseriesSession(const TShar
 		}
 	}
 
+	const bool bSuppressThrottle = ResolveSuppressThrottle(Params);
+
 	FString StartError;
-	if (!StartPieInternal(StartError, bSuppressModals))
+	bool bWasThrottled = false;
+	if (!StartPieInternal(StartError, bSuppressModals, bSuppressThrottle, &bWasThrottled))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to start PIE: %s"), *StartError));
 	}
@@ -6288,6 +6368,8 @@ FMonolithActionResult FMonolithEditorActions::StartTimeseriesSession(const TShar
 	Params->TryGetStringField(TEXT("component_name"), Session.TargetComponentName);
 	Params->TryGetBoolField(TEXT("anim_instance"), Session.bTargetAnimInstance);
 	Session.Provocations = ResolveProvocations(Params);
+	Session.bThrottleSuppressed = bSuppressThrottle; // C1: carried into the poll report
+	Session.bWasThrottled = bWasThrottled;
 
 	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
 
@@ -6296,6 +6378,8 @@ FMonolithActionResult FMonolithEditorActions::StartTimeseriesSession(const TShar
 	Result->SetStringField(TEXT("status"), TEXT("running"));
 	Result->SetBoolField(TEXT("started"), true);
 	Result->SetNumberField(TEXT("duration"), Duration);
+	Result->SetBoolField(TEXT("throttle_suppressed"), bSuppressThrottle);
+	Result->SetBoolField(TEXT("was_throttled"), bWasThrottled);
 	Result->SetStringField(TEXT("note"), TEXT("Poll with poll_pie_smoke; stop with stop_pie_smoke. Time-series under 'timeseries'; provocation fire log under 'provocations'."));
 	return FMonolithActionResult::Success(Result);
 }
@@ -6435,8 +6519,11 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 
 	// Start PIE synchronously (safe — see HandleRunPieSmoke). Frame capture + sampling
 	// run on the editor's real frames via the session observer.
+	const bool bSuppressThrottle = ResolveSuppressThrottle(Params);
+
 	FString StartError;
-	if (!StartPieInternal(StartError))
+	bool bWasThrottled = false;
+	if (!StartPieInternal(StartError, /*bSuppressModals=*/false, bSuppressThrottle, &bWasThrottled))
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to start PIE: %s"), *StartError));
 	}
@@ -6456,6 +6543,8 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Session.bCaptureFrames = true;
 	Session.CaptureInterval = Interval;
 	Session.OutputDir = OutputDir;
+	Session.bThrottleSuppressed = bSuppressThrottle; // C1: carried into the poll report
+	Session.bWasThrottled = bWasThrottled;
 
 	const FString SessionId = FPieSmokeSessionManager::Get().CreateSession(MoveTemp(Session));
 
@@ -6468,6 +6557,8 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	Result->SetStringField(TEXT("resolved_output_dir"), OutputDir);   // explicit alias for callers
 	Result->SetNumberField(TEXT("duration"), Duration);
 	Result->SetNumberField(TEXT("capture_interval"), Interval);
+	Result->SetBoolField(TEXT("throttle_suppressed"), bSuppressThrottle);
+	Result->SetBoolField(TEXT("was_throttled"), bWasThrottled);
 	return FMonolithActionResult::Success(Result);
 }
 

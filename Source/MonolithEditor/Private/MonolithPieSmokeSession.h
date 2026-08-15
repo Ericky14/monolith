@@ -290,6 +290,14 @@ struct FPieSmokeSession
 	bool bReady = false;             // PIE world valid + HasBegunPlay seen at least once
 	FString ErrorReason;
 
+	// C1: editor background-CPU throttle suppression, echoed by the poll/stop report so a
+	// disappointing result can be told apart from a throttle-poisoned one.
+	//   bThrottleSuppressed : this session asked for suppression (suppress_throttle, default true).
+	//   bWasThrottled       : the setting's ORIGINAL value — true means throttling really was on,
+	//                         i.e. without the suppression these numbers would have been garbage.
+	bool bThrottleSuppressed = false;
+	bool bWasThrottled = false;
+
 	/**
 	 * Did THIS session start the PIE world it is observing?
 	 *

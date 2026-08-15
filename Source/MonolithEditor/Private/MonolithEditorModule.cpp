@@ -4,6 +4,7 @@
 #include "MonolithPieObjectActions.h"
 #include "MonolithPieInputActions.h"
 #include "MonolithPieTimeseries.h"
+#include "MonolithPieThrottleGuard.h"
 #include "MonolithStatActions.h"
 #include "MonolithSettingsCustomization.h"
 #include "MonolithToolRegistry.h"
@@ -75,6 +76,11 @@ void FMonolithEditorModule::StartupModule()
 	// repeated-input re-apply state is dropped on PIE end via the hook below.
 	FMonolithPieInputActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithPieInputActions::RegisterPieEndHook();
+	// C1: PIE-starting actions suppress editor background-CPU throttling for the LIFETIME of
+	// their session (see FMonolithPieThrottleGuard). This hook is what restores the developer's
+	// setting when PIE ends WITHOUT going through one of our stop paths — they pressed Stop,
+	// the session crashed, or the map changed underneath it.
+	FMonolithPieThrottleGuard::RegisterPieEndHook();
 	// Gap 10: programmatic stat-group counter/cycle readout (#if STATS gated).
 	FMonolithStatActions::RegisterActions(FMonolithToolRegistry::Get());
 
@@ -134,6 +140,10 @@ void FMonolithEditorModule::ShutdownModule()
 
 	// Gap 4: drop the PIE-end hook + any residual held-rotation / repeated-input / spectator state.
 	FMonolithPieInputActions::UnregisterPieEndHook();
+
+	// C1: unbind + hard-restore. A Live Coding reload unloads this module mid-PIE; without the
+	// restore here the delegates would go with it and the editor would stay un-throttled forever.
+	FMonolithPieThrottleGuard::UnregisterPieEndHook();
 
 	FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("editor"));
 

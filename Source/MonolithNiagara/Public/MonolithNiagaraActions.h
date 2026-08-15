@@ -208,6 +208,12 @@ public:
 	static FMonolithActionResult HandleFindNiagaraReferences(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleListSystemDataInterfaces(const TSharedPtr<FJsonObject>& Params);
 
+	// --- Repair (1 new) ---
+	// On-demand form of the caller-node repair the HLSL mutators run automatically. The only
+	// route back for a system already saved with stale call sites, or broken by an external
+	// editor of the module script (ue-mcp, the Niagara script toolkit, a hand edit).
+	static FMonolithActionResult HandleRefreshScriptDependents(const TSharedPtr<FJsonObject>& Params);
+
 	// --- Helpers (public for use by free functions) ---
 	static FString SerializeParameterValue(const FNiagaraVariable& Variable, const FNiagaraParameterStore& Store);
 

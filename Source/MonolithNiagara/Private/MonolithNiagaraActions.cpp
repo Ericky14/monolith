@@ -2630,6 +2630,14 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("hlsl"), TEXT("string"), TEXT("Replacement HLSL body text"))
 			.Optional(TEXT("node_guid"), TEXT("string"), TEXT("Specific CustomHlsl node GUID when the script contains multiple nodes"))
 			.Build());
+	Registry.RegisterAction(TEXT("niagara"), TEXT("refresh_script_dependents"),
+		TEXT("Repair the UNiagaraNodeFunctionCall caller nodes of a module/function/dynamic-input script in every consuming emitter/system (RefreshFromExternalChanges + queued recompile). On-demand form of what set_custom_hlsl_text does automatically — use it when a system was already saved with stale call sites or the script was edited outside Monolith (ue-mcp, the Niagara toolkit, a hand edit); the symptom is a load-time 'Error compiling Pin - Node: Output ... Pin: Out -' with an empty message."),
+		FMonolithActionHandler::CreateStatic(&HandleRefreshScriptDependents),
+		FParamSchemaBuilder()
+			.RequiredAssetPath(TEXT("asset_path"), TEXT("The CALLEE script asset (module / function / dynamic-input UNiagaraScript) whose callers should be repaired — not a system"), {TEXT("script_path")})
+			.Optional(TEXT("load_referencers"), TEXT("bool"), TEXT("Load unloaded consumers first (Asset Registry referencer walk: script <- emitter/script asset <- system). Default false — without it only ALREADY-LOADED consumers can be repaired."))
+			.Optional(TEXT("save"), TEXT("bool"), TEXT("Save the repaired dependent packages afterwards (blocks on each system's pending recompile). Default false — the repair is otherwise in-memory only."))
+			.Build());
 	Registry.RegisterAction(TEXT("niagara"), TEXT("add_module"), TEXT("Add a module to a script stage"),
 		FMonolithActionHandler::CreateStatic(&HandleAddModule),
 		FParamSchemaBuilder()
@@ -4411,10 +4419,14 @@ namespace MonolithNiagaraHelpers
 	// and get_system_diagnostics{compile_first} remains the blocking verify.
 	//
 	// Returns the number of caller nodes refreshed; OutSystemsRecompiled counts the systems
-	// queued for recompile.
-	int32 RefreshDependentsOfNiagaraScript(UNiagaraScript* ChangedScript, const TCHAR* Reason, int32* OutSystemsRecompiled = nullptr)
+	// queued for recompile. OutAffectedAssets receives the top-level asset (system / emitter /
+	// standalone script) of every dirtied dependent — the on-demand refresh action needs it to
+	// name and optionally save them; the auto-invoking mutators pass nullptr and ignore it.
+	int32 RefreshDependentsOfNiagaraScript(UNiagaraScript* ChangedScript, const TCHAR* Reason, int32* OutSystemsRecompiled = nullptr,
+		TArray<UObject*>* OutAffectedAssets = nullptr)
 	{
 		if (OutSystemsRecompiled) *OutSystemsRecompiled = 0;
+		if (OutAffectedAssets) OutAffectedAssets->Reset();
 		if (!ChangedScript) return 0;
 
 		UNiagaraScriptSource* ChangedSource = Cast<UNiagaraScriptSource>(ChangedScript->GetLatestSource());
@@ -4424,6 +4436,7 @@ namespace MonolithNiagaraHelpers
 		// update, etc.) — cache per graph so shared graphs are refreshed exactly once.
 		TMap<const UNiagaraGraph*, bool> GraphAffectedCache;
 		TSet<UNiagaraSystem*> SystemsToRecompile;
+		TSet<UObject*> AffectedAssets;
 		int32 RefreshedNodeCount = 0;
 
 		for (TObjectIterator<UNiagaraScript> It; It; ++It)
@@ -4478,6 +4491,16 @@ namespace MonolithNiagaraHelpers
 				// Standalone dependents (other module/function assets) need no VM compile of
 				// their own — modules compile inline into their callers; the Modify() above
 				// already dirtied their packages so they re-save consistent.
+
+				// GetOutermostObject walks to the object directly under the package, which is the
+				// saveable asset for every shape a dependent script takes: system-owned emitter
+				// script -> UNiagaraSystem, emitter-asset script -> UNiagaraEmitter, standalone
+				// module/function script -> itself. Transient-package hits (editor preview copies)
+				// land here too; the caller filters them.
+				if (UObject* Asset = Candidate->GetOutermostObject())
+				{
+					AffectedAssets.Add(Asset);
+				}
 			}
 		}
 
@@ -4486,6 +4509,14 @@ namespace MonolithNiagaraHelpers
 			System->RequestCompile(false);
 		}
 
+		if (OutAffectedAssets)
+		{
+			OutAffectedAssets->Reserve(AffectedAssets.Num());
+			for (UObject* Asset : AffectedAssets)
+			{
+				OutAffectedAssets->Add(Asset);
+			}
+		}
 		if (OutSystemsRecompiled) *OutSystemsRecompiled = SystemsToRecompile.Num();
 		if (RefreshedNodeCount > 0 || SystemsToRecompile.Num() > 0)
 		{
@@ -4597,6 +4628,249 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetCustomHLSLText(const TSh
 			"Dependent systems were refreshed and queued for recompile. Save them together with "
 			"this script (editor.list_dirty_packages -> save_packages) so callers stay in sync."));
 	}
+	return NA_SuccessObj(R);
+}
+
+// ============================================================================
+// refresh_script_dependents — on-demand caller repair.
+//
+// Same repair the HLSL mutators run automatically, but callable after the fact: a system that
+// was already SAVED with stale caller state, or one broken by an external editor of the module
+// script (ue-mcp SetStackInputData, a hand edit in the Niagara script toolkit), has no other
+// route back — nothing re-runs RefreshFromExternalChanges on load.
+//
+// Two things the auto-path does NOT do and this action must:
+//   1. TObjectIterator only sees LOADED scripts, so an unloaded consumer is silently skipped.
+//      load_referencers walks the Asset Registry referencer graph and loads the Niagara-typed
+//      referencers first (transitively: script <- emitter/script asset <- system).
+//   2. Report honestly when nothing was found. "0 refreshed" is the correct answer for a script
+//      with no consumers and an ALARM for one that has them — the AR referencer count is what
+//      separates the two, so it is always gathered, even when load_referencers is false.
+// ============================================================================
+
+namespace
+{
+	// Bounded because load_referencers pulls whole Niagara systems into memory; a module script
+	// used project-wide could otherwise stall the editor for minutes on one call.
+	constexpr int32 RSD_MaxPackagesVisited = 512;
+	constexpr int32 RSD_MaxAssetsLoaded = 256;
+
+	// Long package name ("/Game/VFX/M_Foo") from either an object path or a package path.
+	FString RSD_ToPackageName(const FString& InPath)
+	{
+		FString PackageName = InPath;
+		int32 DotIdx;
+		if (PackageName.FindChar('.', DotIdx))
+		{
+			PackageName.LeftInline(DotIdx);
+		}
+		return PackageName;
+	}
+}
+
+FMonolithActionResult FMonolithNiagaraActions::HandleRefreshScriptDependents(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString AssetPath = Params->GetStringField(TEXT("asset_path"));
+	if (AssetPath.IsEmpty())
+		return FMonolithActionResult::Error(TEXT("Missing required param: asset_path (the module/function/dynamic-input script asset whose callers should be repaired)"));
+
+	UNiagaraScript* Script = FMonolithAssetUtils::LoadAssetByPath<UNiagaraScript>(AssetPath);
+	if (!Script)
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Failed to load Niagara script '%s' — refresh_script_dependents takes the CALLEE script asset (a module/function/dynamic-input script), not a system"), *AssetPath));
+
+	bool bLoadReferencers = false;
+	Params->TryGetBoolField(TEXT("load_referencers"), bLoadReferencers);
+	bool bSave = false;
+	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	// --- Asset Registry referencer sweep (on-disk truth, no loading needed) ---
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	const FTopLevelAssetPath SystemClassPath = UNiagaraSystem::StaticClass()->GetClassPathName();
+	const FTopLevelAssetPath EmitterClassPath = UNiagaraEmitter::StaticClass()->GetClassPathName();
+	const FTopLevelAssetPath ScriptClassPath = UNiagaraScript::StaticClass()->GetClassPathName();
+
+	const FString ScriptPackageName = Script->GetPackage()
+		? Script->GetPackage()->GetName()
+		: RSD_ToPackageName(AssetPath);
+
+	TArray<FName> PackageQueue;
+	TSet<FName> VisitedPackages;
+	PackageQueue.Add(FName(*ScriptPackageName));
+	VisitedPackages.Add(FName(*ScriptPackageName));
+
+	TArray<FAssetData> NiagaraReferencers;
+	int32 PackagesVisited = 0;
+	bool bScanTruncated = false;
+
+	while (PackageQueue.Num() > 0)
+	{
+		if (PackagesVisited >= RSD_MaxPackagesVisited) { bScanTruncated = true; break; }
+		const FName Current = PackageQueue.Pop(EAllowShrinking::No);
+		++PackagesVisited;
+
+		TArray<FName> Referencers;
+		// IAssetRegistry::GetReferencers(FName PackageName, TArray<FName>&, Category=Package) — IAssetRegistry.h:598
+		AR.GetReferencers(Current, Referencers);
+
+		for (const FName& RefPackage : Referencers)
+		{
+			if (VisitedPackages.Contains(RefPackage)) continue;
+			VisitedPackages.Add(RefPackage);
+
+			TArray<FAssetData> AssetsInPackage;
+			AR.GetAssetsByPackageName(RefPackage, AssetsInPackage);
+			for (const FAssetData& AD : AssetsInPackage)
+			{
+				const bool bIsSystem = AD.AssetClassPath == SystemClassPath;
+				const bool bIsEmitter = AD.AssetClassPath == EmitterClassPath;
+				const bool bIsScript = AD.AssetClassPath == ScriptClassPath;
+				if (!bIsSystem && !bIsEmitter && !bIsScript) continue;
+
+				NiagaraReferencers.Add(AD);
+				// Emitter and script ASSETS are themselves consumed further up the chain
+				// (script <- dynamic-input script <- emitter asset <- system); systems are
+				// terminal, nothing includes a system's graphs.
+				if (!bIsSystem)
+				{
+					PackageQueue.Add(RefPackage);
+				}
+			}
+		}
+	}
+
+	// --- Optionally pull the unloaded consumers into memory so TObjectIterator can see them ---
+	TArray<TSharedPtr<FJsonValue>> LoadedAssetsJson;
+	int32 AlreadyLoadedCount = 0;
+	int32 LoadFailedCount = 0;
+	int32 StillUnloadedCount = 0;
+	bool bLoadTruncated = false;
+
+	for (const FAssetData& AD : NiagaraReferencers)
+	{
+		if (AD.IsAssetLoaded()) { ++AlreadyLoadedCount; continue; }
+		// Past the cap every remaining consumer stays unloaded — keep counting so the response
+		// states how much of the dependency graph this call did NOT reach.
+		if (!bLoadReferencers || bLoadTruncated) { ++StillUnloadedCount; continue; }
+		if (LoadedAssetsJson.Num() >= RSD_MaxAssetsLoaded)
+		{
+			bLoadTruncated = true;
+			++StillUnloadedCount;
+			continue;
+		}
+
+		if (AD.GetAsset() != nullptr)
+		{
+			TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("asset_path"), AD.GetObjectPathString());
+			Entry->SetStringField(TEXT("class"), AD.AssetClassPath.GetAssetName().ToString());
+			LoadedAssetsJson.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		else
+		{
+			++LoadFailedCount;
+		}
+	}
+
+	// --- The repair itself ---
+	int32 SystemsRecompiled = 0;
+	TArray<UObject*> AffectedAssets;
+	const int32 NodesRefreshed = MonolithNiagaraHelpers::RefreshDependentsOfNiagaraScript(
+		Script, TEXT("Monolith: niagara.refresh_script_dependents"), &SystemsRecompiled, &AffectedAssets);
+
+	// --- Report + optional save of the repaired packages ---
+	TArray<TSharedPtr<FJsonValue>> AffectedJson;
+	TArray<TSharedPtr<FJsonValue>> SavedJson;
+	TArray<TSharedPtr<FJsonValue>> SaveFailedJson;
+	int32 TransientSkipped = 0;
+
+	for (UObject* Asset : AffectedAssets)
+	{
+		UPackage* Pkg = Asset ? Asset->GetPackage() : nullptr;
+		if (!Pkg) continue;
+		// Editor preview/duplicate copies live in /Engine/Transient — they were refreshed (which is
+		// what keeps an open Niagara editor consistent) but they are not assets and cannot be saved.
+		if (Pkg == GetTransientPackage())
+		{
+			++TransientSkipped;
+			continue;
+		}
+
+		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("asset_path"), Asset->GetPathName());
+		Entry->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
+		Entry->SetBoolField(TEXT("dirty"), Pkg->IsDirty());
+		AffectedJson.Add(MakeShared<FJsonValueObject>(Entry));
+
+		if (!bSave || !Pkg->IsDirty()) continue;
+
+		FString PackageFilename;
+		bool bSaved = false;
+		if (FPackageName::TryConvertLongPackageNameToFilename(Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+		{
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			SaveArgs.Error = GError;
+			// UNiagaraSystem::PreSave blocks on WaitForCompilationComplete, so this save also
+			// serves as the sync point for the RequestCompile(false) the refresh just queued.
+			bSaved = UPackage::SavePackage(Pkg, Asset, *PackageFilename, SaveArgs);
+		}
+		(bSaved ? SavedJson : SaveFailedJson).Add(MakeShared<FJsonValueString>(Asset->GetPathName()));
+	}
+
+	TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+	R->SetStringField(TEXT("asset_path"), Script->GetPathName());
+	R->SetStringField(TEXT("script_usage"), UsageToString(Script->GetUsage()));
+	R->SetNumberField(TEXT("dependent_nodes_refreshed"), NodesRefreshed);
+	R->SetNumberField(TEXT("dependent_systems_recompiled"), SystemsRecompiled);
+	R->SetNumberField(TEXT("affected_asset_count"), AffectedJson.Num());
+	R->SetArrayField(TEXT("affected_assets"), AffectedJson);
+	if (TransientSkipped > 0) R->SetNumberField(TEXT("transient_objects_refreshed"), TransientSkipped);
+
+	R->SetNumberField(TEXT("referencer_assets_on_disk"), NiagaraReferencers.Num());
+	R->SetNumberField(TEXT("referencers_already_loaded"), AlreadyLoadedCount);
+	R->SetBoolField(TEXT("load_referencers"), bLoadReferencers);
+	R->SetNumberField(TEXT("referencers_loaded"), LoadedAssetsJson.Num());
+	R->SetArrayField(TEXT("loaded_assets"), LoadedAssetsJson);
+	if (LoadFailedCount > 0) R->SetNumberField(TEXT("referencers_load_failed"), LoadFailedCount);
+	if (StillUnloadedCount > 0) R->SetNumberField(TEXT("referencers_still_unloaded"), StillUnloadedCount);
+	if (bScanTruncated) R->SetBoolField(TEXT("referencer_scan_truncated"), true);
+	if (bLoadTruncated) R->SetBoolField(TEXT("load_truncated"), true);
+
+	R->SetBoolField(TEXT("saved"), bSave);
+	if (bSave)
+	{
+		R->SetNumberField(TEXT("packages_saved"), SavedJson.Num());
+		R->SetArrayField(TEXT("saved_assets"), SavedJson);
+		if (SaveFailedJson.Num() > 0) R->SetArrayField(TEXT("save_failed_assets"), SaveFailedJson);
+	}
+
+	// Honest verdict — a bare success on a 0-refresh result would hide the interesting case.
+	const bool bDependentsFound = NodesRefreshed > 0 || SystemsRecompiled > 0;
+	R->SetBoolField(TEXT("dependents_found"), bDependentsFound);
+	if (bDependentsFound)
+	{
+		R->SetStringField(TEXT("status"), NodesRefreshed > 0 ? TEXT("repaired") : TEXT("repaired_transitive_only"));
+		R->SetStringField(TEXT("note"), bSave
+			? TEXT("Caller nodes rebuilt and dependent packages saved. Re-verify with get_system_diagnostics{compile_first: true}.")
+			: TEXT("Caller nodes rebuilt; dependent packages are dirty IN MEMORY only. Save them (this action with save=true, or editor.save_packages) or the repair is lost on editor exit."));
+	}
+	else if (NiagaraReferencers.Num() == 0)
+	{
+		R->SetStringField(TEXT("status"), TEXT("no_consumers"));
+		R->SetStringField(TEXT("note"), TEXT("Nothing refreshed and the Asset Registry lists no Niagara asset referencing this script — it genuinely has no consumers. Nothing to repair."));
+	}
+	else
+	{
+		R->SetStringField(TEXT("status"), TEXT("consumers_found_but_none_refreshed"));
+		// Every referencer in memory + zero matches is the alarming case; anything still unloaded
+		// means the call simply didn't reach them, which is a different (cheaper) answer.
+		R->SetStringField(TEXT("warning"), StillUnloadedCount == 0
+			? FString::Printf(TEXT("%d Niagara asset(s) reference this script on disk, all of them are loaded, and STILL no caller node matched it. Their function-call nodes do not resolve to this script (asset renamed and reached through a redirector, or the reference is a soft/DI reference rather than a module call) — investigate before assuming those systems are healthy."), NiagaraReferencers.Num())
+			: FString::Printf(TEXT("%d of %d referencing Niagara asset(s) are still unloaded, so their caller nodes could not be reached. Re-run with load_referencers=true%s."),
+				StillUnloadedCount, NiagaraReferencers.Num(),
+				bLoadTruncated ? TEXT(" (the previous run hit the internal load cap — repair in batches, e.g. by refreshing intermediate scripts first)") : TEXT("")));
+	}
+
 	return NA_SuccessObj(R);
 }
 

@@ -1,6 +1,7 @@
 #include "MonolithPieSmokeSession.h"
 #include "MonolithEditorActions.h" // FMonolithLogCapture / FMonolithLogEntry
 #include "MonolithPieObjectActions.h" // Gap 9: shared PIE-object resolver + dotted read
+#include "MonolithPieThrottleGuard.h" // C1: restore the editor throttle on session end/cleanup
 
 #include "Editor.h"
 #include "Engine/Engine.h"
@@ -937,14 +938,21 @@ int32 FPieSmokeSessionManager::Stop(const FString& SessionId)
 			break;
 		}
 	}
-	if (!bAnyRunning && GEditor && FindActivePieWorld())
+	if (!bAnyRunning)
 	{
-		GEditor->RequestEndPlayMap();
-		// #11 mark every session whose PIE we just asked to end as teardown-started.
-		for (TPair<FString, FPieSmokeSession>& Pair : Sessions)
+		if (GEditor && FindActivePieWorld())
 		{
-			Pair.Value.bTeardownStarted = true;
+			GEditor->RequestEndPlayMap();
+			// #11 mark every session whose PIE we just asked to end as teardown-started.
+			for (TPair<FString, FPieSmokeSession>& Pair : Sessions)
+			{
+				Pair.Value.bTeardownStarted = true;
+			}
 		}
+		// C1: nothing is observing any more — hand the developer's throttle setting back. Done
+		// outside the RequestEndPlayMap branch because an attach-only (schedule_probes) session
+		// suppresses the throttle without ever owning, or ending, the PIE world.
+		FMonolithPieThrottleGuard::Restore();
 	}
 	return Stopped;
 }
@@ -1013,6 +1021,11 @@ void FPieSmokeSessionManager::TeardownObserverIfIdle()
 		FEditorDelegates::PrePIEEnded.Remove(PrePieEndedHandle);
 		PrePieEndedHandle.Reset();
 	}
+
+	// C1: the observer going idle is the last moment any session cares about frame rate. This
+	// is the ONLY restore path that covers an attach-only session (schedule_probes), whose PIE
+	// the developer keeps playing — so no PIE-end delegate is coming to do it for us.
+	FMonolithPieThrottleGuard::Restore();
 }
 
 void FPieSmokeSessionManager::OnPieEnded(const bool /*bIsSimulating*/)

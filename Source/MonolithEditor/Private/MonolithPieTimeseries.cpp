@@ -37,6 +37,7 @@ void FMonolithPieTimeseries::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console command strings run on the PIE world at start."))
 			.Optional(TEXT("python_script"), TEXT("string"), TEXT("Python source run via IPythonScriptPlugin at start."))
 			.Optional(TEXT("on_compile_errors"), TEXT("string"), TEXT("Policy when loaded Blueprints have unresolved compile errors: \"refuse\" (default) returns an error + the offending list and does NOT start PIE; \"suppress\" starts PIE anyway."), TEXT("refuse"))
+			.Optional(TEXT("suppress_throttle"), TEXT("bool"), TEXT("Suppress the editor's \"Use Less CPU when in Background\" setting (UEditorPerformanceSettings.bThrottleCPUWhenNotForeground) for the LIFETIME of this session, restoring the original on every end path. Default true — leave it on: an unfocused editor throttles PIE to ~3 FPS, so the series is sampled from a stalled game and provocations land in the wrong frames. Echoed here and in poll_pie_smoke as {throttle_suppressed, was_throttled}."), TEXT("true"))
 			.Build());
 
 	UE_LOG(LogMonolithPieTimeseries, Log, TEXT("MonolithEditor: registered sample_pie_timeseries under the 'animation' namespace"));

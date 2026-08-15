@@ -176,6 +176,9 @@ void FMonolithVoxelActions::RegisterActions()
 
     // Phase 1 terrain-authoring (mutation) actions - see MonolithVoxelTerrainActions.cpp
     RegisterTerrainActions();
+
+    // Heightmap-data ground queries - see MonolithVoxelHeightQueryActions.cpp
+    RegisterHeightQueryActions();
 }
 
 // --- Helpers ---

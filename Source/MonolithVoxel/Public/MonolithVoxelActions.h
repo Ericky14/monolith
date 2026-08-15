@@ -12,6 +12,10 @@ public:
     // Called from RegisterActions().
     static void RegisterTerrainActions();
 
+    // Heightmap-data ground queries, defined in MonolithVoxelHeightQueryActions.cpp.
+    // Called from RegisterActions().
+    static void RegisterHeightQueryActions();
+
     // --- Graph Queries ---
     static FMonolithActionResult HandleGetGraphInfo(const TSharedPtr<FJsonObject> &Params);
     static FMonolithActionResult HandleListTerminalGraphs(const TSharedPtr<FJsonObject> &Params);

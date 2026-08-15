@@ -199,7 +199,13 @@ private:
 	// When bSuppressModals is true, the PIE request is wrapped in a GIsRunningUnattendedScript
 	// guard so the engine's blocking compile-error prompt resolves to its default
 	// instead of starving the game-thread MCP server (used by on_compile_errors=suppress).
-	static bool StartPieInternal(FString& OutError, bool bSuppressModals = false);
+	//
+	// C1: when bSuppressThrottle is true (the default), editor background-CPU throttling is
+	// suppressed for the LIFETIME of the started session — applied here, not at the call sites,
+	// so no PIE-starting action can forget it. OutWasThrottled (optional) receives the ORIGINAL
+	// setting so the handler can echo was_throttled. See FMonolithPieThrottleGuard.
+	static bool StartPieInternal(FString& OutError, bool bSuppressModals = false,
+		bool bSuppressThrottle = true, bool* OutWasThrottled = nullptr);
 
 	// Request the active PIE session to end. Returns true if a session was running.
 	static bool StopPieInternal();
