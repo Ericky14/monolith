@@ -994,7 +994,16 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 		}
 	}
 
-	// Run level indexer on game thread (asset loading requires it)
+	// Run level indexer on game thread (asset loading requires it) - ONE BATCH PER DISPATCH.
+	//
+	// Each batch gets its own game-thread dispatch so the thread returns to the main loop in
+	// between and the editor actually renders a frame. Looping all 161 levels inside a SINGLE
+	// dispatch (as this did originally) rendered ZERO frames for ~80s, so 161 levels' worth of
+	// Nanite/render registration queued up and the first frame afterwards processed the entire
+	// backlog at once - reserved GPU VA hit 258 GB against a 256 GB budget and the D3D12 device
+	// was removed, killing the editor ~5-7s after this pass logged success (reproduced 4/4).
+	// The deep-index pass above has always dispatched per batch, which is exactly why it never
+	// hit this despite loading far more assets. See LevelIndexer.cpp's header comment.
 	if (!CheckCancellation())
 	{
 		Owner->IndexingStatusMessage = TEXT("Indexing level actors...");
@@ -1004,22 +1013,72 @@ uint32 UMonolithIndexSubsystem::FIndexingTask::Run()
 			double SentinelStart = FPlatformTime::Seconds();
 			UE_LOG(LogMonolithIndex, Log, TEXT("Running level indexer..."));
 			TSharedPtr<IMonolithIndexer> LevelIndexerCopy = *LevelIndexer;
-			if (FLevelIndexer* LevelRaw = static_cast<FLevelIndexer*>(LevelIndexerCopy.Get()))
+			FLevelIndexer* LevelRaw = static_cast<FLevelIndexer*>(LevelIndexerCopy.Get());
+			if (LevelRaw)
 			{
 				LevelRaw->SetIndexedPaths(IndexedPaths);
+
+				auto RunOnGameThreadBlocking = [](TFunction<void()>&& Work)
+				{
+					FEvent* Event = FPlatformProcess::GetSynchEventFromPool(true);
+					FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(MoveTemp(Work), Event);
+					Event->Wait();
+					FPlatformProcess::ReturnSynchEventToPool(Event);
+				};
+
+				// GatherWorldAssets MUST run on the game thread - IAssetRegistry::GetAssets asserts
+				// IsInGameThread() ("Enumerating in-memory assets can only be done on the game
+				// thread"). We are on the MonolithIndexing worker here, so dispatch it. Writing to
+				// WorldAssets by reference is safe because RunOnGameThreadBlocking waits.
+				TArray<FAssetData> WorldAssets;
+				RunOnGameThreadBlocking([LevelIndexerCopy, LevelRaw, &WorldAssets]()
+				{
+					WorldAssets = LevelRaw->GatherWorldAssets();
+					LevelRaw->BeginPass();
+				});
+
+				const int32 LevelBatchSize = FMath::Max(1, FMonolithMemoryHelper::GetResolvedPostPassBatchSize());
+				const int32 TotalWorlds = WorldAssets.Num();
+
+				UE_LOG(LogMonolithIndex, Log,
+					TEXT("LevelIndexer: Found %d World assets to index (batch size: %d)"),
+					TotalWorlds, LevelBatchSize);
+
+				int32 BatchNumber = 0;
+				for (int32 BatchStart = 0; BatchStart < TotalWorlds && !CheckCancellation(); BatchStart += LevelBatchSize)
+				{
+					const int32 BatchEnd = FMath::Min(BatchStart + LevelBatchSize, TotalWorlds);
+
+					TArray<FAssetData> BatchSlice;
+					BatchSlice.Reserve(BatchEnd - BatchStart);
+					for (int32 j = BatchStart; j < BatchEnd; ++j)
+					{
+						BatchSlice.Add(WorldAssets[j]);
+					}
+
+					RunOnGameThreadBlocking(
+						[DB, LevelIndexerCopy, LevelRaw, BatchSlice = MoveTemp(BatchSlice)]()
+					{
+						DB->BeginTransaction();
+						LevelRaw->IndexWorldBatch(BatchSlice, *DB);
+						DB->CommitTransaction();
+					});
+
+					++BatchNumber;
+					if (BatchNumber % 5 == 0 || BatchEnd == TotalWorlds)
+					{
+						UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: processed %d / %d levels"),
+							LevelRaw->GetLevelsProcessed(), TotalWorlds);
+						if (Owner->TaskNotification)
+						{
+							Owner->TaskNotification->SetProgressText(FText::FromString(FString::Printf(
+								TEXT("Indexing level actors %d / %d..."), BatchEnd, TotalWorlds)));
+						}
+					}
+				}
+
+				RunOnGameThreadBlocking([LevelIndexerCopy, LevelRaw]() { LevelRaw->FinishPass(); });
 			}
-			FEvent* LevelEvent = FPlatformProcess::GetSynchEventFromPool(true);
-			FMonolithCompilerSafeDispatch::RunOnGameThreadWhenCompilerIdle(
-				[DB, LevelIndexerCopy]()
-			{
-				DB->BeginTransaction();
-				FAssetData DummyData;
-				LevelIndexerCopy->IndexAsset(DummyData, nullptr, *DB, 0);
-				DB->CommitTransaction();
-			},
-			LevelEvent);
-			LevelEvent->Wait();
-			FPlatformProcess::ReturnSynchEventToPool(LevelEvent);
 			UE_LOG(LogMonolithIndex, Log, TEXT("Level indexer completed in %.2fs"), FPlatformTime::Seconds() - SentinelStart);
 			GCBetweenIndexers();
 		}

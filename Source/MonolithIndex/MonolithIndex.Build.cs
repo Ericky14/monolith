@@ -35,6 +35,8 @@ public class MonolithIndex : ModuleRules
 			"EnhancedInput",
 			"InputBlueprintNodes", // UK2Node_EnhancedInputAction - input handler indexing
 			"InputCore",           // FKey::GetFName - key names in the binding index
+			"RenderCore",          // FlushRenderingCommands - drain deferred RHI deletes in the level pass
+			"RHI",                 // GRHIGlobals.ReservedResources.VirtualSize - the reserved-VA gauge
 			"Projects"
 		});
 
