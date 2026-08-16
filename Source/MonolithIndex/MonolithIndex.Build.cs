@@ -33,6 +33,8 @@ public class MonolithIndex : ModuleRules
 			"GameplayTags",
 			"GameplayAbilities",
 			"EnhancedInput",
+			"InputBlueprintNodes", // UK2Node_EnhancedInputAction - input handler indexing
+			"InputCore",           // FKey::GetFName - key names in the binding index
 			"Projects"
 		});
 

@@ -21,4 +21,7 @@ public:
 private:
 	void IndexGraph(class UEdGraph* Graph, FMonolithIndexDatabase& DB, int64 AssetId);
 	void IndexVariables(class UBlueprint* Blueprint, FMonolithIndexDatabase& DB, int64 AssetId);
+
+	/** Record the non-empty literals on a node's INPUT pins (string, text and object forms). */
+	void IndexPinDefaults(class UEdGraphNode* Node, FMonolithIndexDatabase& DB, int64 NodeId);
 };

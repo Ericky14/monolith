@@ -2,6 +2,8 @@
 #include "MonolithIndexDatabase.h"
 #include "MonolithToolRegistry.h"
 #include "Actions/ProjectSearchAction.h"
+#include "Actions/ProjectFindCallersAction.h"
+#include "Actions/ProjectFindInputHandlerAction.h"
 #include "Actions/ProjectFindReferencesAction.h"
 #include "Actions/ProjectFindByTypeAction.h"
 #include "Actions/ProjectGetStatsAction.h"
@@ -25,6 +27,16 @@ void FMonolithIndexModule::StartupModule()
 		FProjectSearchAction::GetDescription(),
 		FMonolithActionHandler::CreateStatic(&FProjectSearchAction::Execute),
 		FProjectSearchAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectFindCallersAction::GetName(),
+		FProjectFindCallersAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectFindCallersAction::Execute),
+		FProjectFindCallersAction::GetSchema());
+
+	Registry.RegisterAction(TEXT("project"), FProjectFindInputHandlerAction::GetName(),
+		FProjectFindInputHandlerAction::GetDescription(),
+		FMonolithActionHandler::CreateStatic(&FProjectFindInputHandlerAction::Execute),
+		FProjectFindInputHandlerAction::GetSchema());
 
 	Registry.RegisterAction(TEXT("project"), FProjectFindReferencesAction::GetName(),
 		FProjectFindReferencesAction::GetDescription(),

@@ -24,11 +24,34 @@ struct FIndexedNode
 	int64 Id = 0;
 	int64 AssetId = 0;
 	FString NodeType;
-	FString NodeName;
+	FString NodeName;   // display TITLE - not a join key; see CallTarget
 	FString NodeClass;
 	FString Properties; // JSON blob
 	int32 PosX = 0;
 	int32 PosY = 0;
+	FString GraphName;      // owning graph, so a hit is addressable
+	FString NodeObjectName; // UEdGraphNode::GetName() - the id blueprint actions accept
+	FString CallTarget;     // called function name for call nodes; drives the caller lookup
+};
+
+/** One key -> InputAction mapping harvested from a UInputMappingContext. */
+struct FIndexedInputBinding
+{
+	int64 Id = 0;
+	int64 ContextAssetId = 0;
+	FString KeyName;
+	FString ActionName;
+	FString ActionPath;
+	FString Triggers;
+};
+
+/** A non-empty literal wired into an input pin (string, text or object - all flattened). */
+struct FIndexedPinDefault
+{
+	int64 NodeId = 0;
+	FString PinName;
+	FString ValueKind; // string | text | object
+	FString ValueText;
 };
 
 struct FIndexedConnection
@@ -135,6 +158,35 @@ struct FSearchResult
 	FString ModuleName;
 	FString MatchContext; // snippet around the match
 	float Rank = 0.0f;
+	// Node-level hits carry their address so a result is directly actionable: without these,
+	// "asset X mentions Y" always needed a second round-trip to locate the actual node.
+	FString GraphName;
+	FString NodeObjectName;
+	FString NodeClass;
+};
+
+/** One row of "who calls this function" - a call site with its address. */
+struct FCallSite
+{
+	FString AssetPath;
+	FString AssetName;
+	FString GraphName;
+	FString NodeObjectName;
+	FString NodeTitle;
+	FString CallTarget;
+};
+
+/** key -> action -> the Blueprint graph node that handles it. */
+struct FInputHandlerResult
+{
+	FString KeyName;
+	FString ActionName;
+	FString ActionPath;
+	FString ContextAssetPath; // the InputMappingContext the binding came from
+	FString HandlerAssetPath; // Blueprint containing the input event node (empty if none found)
+	FString HandlerGraphName;
+	FString HandlerNodeObjectName;
+	FString HandlerNodeTitle;
 };
 
 /**
@@ -180,6 +232,12 @@ public:
 
 	// --- Connection CRUD ---
 	int64 InsertConnection(const FIndexedConnection& Conn);
+
+	/** Insert one key->action mapping harvested from an InputMappingContext. */
+	int64 InsertInputBinding(const FIndexedInputBinding& Binding);
+
+	/** Insert one non-empty pin literal. Node must already be inserted. */
+	int64 InsertPinDefault(const FIndexedPinDefault& PinDefault);
 	TArray<FIndexedConnection> GetConnectionsForAsset(int64 AssetId);
 
 	// --- Variable CRUD ---
@@ -217,6 +275,19 @@ public:
 
 	// --- FTS5 Search ---
 	TArray<FSearchResult> FullTextSearch(const FString& Query, int32 Limit = 50);
+
+	/**
+	 * Every call site of FunctionName. Indexed on nodes.call_target, so this is a direct lookup
+	 * rather than a project-wide text crawl - and it answers the question that actually matters
+	 * when tracing behaviour ("what runs this?") instead of "what mentions this word".
+	 */
+	TArray<FCallSite> FindCallers(const FString& FunctionName, int32 Limit = 50);
+
+	/**
+	 * What a key runs: the binding(s) for KeyName and, where one exists, the Blueprint input-event
+	 * node handling that action. KeyName is matched case-insensitively ("e" == "E").
+	 */
+	TArray<FInputHandlerResult> FindInputHandlers(const FString& KeyName, int32 Limit = 50);
 
 	// --- Stats ---
 	TSharedPtr<FJsonObject> GetStats();

@@ -1,6 +1,7 @@
 #include "MonolithIndexDatabase.h"
 #include "SQLiteDatabase.h"
 #include "Misc/Paths.h"
+#include "Misc/PackageName.h"
 #include "HAL/PlatformFileManager.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
@@ -28,7 +29,11 @@ CREATE TABLE IF NOT EXISTS assets (
 CREATE INDEX IF NOT EXISTS idx_assets_class ON assets(asset_class);
 CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(asset_name);
 
--- Graph nodes (Blueprint nodes, Material expressions, Niagara modules, etc.)
+-- Graph nodes. graph_name/node_object_name make a hit addressable. call_target is the CALLED
+-- function (node_name is the display title, not a join key). See the v3 migration block.
+-- NOTE keep semicolon characters out of these comments entirely. CreateTables splits this blob
+-- on that character with no awareness of comments or quoting, so one in a comment becomes a
+-- bogus trailing statement that fails and logs as a schema error.
 CREATE TABLE IF NOT EXISTS nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
@@ -37,10 +42,19 @@ CREATE TABLE IF NOT EXISTS nodes (
     node_class TEXT DEFAULT '',
     properties TEXT DEFAULT '{}',
     pos_x INTEGER DEFAULT 0,
-    pos_y INTEGER DEFAULT 0
+    pos_y INTEGER DEFAULT 0,
+    graph_name TEXT DEFAULT '',
+    node_object_name TEXT DEFAULT '',
+    call_target TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_asset ON nodes(asset_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_class ON nodes(node_class);
+-- Indexes on the v3 columns live in Open(), AFTER the migration that adds them. Creating them
+-- here fails on a pre-v3 database, because this blob runs before any ALTER TABLE.
+
+-- NOTE input_bindings and pin_defaults are created in Open() rather than here, and new tables
+-- should go there too. MSVC caps a TEXT() literal near 8190 wide chars and TRUNCATES past it,
+-- which would drop schema silently. The Open() block also covers pre-existing databases.
 
 -- Pin connections between nodes
 CREATE TABLE IF NOT EXISTS connections (
@@ -101,6 +115,13 @@ CREATE TABLE IF NOT EXISTS actors (
 );
 CREATE INDEX IF NOT EXISTS idx_actors_asset ON actors(asset_id);
 CREATE INDEX IF NOT EXISTS idx_actors_class ON actors(actor_class);
+
+)SQL");
+
+// Part 2. The schema is split across two literals because MSVC caps a single TEXT() (wide) string
+// at ~8190 characters and silently TRUNCATES past it (C2026) - which would drop whole tables from
+// a fresh database while the editor still starts normally. Keep both halves comfortably short.
+static const TCHAR* GCreateTablesSQL2 = TEXT(R"SQL(
 
 -- Gameplay tags
 CREATE TABLE IF NOT EXISTS tags (
@@ -297,8 +318,46 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 		}
 	}
 
+	// Schema migration: v2 -> v3 (node addressing + input bindings + pin defaults)
+	//
+	// ALTER TABLE ADD COLUMN is used rather than a rebuild so an existing multi-thousand-asset
+	// index survives the upgrade; the new columns simply read empty until the next reindex, and
+	// every consumer treats empty as "not indexed yet" rather than "no match".
+	{
+		const FString SchemaVersion = ReadMeta(TEXT("schema_version"));
+		if (SchemaVersion.IsEmpty() || FCString::Atoi(*SchemaVersion) < 3)
+		{
+			TSet<FString> NodeColumns;
+			FSQLitePreparedStatement PragmaStmt;
+			if (PragmaStmt.Create(*Database, TEXT("PRAGMA table_info(nodes);"), ESQLitePreparedStatementFlags::Persistent))
+			{
+				while (PragmaStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+				{
+					FString ColName;
+					PragmaStmt.GetColumnValueByIndex(1, ColName);
+					NodeColumns.Add(ColName);
+				}
+			}
+			if (!NodeColumns.Contains(TEXT("graph_name")))
+			{
+				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN graph_name TEXT DEFAULT '';"));
+			}
+			if (!NodeColumns.Contains(TEXT("node_object_name")))
+			{
+				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN node_object_name TEXT DEFAULT '';"));
+			}
+			if (!NodeColumns.Contains(TEXT("call_target")))
+			{
+				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN call_target TEXT DEFAULT '';"));
+			}
+			WriteMeta(TEXT("schema_version"), TEXT("3"));
+		}
+	}
+
 	// Ensure hash index exists (safe for both fresh and migrated DBs)
 	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(saved_hash);"));
+	// v3 tables + their indexes are created in CreateTables(), which runs from BOTH Open() and
+	// ResetDatabase() - see the note there.
 
 	UE_LOG(LogMonolithIndex, Log, TEXT("Index database opened: %s"), *DbPath);
 	return true;
@@ -343,6 +402,10 @@ bool FMonolithIndexDatabase::ResetDatabase()
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS configs;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS cpp_symbols;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS datatable_rows;"));
+	// Must be listed here or a force-reindex leaves the old rows behind and every subsequent
+	// index run APPENDS duplicates - a silent corruption that looks like "too many results".
+	ExecuteSQL(TEXT("DROP TABLE IF EXISTS input_bindings;"));
+	ExecuteSQL(TEXT("DROP TABLE IF EXISTS pin_defaults;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS meta;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS assets;"));
 
@@ -449,7 +512,15 @@ int64 FMonolithIndexDatabase::InsertNode(const FIndexedNode& Node)
 	if (!IsOpen()) return -1;
 
 	FSQLitePreparedStatement Stmt;
-	Stmt.Create(*Database, TEXT("INSERT INTO nodes (asset_id, node_type, node_name, node_class, properties, pos_x, pos_y) VALUES (?, ?, ?, ?, ?, ?, ?);"));
+	// Create() FAILS if the table is missing or the column list is wrong - and binding to a failed
+	// statement asserts, taking the whole editor down mid-index (observed: a malformed schema
+	// comment stopped `nodes` being created, and the first InsertNode crashed the editor). A
+	// missing table must degrade to "indexed nothing", never to a crash.
+	if (!Stmt.Create(*Database, TEXT("INSERT INTO nodes (asset_id, node_type, node_name, node_class, properties, pos_x, pos_y, graph_name, node_object_name, call_target) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);")))
+	{
+		UE_LOG(LogMonolithIndex, Warning, TEXT("InsertNode: statement creation failed (schema out of date?) - node not indexed"));
+		return -1;
+	}
 	Stmt.SetBindingValueByIndex(1, Node.AssetId);
 	Stmt.SetBindingValueByIndex(2, Node.NodeType);
 	Stmt.SetBindingValueByIndex(3, Node.NodeName);
@@ -457,6 +528,48 @@ int64 FMonolithIndexDatabase::InsertNode(const FIndexedNode& Node)
 	Stmt.SetBindingValueByIndex(5, Node.Properties);
 	Stmt.SetBindingValueByIndex(6, static_cast<int64>(Node.PosX));
 	Stmt.SetBindingValueByIndex(7, static_cast<int64>(Node.PosY));
+	Stmt.SetBindingValueByIndex(8, Node.GraphName);
+	Stmt.SetBindingValueByIndex(9, Node.NodeObjectName);
+	Stmt.SetBindingValueByIndex(10, Node.CallTarget);
+
+	if (!Stmt.Execute()) return -1;
+	return Database->GetLastInsertRowId();
+}
+
+int64 FMonolithIndexDatabase::InsertInputBinding(const FIndexedInputBinding& Binding)
+{
+	if (!IsOpen()) return -1;
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(*Database, TEXT("INSERT INTO input_bindings (context_asset_id, key_name, action_name, action_path, triggers) VALUES (?, ?, ?, ?, ?);")))
+	{
+		UE_LOG(LogMonolithIndex, Warning, TEXT("InsertInputBinding: statement creation failed - binding not indexed"));
+		return -1;
+	}
+	Stmt.SetBindingValueByIndex(1, Binding.ContextAssetId);
+	Stmt.SetBindingValueByIndex(2, Binding.KeyName);
+	Stmt.SetBindingValueByIndex(3, Binding.ActionName);
+	Stmt.SetBindingValueByIndex(4, Binding.ActionPath);
+	Stmt.SetBindingValueByIndex(5, Binding.Triggers);
+
+	if (!Stmt.Execute()) return -1;
+	return Database->GetLastInsertRowId();
+}
+
+int64 FMonolithIndexDatabase::InsertPinDefault(const FIndexedPinDefault& PinDefault)
+{
+	if (!IsOpen()) return -1;
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(*Database, TEXT("INSERT INTO pin_defaults (node_id, pin_name, value_kind, value_text) VALUES (?, ?, ?, ?);")))
+	{
+		UE_LOG(LogMonolithIndex, Warning, TEXT("InsertPinDefault: statement creation failed - pin default not indexed"));
+		return -1;
+	}
+	Stmt.SetBindingValueByIndex(1, PinDefault.NodeId);
+	Stmt.SetBindingValueByIndex(2, PinDefault.PinName);
+	Stmt.SetBindingValueByIndex(3, PinDefault.ValueKind);
+	Stmt.SetBindingValueByIndex(4, PinDefault.ValueText);
 
 	if (!Stmt.Execute()) return -1;
 	return Database->GetLastInsertRowId();
@@ -1043,9 +1156,11 @@ TArray<FSearchResult> FMonolithIndexDatabase::FullTextSearch(const FString& Quer
 		Results.Add(MoveTemp(R));
 	}
 
-	// Also search nodes FTS
+	// Also search nodes FTS. The graph/node columns ride along so a node hit is addressable:
+	// callers get "asset + graph + node id" and can act on it directly instead of running a
+	// second lookup to find where in the asset the match actually lives.
 	FString NodeSQL = FString::Printf(
-		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT %d;"),
+		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank, n.graph_name, n.node_object_name, n.node_class FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT %d;"),
 		Limit
 	);
 
@@ -1064,6 +1179,9 @@ TArray<FSearchResult> FMonolithIndexDatabase::FullTextSearch(const FString& Quer
 		double RankD = 0.0;
 		Stmt2.GetColumnValueByIndex(5, RankD);
 		R.Rank = static_cast<float>(RankD);
+		Stmt2.GetColumnValueByIndex(6, R.GraphName);
+		Stmt2.GetColumnValueByIndex(7, R.NodeObjectName);
+		Stmt2.GetColumnValueByIndex(8, R.NodeClass);
 		Results.Add(MoveTemp(R));
 	}
 
@@ -1073,6 +1191,84 @@ TArray<FSearchResult> FMonolithIndexDatabase::FullTextSearch(const FString& Quer
 	if (Results.Num() > Limit)
 	{
 		Results.SetNum(Limit);
+	}
+
+	return Results;
+}
+
+TArray<FCallSite> FMonolithIndexDatabase::FindCallers(const FString& FunctionName, int32 Limit)
+{
+	TArray<FCallSite> Results;
+	if (!IsOpen()) return Results;
+
+	// Exact match on the indexed call_target: a call site either targets this function or it does
+	// not. Substring matching here would drag in every similarly-named function and reintroduce
+	// the guesswork this table exists to remove.
+	const FString SQL = FString::Printf(
+		TEXT("SELECT a.package_path, a.asset_name, n.graph_name, n.node_object_name, n.node_name, n.call_target ")
+		TEXT("FROM nodes n JOIN assets a ON a.id = n.asset_id ")
+		TEXT("WHERE n.call_target = ? COLLATE NOCASE ORDER BY a.asset_name LIMIT %d;"),
+		Limit
+	);
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, *SQL);
+	Stmt.SetBindingValueByIndex(1, FunctionName);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FCallSite Site;
+		Stmt.GetColumnValueByIndex(0, Site.AssetPath);
+		Stmt.GetColumnValueByIndex(1, Site.AssetName);
+		Stmt.GetColumnValueByIndex(2, Site.GraphName);
+		Stmt.GetColumnValueByIndex(3, Site.NodeObjectName);
+		Stmt.GetColumnValueByIndex(4, Site.NodeTitle);
+		Stmt.GetColumnValueByIndex(5, Site.CallTarget);
+		Results.Add(MoveTemp(Site));
+	}
+
+	return Results;
+}
+
+TArray<FInputHandlerResult> FMonolithIndexDatabase::FindInputHandlers(const FString& KeyName, int32 Limit)
+{
+	TArray<FInputHandlerResult> Results;
+	if (!IsOpen()) return Results;
+
+	// LEFT JOIN, deliberately: a binding with no handler node is a real and useful answer ("the
+	// key is bound but nothing implements it"). An INNER JOIN would report that case as "key not
+	// bound at all", which is a different — and misleading — conclusion.
+	//
+	// Handler match is on the input event node's indexed call_target, which the Blueprint indexer
+	// fills with the referenced InputAction's name for Enhanced Input event nodes.
+	const FString SQL = FString::Printf(
+		TEXT("SELECT b.key_name, b.action_name, b.action_path, ctx.package_path, ")
+		TEXT("       COALESCE(ha.package_path, ''), COALESCE(hn.graph_name, ''), ")
+		TEXT("       COALESCE(hn.node_object_name, ''), COALESCE(hn.node_name, '') ")
+		TEXT("FROM input_bindings b ")
+		TEXT("JOIN assets ctx ON ctx.id = b.context_asset_id ")
+		TEXT("LEFT JOIN nodes hn ON hn.node_type = 'InputEvent' AND hn.call_target = b.action_name COLLATE NOCASE ")
+		TEXT("LEFT JOIN assets ha ON ha.id = hn.asset_id ")
+		TEXT("WHERE b.key_name = ? COLLATE NOCASE ORDER BY b.action_name LIMIT %d;"),
+		Limit
+	);
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, *SQL);
+	Stmt.SetBindingValueByIndex(1, KeyName);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FInputHandlerResult R;
+		Stmt.GetColumnValueByIndex(0, R.KeyName);
+		Stmt.GetColumnValueByIndex(1, R.ActionName);
+		Stmt.GetColumnValueByIndex(2, R.ActionPath);
+		Stmt.GetColumnValueByIndex(3, R.ContextAssetPath);
+		Stmt.GetColumnValueByIndex(4, R.HandlerAssetPath);
+		Stmt.GetColumnValueByIndex(5, R.HandlerGraphName);
+		Stmt.GetColumnValueByIndex(6, R.HandlerNodeObjectName);
+		Stmt.GetColumnValueByIndex(7, R.HandlerNodeTitle);
+		Results.Add(MoveTemp(R));
 	}
 
 	return Results;
@@ -1112,6 +1308,47 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 	Stats->SetNumberField(TEXT("configs"), GetCount(TEXT("configs")));
 	Stats->SetNumberField(TEXT("cpp_symbols"), GetCount(TEXT("cpp_symbols")));
 	Stats->SetNumberField(TEXT("datatable_rows"), GetCount(TEXT("datatable_rows")));
+	Stats->SetNumberField(TEXT("input_bindings"), GetCount(TEXT("input_bindings")));
+	Stats->SetNumberField(TEXT("pin_defaults"), GetCount(TEXT("pin_defaults")));
+
+	// --- Freshness ------------------------------------------------------------------------
+	// An index that silently lags the project turns every "no results" into a possible lie. These
+	// fields let a caller weigh a negative answer: when the index was built, and how many indexed
+	// assets have since changed on disk. Cheap: one indexed scan over stored timestamps.
+	Stats->SetStringField(TEXT("indexed_at"), ReadMeta(TEXT("last_index_time")));
+	Stats->SetNumberField(TEXT("schema_version"), FCString::Atoi(*ReadMeta(TEXT("schema_version"))));
+	{
+		int64 StaleCount = 0;
+		FSQLitePreparedStatement StaleStmt;
+		StaleStmt.Create(*Database, TEXT("SELECT package_path, last_modified FROM assets;"));
+		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+		while (StaleStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+		{
+			FString PackagePath;
+			int64 IndexedModified = 0;
+			StaleStmt.GetColumnValueByIndex(0, PackagePath);
+			StaleStmt.GetColumnValueByIndex(1, IndexedModified);
+
+			FString Filename;
+			if (!FPackageName::DoesPackageExist(PackagePath, &Filename))
+			{
+				continue; // package gone or not on disk (transient/in-memory) - not "stale"
+			}
+			const FDateTime DiskStamp = PlatformFile.GetTimeStamp(*Filename);
+			if (DiskStamp != FDateTime::MinValue() && DiskStamp.ToUnixTimestamp() > IndexedModified)
+			{
+				++StaleCount;
+			}
+		}
+		Stats->SetNumberField(TEXT("stale_assets"), StaleCount);
+		Stats->SetBoolField(TEXT("is_stale"), StaleCount > 0);
+		if (StaleCount > 0)
+		{
+			Stats->SetStringField(TEXT("staleness_note"),
+				TEXT("Assets have changed on disk since indexing; a 'no results' answer may be out of ")
+				TEXT("date. Re-run project.reindex before concluding something does not exist."));
+		}
+	}
 
 	// Asset class breakdown
 	auto ClassBreakdown = MakeShared<FJsonObject>();
@@ -1332,6 +1569,7 @@ bool FMonolithIndexDatabase::CreateTables()
 	// FSQLiteDatabase::Execute() only handles one statement at a time,
 	// so we split and execute each individually.
 	FString FullSQL(GCreateTablesSQL);
+	FullSQL += GCreateTablesSQL2; // schema is split across two literals - see the note on part 2
 	TArray<FString> Statements;
 
 	// Split on semicolons, tracking BEGIN/END depth for trigger bodies
@@ -1392,7 +1630,48 @@ bool FMonolithIndexDatabase::CreateTables()
 		UE_LOG(LogMonolithIndex, Warning, TEXT("Some schema statements failed -- FTS5 may not be available in this SQLite build"));
 	}
 
-	return true; // Return true even if FTS fails -- basic tables should work
+	// v3 tables. They live HERE rather than in the schema blob (which is at the MSVC literal size
+	// cap) and specifically NOT only in Open(): ResetDatabase() drops every table and then calls
+	// CreateTables(), so anything created solely in Open() would be dropped by a force-reindex and
+	// never recreated - leaving the whole run writing into tables that no longer exist.
+	ExecuteSQL(TEXT("CREATE TABLE IF NOT EXISTS input_bindings (id INTEGER PRIMARY KEY AUTOINCREMENT, context_asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE, key_name TEXT NOT NULL, action_name TEXT NOT NULL, action_path TEXT DEFAULT '', triggers TEXT DEFAULT '');"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_input_key ON input_bindings(key_name);"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_input_action ON input_bindings(action_name);"));
+	ExecuteSQL(TEXT("CREATE TABLE IF NOT EXISTS pin_defaults (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, pin_name TEXT NOT NULL, value_kind TEXT DEFAULT 'string', value_text TEXT DEFAULT '');"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_pin_defaults_node ON pin_defaults(node_id);"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_pin_defaults_value ON pin_defaults(value_text);"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_nodes_call_target ON nodes(call_target);"));
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_nodes_graph ON nodes(graph_name);"));
+
+	// A missing CORE table is not survivable: indexing would then bind against statements that
+	// cannot be prepared, which asserts and kills the editor mid-index. Verifying the core set
+	// here converts that crash into one loud, actionable log line at startup. (FTS and optional
+	// tables are deliberately not in this list - the index still works without them.)
+	{
+		static const TCHAR* RequiredTables[] = {
+			TEXT("assets"), TEXT("nodes"), TEXT("connections"), TEXT("variables"), TEXT("meta"),
+			TEXT("input_bindings"), TEXT("pin_defaults")
+		};
+		for (const TCHAR* Table : RequiredTables)
+		{
+			FSQLitePreparedStatement CheckStmt;
+			if (!CheckStmt.Create(*Database, TEXT("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;")))
+			{
+				continue;
+			}
+			CheckStmt.SetBindingValueByIndex(1, FString(Table));
+			if (CheckStmt.Step() != ESQLitePreparedStatementStepResult::Row)
+			{
+				UE_LOG(LogMonolithIndex, Error,
+					TEXT("Index schema is BROKEN: required table '%s' was not created. Indexing is disabled ")
+					TEXT("to avoid crashing the editor. This usually means a malformed statement in the ")
+					TEXT("schema blob (note: it is split on ';' with no comment/quote awareness)."), Table);
+				return false;
+			}
+		}
+	}
+
+	return true; // FTS failures alone are tolerable -- the core tables above are not
 }
 
 bool FMonolithIndexDatabase::ExecuteSQL(const FString& SQL)

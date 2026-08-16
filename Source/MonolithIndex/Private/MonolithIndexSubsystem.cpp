@@ -30,6 +30,7 @@
 #include "Indexers/UserDefinedEnumIndexer.h"
 #include "Indexers/UserDefinedStructIndexer.h"
 #include "Indexers/InputActionIndexer.h"
+#include "Indexers/InputContextIndexer.h"
 #include "Indexers/DataAssetIndexer.h"
 #include "Indexers/MeshCatalogIndexer.h"
 #include "Indexers/GASIndexer.h"
@@ -301,7 +302,12 @@ void UMonolithIndexSubsystem::RegisterDefaultIndexers()
 	if (Settings->bIndexUserDefinedStructs)
 		RegisterIndexer(MakeShared<FUserDefinedStructIndexer>());
 	if (Settings->bIndexInputActions)
+	{
 		RegisterIndexer(MakeShared<FInputActionIndexer>());
+		// Shares the InputActions toggle: an InputAction index without its key bindings answers
+		// "what actions exist" but not "what does this key do", which is the useful question.
+		RegisterIndexer(MakeShared<FInputContextIndexer>());
+	}
 	if (Settings->bIndexDataAssets)
 		RegisterIndexer(MakeShared<FDataAssetIndexer>());
 	if (Settings->bIndexMeshCatalog)
@@ -373,6 +379,18 @@ TArray<FSearchResult> UMonolithIndexSubsystem::Search(const FString& Query, int3
 {
 	if (!Database.IsValid() || !Database->IsOpen()) return {};
 	return Database->FullTextSearch(Query, Limit);
+}
+
+TArray<FCallSite> UMonolithIndexSubsystem::FindCallers(const FString& FunctionName, int32 Limit)
+{
+	if (!Database.IsValid() || !Database->IsOpen()) return {};
+	return Database->FindCallers(FunctionName, Limit);
+}
+
+TArray<FInputHandlerResult> UMonolithIndexSubsystem::FindInputHandlers(const FString& KeyName, int32 Limit)
+{
+	if (!Database.IsValid() || !Database->IsOpen()) return {};
+	return Database->FindInputHandlers(KeyName, Limit);
 }
 
 TSharedPtr<FJsonObject> UMonolithIndexSubsystem::FindReferences(const FString& PackagePath)
