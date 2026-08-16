@@ -12,6 +12,7 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "VoxelGraphTracker.h" // GVoxelGraphTracker->Flush(): synchronous re-translate after a pin edit
+#include "VoxelPinType.h"      // object-typed voxel pins live in DefaultObject, never DefaultValue
 #include "Editor.h"            // GEditor transactions
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -193,6 +194,9 @@ void FMonolithVoxelActions::RegisterActions()
 
     // Heightmap-data ground queries - see MonolithVoxelHeightQueryActions.cpp
     RegisterHeightQueryActions();
+
+    // Headless graph authoring - see MonolithVoxelGraphAuthorActions.cpp
+    RegisterGraphAuthorActions();
 }
 
 // --- Helpers ---
@@ -703,7 +707,16 @@ FMonolithActionResult FMonolithVoxelActions::HandleSetPinDefault(const TSharedPt
     // FJsonValueString::TryGetBool runs FString::ToBool - "50000000" comes back as true),
     // so type-probing with them turns every value into a bool. Strings pass through
     // verbatim for struct literals and enum names.
-    const bool bIsObjectPin = (Pin->DefaultObject != nullptr);
+    // Object detection MUST come from the pin's EXPOSED VALUE type, exactly as VP2's
+    // MakeFromPinDefaultValue derives it: FVoxelPinType(PinType).GetPinDefaultValueType().
+    // The raw pin type is NOT enough - FVoxelHeightmapRef reports as a Struct pin, but
+    // its default-value type is an OBJECT, stored ONLY in Pin->DefaultObject. A string
+    // default on such a pin trips ensure(!IsObject()) in InitializeFromPinDefaultValue
+    // and the value silently breaks (a fresh pin's DefaultObject is null, so probing
+    // the current DefaultObject is equally wrong).
+    const FVoxelPinType DefaultValueType = FVoxelPinType(Pin->PinType).GetPinDefaultValueType();
+    const bool bIsObjectPin = DefaultValueType.IsValid() &&
+                              (DefaultValueType.IsObject() || DefaultValueType.IsClass());
     const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
     if (!ValueField.IsValid() || ValueField->IsNull())
     {

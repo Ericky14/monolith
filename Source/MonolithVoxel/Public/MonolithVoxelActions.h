@@ -16,6 +16,10 @@ public:
     // Called from RegisterActions().
     static void RegisterHeightQueryActions();
 
+    // Headless voxel graph authoring (add_node/connect_pins/remove_node), defined in
+    // MonolithVoxelGraphAuthorActions.cpp. Called from RegisterActions().
+    static void RegisterGraphAuthorActions();
+
     // --- Graph Queries ---
     static FMonolithActionResult HandleGetGraphInfo(const TSharedPtr<FJsonObject> &Params);
     static FMonolithActionResult HandleListTerminalGraphs(const TSharedPtr<FJsonObject> &Params);

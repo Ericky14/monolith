@@ -22,6 +22,7 @@ public class MonolithVoxel : ModuleRules
             "Json",
             "JsonUtilities",
             "VoxelCore",
+            "VoxelCoreEditor", // FVoxelTransaction (headless graph authoring change tracking)
             "Voxel",
             "VoxelGraph",
             "VoxelGraphEditor"
