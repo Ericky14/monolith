@@ -12,7 +12,7 @@ void FMonolithVoxelModule::StartupModule()
         return;
 
     FMonolithVoxelActions::RegisterActions();
-    UE_LOG(LogMonolith, Log, TEXT("MonolithVoxel: registered 12 actions (7 inspect + 5 authoring)"));
+    UE_LOG(LogMonolith, Log, TEXT("MonolithVoxel: registered voxel namespace actions"));
 }
 
 void FMonolithVoxelModule::ShutdownModule()

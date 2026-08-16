@@ -24,4 +24,7 @@ public:
     static FMonolithActionResult HandleGetParameters(const TSharedPtr<FJsonObject> &Params);
     static FMonolithActionResult HandleSearchNodes(const TSharedPtr<FJsonObject> &Params);
     static FMonolithActionResult HandleGetNodeDetails(const TSharedPtr<FJsonObject> &Params);
+
+    // --- Graph Mutation ---
+    static FMonolithActionResult HandleSetPinDefault(const TSharedPtr<FJsonObject> &Params);
 };

@@ -10,6 +10,9 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "VoxelGraphTracker.h" // GVoxelGraphTracker->Flush(): synchronous re-translate after a pin edit
+#include "Editor.h"            // GEditor transactions
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -172,6 +175,17 @@ void FMonolithVoxelActions::RegisterActions()
                             FParamSchemaBuilder()
                                 .Required(TEXT("asset_path"), TEXT("string"), TEXT("Voxel graph asset path"))
                                 .Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID (from get_graph_data or search_nodes)"))
+                                .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("set_pin_default"),
+                            TEXT("Set the default value of an unconnected INPUT pin on a voxel graph node. Goes through the graph schema so VP2's change tracking re-translates/recompiles and placed stamps refresh (a raw DefaultValue write would be a silent no-op). Value: number, bool, or string (struct literals as UE literal strings, e.g. '(Min=(X=0),Max=(X=100))'; pins that currently hold a DefaultObject take an asset path). Marks the package dirty - follow with editor.save_packages."),
+                            FMonolithActionHandler::CreateStatic(&HandleSetPinDefault),
+                            FParamSchemaBuilder()
+                                .Required(TEXT("asset_path"), TEXT("string"), TEXT("Voxel graph asset path"))
+                                .Required(TEXT("node_id"), TEXT("string"), TEXT("Node ID (from get_graph_data or search_nodes)"))
+                                .Required(TEXT("pin"), TEXT("string"), TEXT("Pin name (or pin GUID id) on the node; input pins only"))
+                                .Required(TEXT("value"), TEXT("any"), TEXT("New default: number, bool, or string (struct literal / enum name / asset path)"))
+                                .Optional(TEXT("flush"), TEXT("boolean"), TEXT("Synchronously flush VP2's graph tracker so the re-translate happens before this call returns (default true). Leave true unless batching many edits."))
                                 .Build());
 
     // Phase 1 terrain-authoring (mutation) actions - see MonolithVoxelTerrainActions.cpp
@@ -609,5 +623,183 @@ FMonolithActionResult FMonolithVoxelActions::HandleGetNodeDetails(const TSharedP
     return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
 #else
     return FMonolithActionResult::Error(TEXT("Voxel graph inspection requires editor build"));
+#endif
+}
+
+// --- set_pin_default ---
+
+FMonolithActionResult FMonolithVoxelActions::HandleSetPinDefault(const TSharedPtr<FJsonObject> &Params)
+{
+#if WITH_EDITOR
+    FString AssetPath, AssetType;
+    UVoxelGraph *VoxelGraph = MonolithVoxelInternal::LoadVoxelGraph(Params, AssetPath, AssetType);
+    if (!VoxelGraph)
+    {
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Voxel graph not found: %s"), *AssetPath));
+    }
+
+    const FString NodeId = Params->GetStringField(TEXT("node_id"));
+    const FString PinRef = Params->GetStringField(TEXT("pin"));
+    if (NodeId.IsEmpty() || PinRef.IsEmpty())
+    {
+        return FMonolithActionResult::Error(TEXT("node_id and pin parameters are required"));
+    }
+
+    // Locate the node across all terminal graphs. node_id is UEdGraphNode::GetName(), the same
+    // convention get_graph_data/search_nodes/get_node_details report.
+    UEdGraphNode *Node = nullptr;
+    UVoxelTerminalGraph *OwnerTG = nullptr;
+    TVoxelSet<FGuid> Guids = VoxelGraph->GetTerminalGraphs();
+    for (const FGuid &Guid : Guids)
+    {
+        UVoxelTerminalGraph *TG = VoxelGraph->FindTerminalGraph(Guid);
+        if (!TG)
+            continue;
+        for (UEdGraphNode *Candidate : TG->GetEdGraph().Nodes)
+        {
+            if (Candidate && Candidate->GetName() == NodeId)
+            {
+                Node = Candidate;
+                OwnerTG = TG;
+                break;
+            }
+        }
+        if (Node)
+            break;
+    }
+    if (!Node)
+    {
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+    }
+
+    UEdGraphPin *Pin = nullptr;
+    for (UEdGraphPin *Candidate : Node->Pins)
+    {
+        if (Candidate && (Candidate->PinName.ToString() == PinRef || Candidate->PinId.ToString() == PinRef))
+        {
+            Pin = Candidate;
+            break;
+        }
+    }
+    if (!Pin)
+    {
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Pin not found on %s: %s"), *NodeId, *PinRef));
+    }
+    if (Pin->Direction != EGPD_Input)
+    {
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Pin %s is an output pin; defaults only exist on input pins"), *PinRef));
+    }
+    if (Pin->LinkedTo.Num() > 0)
+    {
+        // A connected pin's default is dead data, and VP2's struct-node PinDefaultValueChanged
+        // ensure()s on exactly this case - refuse rather than write a value that can never apply.
+        return FMonolithActionResult::Error(FString::Printf(
+            TEXT("Pin %s is connected (%d link(s)) - its default would be ignored. Disconnect it first."),
+            *PinRef, Pin->LinkedTo.Num()));
+    }
+
+    // JSON value -> pin default string. Dispatch on the value's ACTUAL JSON type: the
+    // TryGet*Field helpers all cross-coerce (TryGetBoolField accepts any number, and
+    // FJsonValueString::TryGetBool runs FString::ToBool - "50000000" comes back as true),
+    // so type-probing with them turns every value into a bool. Strings pass through
+    // verbatim for struct literals and enum names.
+    const bool bIsObjectPin = (Pin->DefaultObject != nullptr);
+    const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
+    if (!ValueField.IsValid() || ValueField->IsNull())
+    {
+        return FMonolithActionResult::Error(TEXT("value parameter is required"));
+    }
+    FString ValueStr;
+    switch (ValueField->Type)
+    {
+    case EJson::Boolean:
+        ValueStr = ValueField->AsBool() ? TEXT("true") : TEXT("false");
+        break;
+    case EJson::Number:
+    {
+        const double NumValue = ValueField->AsNumber();
+        // Integral values print without a fraction so integer pins parse them too.
+        if (FMath::IsFinite(NumValue) && FMath::FloorToDouble(NumValue) == NumValue && FMath::Abs(NumValue) < 1e15)
+        {
+            ValueStr = FString::Printf(TEXT("%lld"), static_cast<int64>(NumValue));
+        }
+        else
+        {
+            ValueStr = FString::Printf(TEXT("%f"), NumValue);
+        }
+        break;
+    }
+    case EJson::String:
+        ValueStr = ValueField->AsString();
+        break;
+    default:
+        return FMonolithActionResult::Error(TEXT("Unsupported value type - pass a number, bool, or string (struct literals as UE literal strings)"));
+    }
+
+    UObject *NewDefaultObj = nullptr;
+    if (bIsObjectPin)
+    {
+        NewDefaultObj = FMonolithAssetUtils::LoadAssetByPath<UObject>(ValueStr);
+        if (!NewDefaultObj)
+        {
+            return FMonolithActionResult::Error(FString::Printf(
+                TEXT("Pin %s holds a DefaultObject; value must be a loadable asset path (got: %s)"), *PinRef, *ValueStr));
+        }
+    }
+
+    const UEdGraphSchema *Schema = OwnerTG->GetEdGraph().GetSchema();
+    if (!Schema)
+    {
+        return FMonolithActionResult::Error(TEXT("Graph has no schema"));
+    }
+
+    const FString OldDefault = bIsObjectPin ? Pin->DefaultObject->GetPathName() : Pin->DefaultValue;
+
+    // The schema call is the load-bearing choice: it routes through PinDefaultValueChanged ->
+    // GVoxelGraphTracker, which queues the terminal graph's re-translate. A raw DefaultValue
+    // write would leave VP2's persisted serialized graph (what the compiler actually reads)
+    // stale - stored on disk, silently ignored at runtime.
+    if (GEditor)
+    {
+        GEditor->BeginTransaction(FText::FromString(TEXT("Monolith: set voxel graph pin default")));
+    }
+    OwnerTG->Modify();
+    Node->Modify();
+    Pin->Modify();
+    if (bIsObjectPin)
+    {
+        Schema->TrySetDefaultObject(*Pin, NewDefaultObj, true);
+    }
+    else
+    {
+        Schema->TrySetDefaultValue(*Pin, ValueStr, true);
+    }
+    if (GEditor)
+    {
+        GEditor->EndTransaction();
+    }
+    VoxelGraph->MarkPackageDirty();
+
+    // The tracker only executes its queued delegates on editor Tick. Flush now so the
+    // re-translate lands before any save that follows this call.
+    bool bFlush = true;
+    Params->TryGetBoolField(TEXT("flush"), bFlush);
+    if (bFlush && GVoxelGraphTracker)
+    {
+        GVoxelGraphTracker->Flush();
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("asset_path"), AssetPath);
+    Result->SetStringField(TEXT("node_id"), NodeId);
+    Result->SetStringField(TEXT("pin"), Pin->PinName.ToString());
+    Result->SetStringField(TEXT("terminal_graph"), OwnerTG->GetDisplayName());
+    Result->SetStringField(TEXT("old_default"), OldDefault);
+    Result->SetStringField(TEXT("new_default"), bIsObjectPin ? NewDefaultObj->GetPathName() : Pin->DefaultValue);
+    Result->SetBoolField(TEXT("translated"), bFlush);
+    Result->SetStringField(TEXT("note"), TEXT("Not saved to disk yet - use editor.save_packages."));
+    return FMonolithActionResult::Success(Result);
+#else
+    return FMonolithActionResult::Error(TEXT("Voxel graph editing requires editor build"));
 #endif
 }
