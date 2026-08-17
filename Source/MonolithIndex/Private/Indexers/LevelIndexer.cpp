@@ -10,6 +10,7 @@
 #include "GameFramework/WorldSettings.h"
 #include "EngineUtils.h"
 #include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
@@ -125,6 +126,8 @@ void FLevelIndexer::BeginPass()
 	LevelsProcessed = 0;
 	InstanceCounter = 0;
 	InitializedWorldCount = 0;
+	OriginTransformCount = 0;
+	TransformSampleCount = 0;
 	GPeakReservedVirtualBytes = 0;
 
 	if (GetDefault<UMonolithSettings>()->bLogMemoryStats)
@@ -346,6 +349,25 @@ void FLevelIndexer::FinishPass()
 	UE_LOG(LogMonolithIndex, Log, TEXT("LevelIndexer: indexed %d levels, %d actors total"),
 		LevelsProcessed, ActorsInserted);
 
+	// Transform-resolution canary. Actor placement is the whole point of the actor index, and a
+	// broken resolution path returns plausible-looking rows rather than an error, so gate on it.
+	if (TransformSampleCount > 0)
+	{
+		const double OriginPct = 100.0 * OriginTransformCount / TransformSampleCount;
+		if (OriginPct > 50.0)
+		{
+			UE_LOG(LogMonolithIndex, Warning,
+				TEXT("LevelIndexer: %.1f%% of actors indexed at the ORIGIN (%d/%d). Transforms are almost certainly unresolved - check that IndexActorsInLevel still calls UpdateComponentToWorld, because instanced loading leaves components unregistered and GetActorTransform() then returns identity."),
+				OriginPct, OriginTransformCount, TransformSampleCount);
+		}
+		else
+		{
+			UE_LOG(LogMonolithIndex, Log,
+				TEXT("LevelIndexer: actor transforms resolved (%.1f%% at origin, %d/%d)."),
+				OriginPct, OriginTransformCount, TransformSampleCount);
+		}
+	}
+
 	// Instanced-load canary. 0 is the healthy answer; anything else means render scenes were built.
 	if (InitializedWorldCount > 0)
 	{
@@ -393,12 +415,38 @@ int32 FLevelIndexer::IndexActorsInLevel(ULevel* Level, FMonolithIndexDatabase& D
 		// Skip the world settings and default brush - they're internal
 		if (Actor->IsA(AWorldSettings::StaticClass())) continue;
 
+		// Resolve the world transform WITHOUT initializing the world.
+		//
+		// We load worlds instanced on purpose (see IndexWorldBatch) so the editor never
+		// InitWorld's them - that is what stopped the GPU device removal. The side effect is
+		// that components are never REGISTERED, so ComponentToWorld is never computed and
+		// GetActorTransform() returns IDENTITY. Left unhandled that silently indexed every
+		// actor in the project at (0,0,0) - measured at 99.7% of rows - which looks like data
+		// but is not.
+		//
+		// USceneComponent::UpdateComponentToWorldWithParent has NO registration check and
+		// recursively resolves an unresolved attach parent before itself, so this recomputes
+		// the true world transform from the serialized relative transforms alone: no scene,
+		// no registration, no InitWorld, and correct for attached actors too.
+		if (USceneComponent* Root = Actor->GetRootComponent())
+		{
+			Root->UpdateComponentToWorld();
+		}
+
 		FIndexedActor IndexedActor;
 		IndexedActor.AssetId = AssetId;
 		IndexedActor.ActorName = Actor->GetName();
 		IndexedActor.ActorClass = Actor->GetClass()->GetName();
 		IndexedActor.ActorLabel = Actor->GetActorLabel();
 		IndexedActor.Transform = SerializeTransform(Actor->GetActorTransform());
+
+		// Canary. Actors legitimately sit at the origin, but a whole project's worth cannot -
+		// a high ratio means transform resolution regressed again and the placement data is junk.
+		if (Actor->GetActorLocation().IsNearlyZero())
+		{
+			++OriginTransformCount;
+		}
+		++TransformSampleCount;
 		IndexedActor.Components = SerializeComponents(Actor);
 
 		DB.InsertActor(IndexedActor);

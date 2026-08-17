@@ -80,4 +80,12 @@ private:
 	 * reserved-VA blow-up is back. Reported by FinishPass so the failure is a log line, not a crash.
 	 */
 	int32 InitializedWorldCount = 0;
+
+	/**
+	 * Transform-resolution canary. Instanced loading leaves components unregistered, so a missing
+	 * UpdateComponentToWorld silently indexes EVERY actor at the origin. Some actors really do sit
+	 * at (0,0,0); most of a project cannot. FinishPass warns if the ratio is implausible.
+	 */
+	int32 OriginTransformCount = 0;
+	int32 TransformSampleCount = 0;
 };
