@@ -42,6 +42,14 @@
 #include "Graphs/VoxelHeightGraphStamp_K2.h"  // UVoxelHeightGraphStamp_K2::Make
 #include "VoxelHeightLayer.h"                  // UVoxelHeightLayer        - VERIFY: path
 
+// Volume-graph stamp construction path (tunnels/caves - true 3D SDF carving):
+#include "Graphs/VoxelVolumeGraph.h"          // UVoxelVolumeGraph
+#include "Graphs/VoxelVolumeGraphStamp.h"     // FVoxelVolumeGraphStamp
+#include "Graphs/VoxelVolumeGraphStampRef.h"  // FVoxelVolumeGraphStampRef
+#include "Graphs/VoxelVolumeGraphStamp_K2.h"  // UVoxelVolumeGraphStamp_K2::Make
+#include "VoxelVolumeLayer.h"                  // UVoxelVolumeLayer
+#include "VoxelVolumeBlendMode.h"              // EVoxelVolumeBlendMode
+
 // Static-heightmap import + stamp path (Phase 2):
 #include "Engine/Texture2D.h"                          // UTexture2D, TSF_G16
 #include "Misc/FileHelper.h"                           // FFileHelper::LoadFileToArray
@@ -332,6 +340,124 @@ static FMonolithActionResult HandleAddHeightStamp(const TSharedPtr<FJsonObject>&
     Root->SetStringField(TEXT("actor"), StampActor->GetActorLabel());
     Root->SetStringField(TEXT("actor_name"), StampActor->GetName());
     Root->SetStringField(TEXT("graph"), Graph->GetPathName());
+    return FMonolithActionResult::Success(Root);
+#else
+    return FMonolithActionResult::Error(TEXT("Requires editor build"));
+#endif
+}
+
+// --- add_volume_stamp ---
+//
+// Volume stamps are how anything a heightfield cannot express gets carved: tunnels,
+// caves, overhangs. Subtractive blend = SmoothMax(Old, -New, Smoothness) - true SDF
+// difference, and unlike height/Override stamps the Smoothness IS live here.
+
+static FMonolithActionResult HandleAddVolumeStamp(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+    using namespace MonolithVoxelTerrainInternal;
+    UWorld* World = GetEditorWorld();
+    if (!World)
+        return FMonolithActionResult::Error(TEXT("No editor world"));
+
+    const FString GraphPath = Params->GetStringField(TEXT("graph_path"));
+    if (GraphPath.IsEmpty())
+        return FMonolithActionResult::Error(TEXT("graph_path is required (a UVoxelVolumeGraph)"));
+
+    UVoxelVolumeGraph* Graph = FMonolithAssetUtils::LoadAssetByPath<UVoxelVolumeGraph>(GraphPath);
+    if (!Graph)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Volume graph not found: %s"), *GraphPath));
+
+    const FString LayerPath = Params->GetStringField(TEXT("layer_path")).IsEmpty()
+        ? TEXT("/Voxel/Default/DefaultVolumeLayer.DefaultVolumeLayer") // path from the K2 Make meta
+        : Params->GetStringField(TEXT("layer_path"));
+    UVoxelVolumeLayer* Layer = FMonolithAssetUtils::LoadAssetByPath<UVoxelVolumeLayer>(LayerPath);
+    if (!Layer)
+        return FMonolithActionResult::Error(FString::Printf(TEXT("Volume layer not found: %s"), *LayerPath));
+
+    // Blend mode by name - Subtractive is the tunnel/cave case and the default.
+    FString BlendStr = Params->GetStringField(TEXT("blend_mode"));
+    if (BlendStr.IsEmpty()) BlendStr = TEXT("Subtractive");
+    EVoxelVolumeBlendMode BlendMode;
+    if (BlendStr == TEXT("Subtractive"))     BlendMode = EVoxelVolumeBlendMode::Subtractive;
+    else if (BlendStr == TEXT("Additive"))   BlendMode = EVoxelVolumeBlendMode::Additive;
+    else if (BlendStr == TEXT("Intersect"))  BlendMode = EVoxelVolumeBlendMode::Intersect;
+    else if (BlendStr == TEXT("Override"))   BlendMode = EVoxelVolumeBlendMode::Override;
+    else
+        return FMonolithActionResult::Error(TEXT("blend_mode must be Subtractive|Additive|Intersect|Override"));
+
+    // Full placement: position + yaw + non-uniform scale. A tunnel is a unit shape in
+    // the graph, oriented along its bearing and sized by the stamp transform.
+    double PX = 0, PY = 0, PZ = 0, Yaw = 0, SX = 1, SY = 1, SZ = 1;
+    Params->TryGetNumberField(TEXT("x"), PX);
+    Params->TryGetNumberField(TEXT("y"), PY);
+    Params->TryGetNumberField(TEXT("z"), PZ);
+    Params->TryGetNumberField(TEXT("yaw"), Yaw);
+    Params->TryGetNumberField(TEXT("scale_x"), SX);
+    Params->TryGetNumberField(TEXT("scale_y"), SY);
+    Params->TryGetNumberField(TEXT("scale_z"), SZ);
+    const FTransform StampTransform(FRotator(0, Yaw, 0), FVector(PX, PY, PZ), FVector(SX, SY, SZ));
+
+    int32 Priority = 0;
+    Params->TryGetNumberField(TEXT("priority"), Priority);
+    double Smoothness = 100.0;
+    Params->TryGetNumberField(TEXT("smoothness"), Smoothness);
+
+    // Research REC: tunnels default to LODRange {0,3}. Past LOD3 (8 m cells at
+    // VoxelSize 100) the bore cannot be resolved anyway - it seals shut - so
+    // evaluating the stamp there is pure waste AND causes a visible mouth pop.
+    int32 LODMin = 0, LODMax = 3;
+    Params->TryGetNumberField(TEXT("lod_min"), LODMin);
+    Params->TryGetNumberField(TEXT("lod_max"), LODMax);
+
+    // bApplyOnVoid semantics (learned the expensive way): "void" means "no previous
+    // stamp IN THIS LAYER". A Subtractive bore in an otherwise-empty volume layer
+    // with bApplyOnVoid=false applies NOWHERE - the terrain comes from the HEIGHT
+    // layer, which does not count. VP2's own K2 default is true; keep it.
+    bool bApplyOnVoid = true;
+    Params->TryGetBoolField(TEXT("apply_on_void"), bApplyOnVoid);
+
+    FVoxelVolumeGraphStampRef StampRef;
+    UVoxelVolumeGraphStamp_K2::Make(
+        StampRef,
+        Graph,
+        Layer,
+        BlendMode,
+        /*AdditionalLayers*/ {},
+        /*BoundsExtensionMultiplier*/ 1.0f,
+        /*MaximumBoundsExtension*/ 1000.0f,
+        StampTransform,
+        EVoxelStampBehavior::AffectAll,
+        Priority,
+        (float)Smoothness,
+        /*MetadataOverrides*/ FVoxelMetadataOverrides(),
+        /*StampSeed*/ FVoxelExposedSeed(),
+        FInt32Interval(LODMin, LODMax),
+        /*bDisableStampSelection*/ false,
+        /*bApplyOnVoid*/ bApplyOnVoid);
+
+    if (!StampRef.IsValid())
+        return FMonolithActionResult::Error(TEXT("Failed to build volume graph stamp"));
+
+    AVoxelStampActor* StampActor = World->SpawnActor<AVoxelStampActor>(AVoxelStampActor::StaticClass(), StampTransform);
+    if (!StampActor)
+        return FMonolithActionResult::Error(TEXT("Failed to spawn AVoxelStampActor"));
+
+    const FString Label = Params->GetStringField(TEXT("label"));
+    if (!Label.IsEmpty())
+        StampActor->SetActorLabel(Label);
+
+    StampActor->SetStamp(FVoxelStampRef(StampRef));
+    StampActor->UpdateStamp();
+    StampActor->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("actor"), StampActor->GetActorLabel());
+    Root->SetStringField(TEXT("actor_name"), StampActor->GetName());
+    Root->SetStringField(TEXT("graph"), Graph->GetPathName());
+    Root->SetStringField(TEXT("blend_mode"), BlendStr);
+    Root->SetNumberField(TEXT("lod_min"), LODMin);
+    Root->SetNumberField(TEXT("lod_max"), LODMax);
     return FMonolithActionResult::Success(Root);
 #else
     return FMonolithActionResult::Error(TEXT("Requires editor build"));
@@ -755,6 +881,28 @@ void FMonolithVoxelActions::RegisterTerrainActions()
             .Optional(TEXT("y"), TEXT("number"), TEXT("Stamp Y location"))
             .Optional(TEXT("z"), TEXT("number"), TEXT("Stamp Z location (raise/lower terrain)"))
             .Optional(TEXT("priority"), TEXT("number"), TEXT("Blend priority within the layer"))
+            .Build());
+
+    Registry.RegisterAction(TEXT("voxel"), TEXT("add_volume_stamp"),
+        TEXT("Spawn an AVoxelStampActor from a VOLUME Graph (3D SDF - tunnels/caves/overhangs a heightfield cannot express). Default blend Subtractive, LODRange {0,3} (bores seal shut past LOD3 anyway)."),
+        FMonolithActionHandler::CreateStatic(&HandleAddVolumeStamp),
+        FParamSchemaBuilder()
+            .Required(TEXT("graph_path"), TEXT("string"), TEXT("UVoxelVolumeGraph asset path"))
+            .Optional(TEXT("label"), TEXT("string"), TEXT("Stamp actor label"))
+            .Optional(TEXT("layer_path"), TEXT("string"), TEXT("UVoxelVolumeLayer (default: DefaultVolumeLayer)"))
+            .Optional(TEXT("blend_mode"), TEXT("string"), TEXT("Subtractive (default) | Additive | Intersect | Override"))
+            .Optional(TEXT("x"), TEXT("number"), TEXT("Stamp X location (cm)"))
+            .Optional(TEXT("y"), TEXT("number"), TEXT("Stamp Y location (cm)"))
+            .Optional(TEXT("z"), TEXT("number"), TEXT("Stamp Z location (cm)"))
+            .Optional(TEXT("yaw"), TEXT("number"), TEXT("Yaw degrees (orient a bore along its bearing)"))
+            .Optional(TEXT("scale_x"), TEXT("number"), TEXT("X scale (default 1)"))
+            .Optional(TEXT("scale_y"), TEXT("number"), TEXT("Y scale (default 1)"))
+            .Optional(TEXT("scale_z"), TEXT("number"), TEXT("Z scale (default 1)"))
+            .Optional(TEXT("priority"), TEXT("number"), TEXT("Blend priority within the volume layer"))
+            .Optional(TEXT("smoothness"), TEXT("number"), TEXT("SDF blend radius cm (default 100 - LIVE for volume stamps)"))
+            .Optional(TEXT("lod_min"), TEXT("number"), TEXT("Min LOD (default 0)"))
+            .Optional(TEXT("lod_max"), TEXT("number"), TEXT("Max LOD (default 3)"))
+            .Optional(TEXT("apply_on_void"), TEXT("boolean"), TEXT("Default true. 'Void' = no previous stamp in THIS layer - false makes a lone Subtractive bore apply NOWHERE (height-layer terrain does not count)"))
             .Build());
 
     Registry.RegisterAction(TEXT("voxel"), TEXT("set_stamp_parameter"),
