@@ -6,6 +6,7 @@
 #include "MonolithPieTimeseries.h"
 #include "MonolithPieThrottleGuard.h"
 #include "MonolithStatActions.h"
+#include "MonolithProfileActions.h"
 #include "MonolithSettingsCustomization.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithJsonUtils.h"
@@ -83,6 +84,8 @@ void FMonolithEditorModule::StartupModule()
 	FMonolithPieThrottleGuard::RegisterPieEndHook();
 	// Gap 10: programmatic stat-group counter/cycle readout (#if STATS gated).
 	FMonolithStatActions::RegisterActions(FMonolithToolRegistry::Get());
+	// Native hierarchical CPU frame profile as structured data (#if STATS gated).
+	FMonolithProfileActions::RegisterActions(FMonolithToolRegistry::Get());
 
 	// Register settings detail customization
 	FPropertyEditorModule& PropModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
