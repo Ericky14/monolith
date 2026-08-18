@@ -1220,11 +1220,9 @@ FMonolithActionResult FMonolithMeshFurnishingActions::ListFurniturePresets(const
 			if (Preset->TryGetObjectField(TEXT("density_overrides"), OverridesObj) && OverridesObj)
 			{
 				TArray<TSharedPtr<FJsonValue>> DensityModes;
-				TArray<FString> Keys;
-				(*OverridesObj)->Values.GetKeys(Keys);
-				for (const FString& K : Keys)
+				for (const auto& OverridePair : (*OverridesObj)->Values)
 				{
-					DensityModes.Add(MakeShared<FJsonValueString>(K));
+					DensityModes.Add(MakeShared<FJsonValueString>(MonolithKeyToString(OverridePair.Key)));
 				}
 				PresetInfo->SetArrayField(TEXT("density_modes"), DensityModes);
 			}

@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS assets (
     file_size_bytes INTEGER DEFAULT 0,
     last_modified TEXT DEFAULT '',
     saved_hash TEXT DEFAULT '',
-    indexed_at TEXT DEFAULT (datetime('now'))
+    indexed_at TEXT DEFAULT (datetime('now')),
+    deep_indexed_hash TEXT DEFAULT '',
+    deep_index_attempts INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_assets_class ON assets(asset_class);
 CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(asset_name);
@@ -318,39 +320,92 @@ bool FMonolithIndexDatabase::Open(const FString& InDbPath)
 		}
 	}
 
-	// Schema migration: v2 -> v3 (node addressing + input bindings + pin defaults)
+	// Schema migration: -> v4. Two independently-developed migrations both stamped "3":
+	// upstream's full-index-resume columns on `assets`, and this fork's node-addressing
+	// columns on `nodes`. A database written by either lineage therefore carries only half
+	// of "v3", so both blocks run here and the combined result stamps 4. Every ALTER is
+	// guarded by a PRAGMA table_info existence check, so re-running against a database that
+	// already has a given column is a no-op - which is what makes merging the two safe.
 	//
 	// ALTER TABLE ADD COLUMN is used rather than a rebuild so an existing multi-thousand-asset
 	// index survives the upgrade; the new columns simply read empty until the next reindex, and
 	// every consumer treats empty as "not indexed yet" rather than "no match".
+	//
+	// A failed migration must NOT close the database. Leaving the version below 4 keeps
+	// `project_query` answering for the whole session; the resume path gates on
+	// SupportsIndexResume() and degrades to a full reset instead.
 	{
-		const FString SchemaVersion = ReadMeta(TEXT("schema_version"));
-		if (SchemaVersion.IsEmpty() || FCString::Atoi(*SchemaVersion) < 3)
+		if (FCString::Atoi(*ReadMeta(TEXT("schema_version"))) < 4)
 		{
-			TSet<FString> NodeColumns;
-			FSQLitePreparedStatement PragmaStmt;
-			if (PragmaStmt.Create(*Database, TEXT("PRAGMA table_info(nodes);"), ESQLitePreparedStatementFlags::Persistent))
+			bool bMigrated = true;
+
+			// --- assets: full-index resume (upstream) ---
+			bool bHasDeepHash = false;
+			bool bHasAttempts = false;
 			{
-				while (PragmaStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+				FSQLitePreparedStatement PragmaStmt;
+				if (PragmaStmt.Create(*Database, TEXT("PRAGMA table_info(assets);"), ESQLitePreparedStatementFlags::Persistent))
 				{
-					FString ColName;
-					PragmaStmt.GetColumnValueByIndex(1, ColName);
-					NodeColumns.Add(ColName);
+					while (PragmaStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+					{
+						FString ColName;
+						PragmaStmt.GetColumnValueByIndex(1, ColName);
+						if (ColName == TEXT("deep_indexed_hash"))
+						{
+							bHasDeepHash = true;
+						}
+						else if (ColName == TEXT("deep_index_attempts"))
+						{
+							bHasAttempts = true;
+						}
+					}
+				}
+			}
+			if (!bHasDeepHash)
+			{
+				bMigrated &= ExecuteSQL(TEXT("ALTER TABLE assets ADD COLUMN deep_indexed_hash TEXT DEFAULT '';"));
+			}
+			if (!bHasAttempts)
+			{
+				bMigrated &= ExecuteSQL(TEXT("ALTER TABLE assets ADD COLUMN deep_index_attempts INTEGER DEFAULT 0;"));
+			}
+
+			// --- nodes: node addressing + input bindings + pin defaults (fork) ---
+			TSet<FString> NodeColumns;
+			{
+				FSQLitePreparedStatement PragmaStmt;
+				if (PragmaStmt.Create(*Database, TEXT("PRAGMA table_info(nodes);"), ESQLitePreparedStatementFlags::Persistent))
+				{
+					while (PragmaStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+					{
+						FString ColName;
+						PragmaStmt.GetColumnValueByIndex(1, ColName);
+						NodeColumns.Add(ColName);
+					}
 				}
 			}
 			if (!NodeColumns.Contains(TEXT("graph_name")))
 			{
-				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN graph_name TEXT DEFAULT '';"));
+				bMigrated &= ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN graph_name TEXT DEFAULT '';"));
 			}
 			if (!NodeColumns.Contains(TEXT("node_object_name")))
 			{
-				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN node_object_name TEXT DEFAULT '';"));
+				bMigrated &= ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN node_object_name TEXT DEFAULT '';"));
 			}
 			if (!NodeColumns.Contains(TEXT("call_target")))
 			{
-				ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN call_target TEXT DEFAULT '';"));
+				bMigrated &= ExecuteSQL(TEXT("ALTER TABLE nodes ADD COLUMN call_target TEXT DEFAULT '';"));
 			}
-			WriteMeta(TEXT("schema_version"), TEXT("3"));
+
+			if (bMigrated)
+			{
+				WriteMeta(TEXT("schema_version"), TEXT("4"));
+			}
+			else
+			{
+				UE_LOG(LogMonolithIndex, Error,
+					TEXT("Index schema migration to v4 failed - index resume and node addressing are unavailable this session, the index itself is unaffected"));
+			}
 		}
 	}
 
@@ -409,7 +464,17 @@ bool FMonolithIndexDatabase::ResetDatabase()
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS meta;"));
 	ExecuteSQL(TEXT("DROP TABLE IF EXISTS assets;"));
 
-	return CreateTables();
+	if (!CreateTables())
+	{
+		return false;
+	}
+
+	// `meta` was just dropped, so the version stamp went with it. Recreated tables
+	// carry the current shape, so restate it here — otherwise the DB reports "no
+	// schema version" until the next Open(), and every version-gated path
+	// (incremental indexing, resume) silently degrades for the rest of the session.
+	ExecuteSQL(TEXT("CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(saved_hash);"));
+	return WriteMeta(TEXT("schema_version"), TEXT("4"));
 }
 
 // ============================================================
@@ -458,8 +523,10 @@ TOptional<FIndexedAsset> FMonolithIndexDatabase::GetAssetByPath(const FString& P
 {
 	if (!IsOpen()) return {};
 
+	// The two v3 columns ride along on the SELECT the full-index queue filter
+	// already makes, so resume costs zero extra statements per asset.
 	FSQLitePreparedStatement Stmt;
-	Stmt.Create(*Database, TEXT("SELECT id, package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified, saved_hash, indexed_at FROM assets WHERE package_path = ?;"));
+	Stmt.Create(*Database, TEXT("SELECT id, package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified, saved_hash, indexed_at, deep_indexed_hash, deep_index_attempts FROM assets WHERE package_path = ?;"));
 	Stmt.SetBindingValueByIndex(1, PackagePath);
 
 	if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -475,6 +542,8 @@ TOptional<FIndexedAsset> FMonolithIndexDatabase::GetAssetByPath(const FString& P
 		Stmt.GetColumnValueByIndex(7, Asset.LastModified);
 		Stmt.GetColumnValueByIndex(8, Asset.SavedHash);
 		Stmt.GetColumnValueByIndex(9, Asset.IndexedAt);
+		Stmt.GetColumnValueByIndex(10, Asset.DeepIndexedHash);
+		Stmt.GetColumnValueByIndex(11, Asset.DeepIndexAttempts);
 		return Asset;
 	}
 	return {};
@@ -950,6 +1019,172 @@ FString FMonolithIndexDatabase::ReadMeta(const FString& Key) const
 	return FString();
 }
 
+bool FMonolithIndexDatabase::DeleteMeta(const FString& Key)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("DELETE FROM meta WHERE key = ?;"));
+	Stmt.SetBindingValueByIndex(1, Key);
+	return Stmt.Execute();
+}
+
+// ============================================================
+// Full-index lifecycle (schema v3)
+// ============================================================
+
+// Named (not anonymous) namespace, and prefixed: file-local duplicates of a
+// common name are what collide once the release build forces full unity.
+namespace MonolithIndexMetaKeys
+{
+	static const TCHAR* const FullIndexState = TEXT("full_index_state");
+	static const TCHAR* const FullIndexInProgress = TEXT("in_progress");
+	static const TCHAR* const LastFullIndex = TEXT("last_full_index");
+	static const TCHAR* const SkippedAssets = TEXT("full_index_skipped_assets");
+}
+
+EMonolithDeepIndexQueueDecision MonolithDecideDeepIndexQueueEntry(
+	const FString& StoredDeepHash,
+	int32 StoredAttempts,
+	const FString& CurrentSavedHash)
+{
+	// Hash equality is the ONLY "already done" gate. A build that predates schema
+	// v3 updates `saved_hash` without maintaining `deep_indexed_hash`, so after a
+	// downgrade-then-upgrade the checkpoint can be stale; comparing it against the
+	// hash the Asset Registry reports right now re-queues those assets naturally.
+	// An empty hash on either side never counts as a match.
+	if (!StoredDeepHash.IsEmpty() && !CurrentSavedHash.IsEmpty() && StoredDeepHash == CurrentSavedHash)
+	{
+		return EMonolithDeepIndexQueueDecision::SkipAlreadyIndexed;
+	}
+
+	if (StoredAttempts >= MonolithMaxDeepIndexAttempts)
+	{
+		return EMonolithDeepIndexQueueDecision::SkipPoisonAsset;
+	}
+
+	return EMonolithDeepIndexQueueDecision::Queue;
+}
+
+bool FMonolithIndexDatabase::SupportsIndexResume() const
+{
+	if (!Database || !Database->IsValid()) return false;
+	// >= 4, not >= 3: a "3" stamp is ambiguous in this merged lineage. Upstream stamped 3 for
+	// the assets resume columns, this fork stamped 3 for the nodes addressing columns, so a
+	// fork-written v3 database claims resume support it cannot honour. Only 4 guarantees both
+	// column sets are present; Open()'s migration lifts every older database to 4.
+	return FCString::Atoi(*ReadMeta(TEXT("schema_version"))) >= 4;
+}
+
+bool FMonolithIndexDatabase::BeginFullIndex()
+{
+	if (!IsOpen()) return false;
+
+	// One transaction: a death between the two writes would otherwise leave both
+	// markers set, which reads as "indexed AND interrupted" on the next launch.
+	if (!BeginTransaction()) return false;
+
+	if (!WriteMeta(MonolithIndexMetaKeys::FullIndexState, MonolithIndexMetaKeys::FullIndexInProgress) || !DeleteMeta(MonolithIndexMetaKeys::LastFullIndex))
+	{
+		RollbackTransaction();
+		return false;
+	}
+
+	return CommitTransaction();
+}
+
+bool FMonolithIndexDatabase::IsFullIndexInProgress() const
+{
+	return ReadMeta(MonolithIndexMetaKeys::FullIndexState) == MonolithIndexMetaKeys::FullIndexInProgress;
+}
+
+bool FMonolithIndexDatabase::CompleteFullIndex(const FString& UtcNow)
+{
+	if (!IsOpen()) return false;
+
+	if (!BeginTransaction()) return false;
+
+	if (!WriteMeta(MonolithIndexMetaKeys::LastFullIndex, UtcNow) || !DeleteMeta(MonolithIndexMetaKeys::FullIndexState))
+	{
+		RollbackTransaction();
+		return false;
+	}
+
+	return CommitTransaction();
+}
+
+bool FMonolithIndexDatabase::SetDeepIndexedHash(int64 AssetId, const FString& Hash)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("UPDATE assets SET deep_indexed_hash = ? WHERE id = ?;"));
+	Stmt.SetBindingValueByIndex(1, Hash);
+	Stmt.SetBindingValueByIndex(2, AssetId);
+	return Stmt.Execute();
+}
+
+bool FMonolithIndexDatabase::BumpDeepIndexAttempts(const TArray<int64>& AssetIds)
+{
+	if (!IsOpen()) return false;
+	if (AssetIds.Num() == 0) return true;
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(*Database, TEXT("UPDATE assets SET deep_index_attempts = deep_index_attempts + 1 WHERE id = ?;"),
+		ESQLitePreparedStatementFlags::Persistent))
+	{
+		return false;
+	}
+
+	// Execute() resets the statement itself, so rebinding index 1 each time is
+	// all that is needed to reuse it across the batch.
+	bool bSuccess = true;
+	for (const int64 AssetId : AssetIds)
+	{
+		Stmt.SetBindingValueByIndex(1, AssetId);
+		bSuccess &= Stmt.Execute();
+	}
+	return bSuccess;
+}
+
+bool FMonolithIndexDatabase::ClearDeepIndexAttempts(int64 AssetId)
+{
+	if (!IsOpen()) return false;
+
+	FSQLitePreparedStatement Stmt;
+	Stmt.Create(*Database, TEXT("UPDATE assets SET deep_index_attempts = 0 WHERE id = ?;"));
+	Stmt.SetBindingValueByIndex(1, AssetId);
+	return Stmt.Execute();
+}
+
+TArray<FString> FMonolithIndexDatabase::GetSkippedAssetPaths() const
+{
+	TArray<FString> Paths;
+	const FString Raw = ReadMeta(MonolithIndexMetaKeys::SkippedAssets);
+	if (!Raw.IsEmpty())
+	{
+		Raw.ParseIntoArray(Paths, TEXT("\n"), /*InCullEmpty=*/true);
+	}
+	return Paths;
+}
+
+bool FMonolithIndexDatabase::RecordSkippedAssetPaths(const TArray<FString>& Paths)
+{
+	if (!IsOpen()) return false;
+	if (Paths.Num() == 0) return true;
+
+	// Accumulate rather than replace: once an asset is skipped its hash is written
+	// so it leaves the queue, and a later run would otherwise silently drop it
+	// from the record while the data is still missing.
+	TArray<FString> Merged = GetSkippedAssetPaths();
+	for (const FString& Path : Paths)
+	{
+		Merged.AddUnique(Path);
+	}
+
+	return WriteMeta(MonolithIndexMetaKeys::SkippedAssets, FString::Join(Merged, TEXT("\n")));
+}
+
 // ============================================================
 // Incremental indexing helpers
 // ============================================================
@@ -1127,73 +1362,246 @@ bool FMonolithIndexDatabase::UpdateSavedHash(const FString& PackagePath, const F
 // FTS5 Full-text search
 // ============================================================
 
+// Named (never anonymous) so the forced-full-unity release pass cannot collide
+// these helpers with same-named file-locals in a sibling translation unit.
+namespace MonolithProjectSearchDetail
+{
+	/**
+	 * Diagnostics emitted by the FTS5 MATCH expression parser rather than by
+	 * storage/schema access. Verified against SQLite: unbalanced parentheses,
+	 * a trailing operator, `NEAR/3` (not FTS5 syntax) and a bare `:` all report
+	 * "fts5: syntax error near ..."; `"unterminated`, `*bogus` and a non-decimal
+	 * NEAR distance report the other three. Everything else stays internal.
+	 */
+	static bool IsFts5QuerySyntaxError(const FString& Error)
+	{
+		return Error.Contains(TEXT("fts5: syntax error"), ESearchCase::IgnoreCase)
+			|| Error.Contains(TEXT("unterminated string"), ESearchCase::IgnoreCase)
+			|| Error.Contains(TEXT("malformed MATCH"), ESearchCase::IgnoreCase)
+			|| Error.Contains(TEXT("unknown special query"), ESearchCase::IgnoreCase)
+			|| Error.Contains(TEXT("expected integer, got"), ESearchCase::IgnoreCase);
+	}
+
+	/**
+	 * A column filter naming a column this FTS table does not carry. The two
+	 * project FTS tables expose different columns, so on its own this means
+	 * "not answerable here", not "bad query" — `node_name:Branch` is a valid
+	 * search that only fts_nodes can serve. Only a rejection by BOTH tables
+	 * makes it a caller error.
+	 */
+	static bool IsFts5UnknownColumnError(const FString& Error)
+	{
+		return Error.Contains(TEXT("no such column"), ESearchCase::IgnoreCase);
+	}
+
+	// Mirrors the CREATE VIRTUAL TABLE column lists in the schema DDL above
+	// (fts_assets / fts_nodes). Keep in step with them.
+	static const TCHAR* const AssetFtsColumns = TEXT("asset_name, asset_class, description, package_path, module_name");
+	static const TCHAR* const NodeFtsColumns = TEXT("node_name, node_class, node_type");
+
+	/**
+	 * Turn SQLite's bare "no such column: node_nme" into something a caller can act
+	 * on. A typo'd column is the common case, so name it and list the valid ones —
+	 * that is the difference between a five-second fix and a filed issue.
+	 */
+	static FString DescribeUnknownColumn(const FString& Error)
+	{
+		static const FString Marker(TEXT("no such column:"));
+		const int32 MarkerIndex = Error.Find(Marker, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+
+		FString Subject = Error;
+		if (MarkerIndex != INDEX_NONE)
+		{
+			FString ColumnName = Error.Mid(MarkerIndex + Marker.Len());
+			ColumnName.TrimStartAndEndInline();
+			if (!ColumnName.IsEmpty())
+			{
+				Subject = FString::Printf(TEXT("no such column '%s'"), *ColumnName);
+			}
+		}
+
+		return FString::Printf(
+			TEXT("%s. Valid columns are %s (assets) or %s (nodes); one filter cannot span both tables."),
+			*Subject,
+			AssetFtsColumns,
+			NodeFtsColumns);
+	}
+}
+
 TArray<FSearchResult> FMonolithIndexDatabase::FullTextSearch(const FString& Query, int32 Limit)
 {
 	TArray<FSearchResult> Results;
-	if (!IsOpen()) return Results;
-
-	// Search assets FTS
-	FString SQL = FString::Printf(
-		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank FROM fts_assets f JOIN assets a ON a.id = f.rowid WHERE fts_assets MATCH ? ORDER BY rank LIMIT %d;"),
-		Limit
-	);
-
-	FSQLitePreparedStatement Stmt;
-	Stmt.Create(*Database, *SQL);
-	Stmt.SetBindingValueByIndex(1, Query);
-
-	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	FString SearchError;
+	if (FullTextSearch(Query, Limit, Results, SearchError) != EMonolithProjectSearchStatus::Succeeded)
 	{
-		FSearchResult R;
-		Stmt.GetColumnValueByIndex(0, R.AssetPath);
-		Stmt.GetColumnValueByIndex(1, R.AssetName);
-		Stmt.GetColumnValueByIndex(2, R.AssetClass);
-		Stmt.GetColumnValueByIndex(3, R.ModuleName);
-		Stmt.GetColumnValueByIndex(4, R.MatchContext);
-		double RankD = 0.0;
-		Stmt.GetColumnValueByIndex(5, RankD);
-		R.Rank = static_cast<float>(RankD);
-		Results.Add(MoveTemp(R));
+		UE_LOG(LogMonolithIndex, Error, TEXT("Project search failed: %s"), *SearchError);
+	}
+	return Results;
+}
+
+EMonolithProjectSearchStatus FMonolithIndexDatabase::FullTextSearch(
+	const FString& Query,
+	int32 Limit,
+	TArray<FSearchResult>& OutResults,
+	FString& OutError)
+{
+	OutResults.Reset();
+	OutError.Reset();
+
+	if (!IsOpen())
+	{
+		OutError = TEXT("Project index database is not open");
+		return EMonolithProjectSearchStatus::InternalError;
 	}
 
-	// Also search nodes FTS. The graph/node columns ride along so a node hit is addressable:
-	// callers get "asset + graph + node id" and can act on it directly instead of running a
-	// second lookup to find where in the asset the match actually lives.
-	FString NodeSQL = FString::Printf(
-		TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank, n.graph_name, n.node_object_name, n.node_class FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT %d;"),
-		Limit
-	);
+	const int32 ClampedLimit = FMath::Clamp(Limit, 1, 1000);
 
-	FSQLitePreparedStatement Stmt2;
-	Stmt2.Create(*Database, *NodeSQL);
-	Stmt2.SetBindingValueByIndex(1, Query);
-
-	while (Stmt2.Step() == ESQLitePreparedStatementStepResult::Row)
+	// One table's verdict on the query. NotApplicable is not yet a failure: the
+	// sibling table gets its turn before an unknown column becomes a caller error.
+	enum class EAttempt : uint8
 	{
-		FSearchResult R;
-		Stmt2.GetColumnValueByIndex(0, R.AssetPath);
-		Stmt2.GetColumnValueByIndex(1, R.AssetName);
-		Stmt2.GetColumnValueByIndex(2, R.AssetClass);
-		Stmt2.GetColumnValueByIndex(3, R.ModuleName);
-		Stmt2.GetColumnValueByIndex(4, R.MatchContext);
-		double RankD = 0.0;
-		Stmt2.GetColumnValueByIndex(5, RankD);
-		R.Rank = static_cast<float>(RankD);
-		Stmt2.GetColumnValueByIndex(6, R.GraphName);
-		Stmt2.GetColumnValueByIndex(7, R.NodeObjectName);
-		Stmt2.GetColumnValueByIndex(8, R.NodeClass);
-		Results.Add(MoveTemp(R));
+		Completed,
+		NotApplicable,
+		InvalidQuery,
+		InternalError
+	};
+
+	// bHasNodeColumns: the nodes query selects three extra addressing columns (6-8) that the
+	// assets query does not have. Reading them unconditionally would step off the end of the
+	// assets result set, so the caller states which shape it asked for.
+	auto RunSearch = [this, &OutResults, &Query, ClampedLimit](
+		const TCHAR* SQL,
+		const TCHAR* TableName,
+		bool bHasNodeColumns,
+		FString& AttemptError) -> EAttempt
+	{
+		AttemptError.Reset();
+
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(*Database, SQL))
+		{
+			AttemptError = FString::Printf(
+				TEXT("Failed to prepare the %s FTS query: %s"), TableName, *Database->GetLastError());
+			return EAttempt::InternalError;
+		}
+		if (!Stmt.SetBindingValueByIndex(1, Query))
+		{
+			AttemptError = FString::Printf(TEXT("Failed to bind the %s FTS query"), TableName);
+			return EAttempt::InternalError;
+		}
+		if (!Stmt.SetBindingValueByIndex(2, ClampedLimit))
+		{
+			AttemptError = FString::Printf(TEXT("Failed to bind the %s FTS result limit"), TableName);
+			return EAttempt::InternalError;
+		}
+
+		// Gather into a local array so a mid-enumeration failure contributes
+		// no partial rows to the caller's result set.
+		TArray<FSearchResult> TableResults;
+		for (;;)
+		{
+			const ESQLitePreparedStatementStepResult StepResult = Stmt.Step();
+			if (StepResult == ESQLitePreparedStatementStepResult::Done)
+			{
+				break;
+			}
+			if (StepResult != ESQLitePreparedStatementStepResult::Row)
+			{
+				// Anything that is neither Row nor Done is a real failure. The old
+				// `while (Step() == Row)` loop treated it as end-of-results, which is
+				// how query errors used to masquerade as zero matches.
+				const FString DatabaseError = Database->GetLastError();
+				if (MonolithProjectSearchDetail::IsFts5UnknownColumnError(DatabaseError))
+				{
+					AttemptError = DatabaseError;
+					return EAttempt::NotApplicable;
+				}
+				if (MonolithProjectSearchDetail::IsFts5QuerySyntaxError(DatabaseError))
+				{
+					AttemptError = DatabaseError;
+					return EAttempt::InvalidQuery;
+				}
+				AttemptError = FString::Printf(
+					TEXT("%s FTS query failed: %s"),
+					TableName,
+					DatabaseError.IsEmpty() ? TEXT("database operation failed") : *DatabaseError);
+				return EAttempt::InternalError;
+			}
+
+			FSearchResult R;
+			Stmt.GetColumnValueByIndex(0, R.AssetPath);
+			Stmt.GetColumnValueByIndex(1, R.AssetName);
+			Stmt.GetColumnValueByIndex(2, R.AssetClass);
+			Stmt.GetColumnValueByIndex(3, R.ModuleName);
+			Stmt.GetColumnValueByIndex(4, R.MatchContext);
+			double RankD = 0.0;
+			Stmt.GetColumnValueByIndex(5, RankD);
+			R.Rank = static_cast<float>(RankD);
+			if (bHasNodeColumns)
+			{
+				Stmt.GetColumnValueByIndex(6, R.GraphName);
+				Stmt.GetColumnValueByIndex(7, R.NodeObjectName);
+				Stmt.GetColumnValueByIndex(8, R.NodeClass);
+			}
+			TableResults.Add(MoveTemp(R));
+		}
+
+		OutResults.Append(MoveTemp(TableResults));
+		return EAttempt::Completed;
+	};
+
+	auto ToStatus = [](EAttempt Attempt)
+	{
+		return Attempt == EAttempt::InvalidQuery
+			? EMonolithProjectSearchStatus::InvalidQuery
+			: EMonolithProjectSearchStatus::InternalError;
+	};
+
+	// Search assets FTS
+	const TCHAR* const AssetSQL = TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_assets, 2, '>>>', '<<<', '...', 32) as ctx, rank FROM fts_assets f JOIN assets a ON a.id = f.rowid WHERE fts_assets MATCH ? ORDER BY rank LIMIT ?;");
+
+	FString AssetError;
+	const EAttempt AssetAttempt = RunSearch(AssetSQL, TEXT("assets"), /*bHasNodeColumns=*/false, AssetError);
+	if (AssetAttempt == EAttempt::InvalidQuery || AssetAttempt == EAttempt::InternalError)
+	{
+		OutResults.Reset();
+		OutError = AssetError;
+		return ToStatus(AssetAttempt);
+	}
+
+	// Also search nodes FTS. The graph/node columns (6-8) ride along so a node hit is
+	// addressable: callers get "asset + graph + node id" and can act on it directly instead
+	// of running a second lookup to find where in the asset the match actually lives. The
+	// assets query has no such columns, hence the bHasNodeColumns flag on RunSearch.
+	const TCHAR* const NodeSQL = TEXT("SELECT a.package_path, a.asset_name, a.asset_class, a.module_name, snippet(fts_nodes, 0, '>>>', '<<<', '...', 32) as ctx, f.rank, n.graph_name, n.node_object_name, n.node_class FROM fts_nodes f JOIN nodes n ON n.id = f.rowid JOIN assets a ON a.id = n.asset_id WHERE fts_nodes MATCH ? ORDER BY f.rank LIMIT ?;");
+
+	FString NodeError;
+	const EAttempt NodeAttempt = RunSearch(NodeSQL, TEXT("nodes"), /*bHasNodeColumns=*/true, NodeError);
+	if (NodeAttempt == EAttempt::InvalidQuery || NodeAttempt == EAttempt::InternalError)
+	{
+		OutResults.Reset();
+		OutError = NodeError;
+		return ToStatus(NodeAttempt);
+	}
+
+	// No FTS table exposes the requested column, so the caller named one that
+	// does not exist anywhere in the index.
+	if (AssetAttempt == EAttempt::NotApplicable && NodeAttempt == EAttempt::NotApplicable)
+	{
+		OutResults.Reset();
+		OutError = MonolithProjectSearchDetail::DescribeUnknownColumn(AssetError);
+		return EMonolithProjectSearchStatus::InvalidQuery;
 	}
 
 	// Sort combined results by rank (lower = better in FTS5)
-	Results.Sort([](const FSearchResult& A, const FSearchResult& B) { return A.Rank < B.Rank; });
+	OutResults.Sort([](const FSearchResult& A, const FSearchResult& B) { return A.Rank < B.Rank; });
 
-	if (Results.Num() > Limit)
+	if (OutResults.Num() > ClampedLimit)
 	{
-		Results.SetNum(Limit);
+		OutResults.SetNum(ClampedLimit);
 	}
 
-	return Results;
+	return EMonolithProjectSearchStatus::Succeeded;
 }
 
 TArray<FCallSite> FMonolithIndexDatabase::FindCallers(const FString& FunctionName, int32 Limit)
@@ -1377,6 +1785,22 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetStats()
 		ModuleBreakdown->SetNumberField(ModName, Count);
 	}
 	Stats->SetObjectField(TEXT("module_breakdown"), ModuleBreakdown);
+
+	// Assets the poison-pill rule dropped from deep indexing. Surfaced here so an
+	// agent can see the data-completeness gap without reading the editor log —
+	// `monolith_reindex(force=true)` (or `Monolith.StartIndex force`) clears it.
+	const TArray<FString> SkippedPaths = GetSkippedAssetPaths();
+	Stats->SetNumberField(TEXT("skipped_assets"), SkippedPaths.Num());
+	if (SkippedPaths.Num() > 0)
+	{
+		constexpr int32 MaxReportedSkips = 50;
+		TArray<TSharedPtr<FJsonValue>> SkipValues;
+		for (int32 i = 0; i < FMath::Min(SkippedPaths.Num(), MaxReportedSkips); ++i)
+		{
+			SkipValues.Add(MakeShared<FJsonValueString>(SkippedPaths[i]));
+		}
+		Stats->SetArrayField(TEXT("skipped_asset_paths"), SkipValues);
+	}
 
 	return Stats;
 }

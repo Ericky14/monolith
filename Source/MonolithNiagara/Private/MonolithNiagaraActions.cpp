@@ -2,6 +2,7 @@
 #include "MonolithNiagaraLayoutActions.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithJsonUtils.h"
+#include "MonolithPackagePathValidator.h"
 #include "MonolithParamSchema.h"
 
 #include "NiagaraSystem.h"
@@ -2616,6 +2617,7 @@ void FMonolithNiagaraActions::RegisterActions(FMonolithToolRegistry& Registry)
 		FMonolithActionHandler::CreateStatic(&HandleGetModuleGraph),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("script_path"), TEXT("Module script asset path"))
+			.Optional(TEXT("links"), TEXT("boolean"), TEXT("Also emit a top-level 'edges' array of pin-to-pin connections, plus 'pin_id' on every pin (default: false)"))
 			.Build());
 	Registry.RegisterAction(TEXT("niagara"), TEXT("get_custom_hlsl_text"), TEXT("Read the Custom HLSL source text from a Niagara script's CustomHlsl node"),
 		FMonolithActionHandler::CreateStatic(&HandleGetCustomHLSLText),
@@ -3840,16 +3842,20 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 	FString SavePath = Params->GetStringField(TEXT("save_path"));
 	FString TemplatePath = Params->HasField(TEXT("template")) ? Params->GetStringField(TEXT("template")) : FString();
 
+	// Validate the destination before loading the template or touching AssetTools —
+	// a malformed path (e.g. "//Game/Foo") asserts inside CreatePackage.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
 	if (!TemplatePath.IsEmpty())
 	{
 		UNiagaraSystem* Template = FMonolithAssetUtils::LoadAssetByPath<UNiagaraSystem>(TemplatePath);
 		if (!Template) return FMonolithActionResult::Error(TEXT("Failed to load template"));
 
-		FString PackagePath, AssetName;
-		int32 LastSlash;
-		if (!SavePath.FindLastChar('/', LastSlash)) return FMonolithActionResult::Error(TEXT("Invalid save path"));
-		PackagePath = SavePath.Left(LastSlash);
-		AssetName = SavePath.Mid(LastSlash + 1);
+		const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+		const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 
 		IAssetTools& AT = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 		UObject* Dup = AT.DuplicateAsset(AssetName, PackagePath, Template);
@@ -3857,11 +3863,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateSystem(const TSharedP
 		return NA_SuccessStr(Dup->GetPathName());
 	}
 
-	FString PackagePath, AssetName;
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash)) return FMonolithActionResult::Error(TEXT("Invalid save path"));
-	PackagePath = SavePath.Left(LastSlash);
-	AssetName = SavePath.Mid(LastSlash + 1);
+	const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 
 	FString FullPath = PackagePath / AssetName;
 	UPackage* Pkg = CreatePackage(*FullPath);
@@ -3906,11 +3909,13 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateStatelessEmitter(cons
 	// object is the stateless emitter itself.
 	FString SavePath = Params->GetStringField(TEXT("save_path"));
 
-	FString PackagePath, AssetName;
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash)) return FMonolithActionResult::Error(TEXT("Invalid save path"));
-	PackagePath = SavePath.Left(LastSlash);
-	AssetName = SavePath.Mid(LastSlash + 1);
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
+	const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 
 	FString FullPath = PackagePath / AssetName;
 	UPackage* Pkg = CreatePackage(*FullPath);
@@ -4257,6 +4262,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleInputs(const TShar
 FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ScriptPath = Params->GetStringField(TEXT("script_path"));
+	// Opt-in link topology. Default false so the response stays byte-identical to the
+	// pre-`links` shape for every existing caller.
+	const bool bIncludeLinks = Params->HasField(TEXT("links")) && Params->GetBoolField(TEXT("links"));
+
 	UNiagaraScript* Script = LoadObject<UNiagaraScript>(nullptr, *ScriptPath);
 	if (!Script) return FMonolithActionResult::Error(TEXT("Failed to load script"));
 
@@ -4267,6 +4276,12 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TShare
 	TSharedRef<FJsonObject> Res = MakeShared<FJsonObject>();
 	Res->SetStringField(TEXT("script_path"), ScriptPath);
 	Res->SetStringField(TEXT("script_usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue(static_cast<int64>(Script->GetUsage())));
+
+	// Edge accumulation for links=true. Every connection is reachable from BOTH of its
+	// endpoints, so the pin walk below sees each edge twice; SeenEdges deduplicates on a
+	// canonical (endpoint, endpoint) key so the array carries one entry per connection.
+	TArray<TSharedPtr<FJsonValue>> EdgesArr;
+	TSet<FString> SeenEdges;
 
 	TArray<TSharedPtr<FJsonValue>> NodesArr;
 	TArray<UEdGraphNode*> AllNodes;
@@ -4295,12 +4310,58 @@ FMonolithActionResult FMonolithNiagaraActions::HandleGetModuleGraph(const TShare
 			PO->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
 			PO->SetStringField(TEXT("default_value"), Pin->DefaultValue);
 			PO->SetNumberField(TEXT("linked_count"), Pin->LinkedTo.Num());
+			if (bIncludeLinks)
+			{
+				// PinId is NOT unique on its own — copy-pasting a node duplicates its pin
+				// GUIDs — so an edge endpoint is always the (node_guid, pin_id) PAIR.
+				PO->SetStringField(TEXT("pin_id"), Pin->PinId.ToString());
+
+				const FString ThisEnd = Node->NodeGuid.ToString() + TEXT(":") + Pin->PinId.ToString();
+				for (UEdGraphPin* Linked : Pin->LinkedTo)
+				{
+					if (!Linked) continue;
+					UEdGraphNode* LinkedNode = Linked->GetOwningNodeUnchecked();
+					if (!LinkedNode) continue;
+
+					const FString OtherEnd = LinkedNode->NodeGuid.ToString() + TEXT(":") + Linked->PinId.ToString();
+					const bool bThisFirst = FCString::Strcmp(*ThisEnd, *OtherEnd) <= 0;
+					const FString EdgeKey = bThisFirst
+						? (ThisEnd + TEXT("|") + OtherEnd)
+						: (OtherEnd + TEXT("|") + ThisEnd);
+					if (SeenEdges.Contains(EdgeKey)) continue;
+					SeenEdges.Add(EdgeKey);
+
+					// Orient from -> to along data flow (output pin is the source). A
+					// malformed graph with matching directions falls back to the canonical
+					// key order so the orientation is still deterministic.
+					bool bThisIsSource = (Pin->Direction == EGPD_Output);
+					if (Pin->Direction == Linked->Direction) bThisIsSource = bThisFirst;
+
+					UEdGraphNode* FromNode = bThisIsSource ? Node : LinkedNode;
+					UEdGraphPin* FromPin = bThisIsSource ? Pin : Linked;
+					UEdGraphNode* ToNode = bThisIsSource ? LinkedNode : Node;
+					UEdGraphPin* ToPin = bThisIsSource ? Linked : Pin;
+
+					TSharedRef<FJsonObject> EdgeObj = MakeShared<FJsonObject>();
+					EdgeObj->SetStringField(TEXT("from_node_guid"), FromNode->NodeGuid.ToString());
+					EdgeObj->SetStringField(TEXT("from_pin_id"), FromPin->PinId.ToString());
+					EdgeObj->SetStringField(TEXT("from_pin_name"), FromPin->PinName.ToString());
+					EdgeObj->SetStringField(TEXT("to_node_guid"), ToNode->NodeGuid.ToString());
+					EdgeObj->SetStringField(TEXT("to_pin_id"), ToPin->PinId.ToString());
+					EdgeObj->SetStringField(TEXT("to_pin_name"), ToPin->PinName.ToString());
+					EdgesArr.Add(MakeShared<FJsonValueObject>(EdgeObj));
+				}
+			}
 			PinsArr.Add(MakeShared<FJsonValueObject>(PO));
 		}
 		NodeObj->SetArrayField(TEXT("pins"), PinsArr);
 		NodesArr.Add(MakeShared<FJsonValueObject>(NodeObj));
 	}
 	Res->SetArrayField(TEXT("nodes"), NodesArr);
+	if (bIncludeLinks)
+	{
+		Res->SetArrayField(TEXT("edges"), EdgesArr);
+	}
 	return NA_SuccessObj(Res);
 }
 
@@ -5731,7 +5792,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 			bool bHadCurveFields = false;
 			for (const auto& Pair : DIConfig->Values)
 			{
-				if (CurveFieldNames.Contains(Pair.Key)) { bHadCurveFields = true; break; }
+				if (CurveFieldNames.Contains(MonolithKeyToString(Pair.Key))) { bHadCurveFields = true; break; }
 			}
 			if (bHadCurveFields)
 			{
@@ -5763,10 +5824,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetModuleInputDI(const TSha
 
 		for (auto& Pair : DIConfig->Values)
 		{
-			if (bIsCurveDI && CurveKeys.Contains(Pair.Key)) continue;
-			if (bIsGridDI && GridKeys.Contains(Pair.Key)) continue;
+			if (bIsCurveDI && CurveKeys.Contains(MonolithKeyToString(Pair.Key))) continue;
+			if (bIsGridDI && GridKeys.Contains(MonolithKeyToString(Pair.Key))) continue;
 
-			FProperty* Prop = DIUClass->FindPropertyByName(FName(*Pair.Key));
+			FProperty* Prop = DIUClass->FindPropertyByName(FName(*MonolithKeyToString(Pair.Key)));
 			if (!Prop) continue;
 			void* Addr = Prop->ContainerPtrToValuePtr<void>(DIInst);
 			if (FFloatProperty* FP = CastField<FFloatProperty>(Prop)) FP->SetPropertyValue(Addr, static_cast<float>(Pair.Value->AsNumber()));
@@ -5823,6 +5884,12 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 	if (Name.IsEmpty()) return FMonolithActionResult::Error(TEXT("'name' is required"));
 	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("'save_path' is required"));
 	if (HlslBody.IsEmpty()) return FMonolithActionResult::Error(TEXT("'hlsl' is required"));
+
+	// Validate the destination up front — a malformed path asserts inside CreatePackage below.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
 
 	// Parse inputs array
 	struct FPinDef { FString Name; FNiagaraTypeDefinition Type; };
@@ -5919,12 +5986,8 @@ FMonolithActionResult FMonolithNiagaraActions::CreateScriptFromHLSL(const TShare
 	}
 
 	// === Create package and NiagaraScript asset ===
-	FString PackagePath, AssetName;
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash))
-		return FMonolithActionResult::Error(TEXT("Invalid save_path - must contain '/'"));
-	PackagePath = SavePath.Left(LastSlash);
-	AssetName = SavePath.Mid(LastSlash + 1);
+	const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 
 	FString FullPath = PackagePath / AssetName;
 	UPackage* Pkg = CreatePackage(*FullPath);
@@ -9388,8 +9451,8 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 	TArray<TSharedPtr<FJsonValue>> PropsFailed;
 	for (auto& Pair : Properties->Values)
 	{
-		FProperty* Prop = DI->GetClass()->FindPropertyByName(FName(*Pair.Key));
-		if (!Prop) { PropsNotFound.Add(Pair.Key); continue; }
+		FProperty* Prop = DI->GetClass()->FindPropertyByName(FName(*MonolithKeyToString(Pair.Key)));
+		if (!Prop) { PropsNotFound.Add(MonolithKeyToString(Pair.Key)); continue; }
 		void* Addr = Prop->ContainerPtrToValuePtr<void>(DI);
 
 		// Build value string — handle JSON arrays → UE array syntax, JSON objects → UE struct syntax
@@ -9425,7 +9488,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 				{
 					if (!bFirst) ValStr += TEXT(",");
 					bFirst = false;
-					ValStr += KV.Key + TEXT("=") + KV.Value->AsString();
+					ValStr += MonolithKeyToString(KV.Key) + TEXT("=") + KV.Value->AsString();
 				}
 				ValStr += TEXT(")");
 			}
@@ -9437,14 +9500,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleConfigureDataInterface(cons
 
 		if (Prop->ImportText_Direct(*ValStr, Addr, DI, PPF_None))
 		{
-			PropsSet.Add(Pair.Key);
+			PropsSet.Add(MonolithKeyToString(Pair.Key));
 		}
 		else
 		{
 			TSharedRef<FJsonObject> FailEntry = MakeShared<FJsonObject>();
-			FailEntry->SetStringField(TEXT("property"), Pair.Key);
+			FailEntry->SetStringField(TEXT("property"), MonolithKeyToString(Pair.Key));
 			FailEntry->SetStringField(TEXT("value"), ValStr);
-			FailEntry->SetStringField(TEXT("error"), FString::Printf(TEXT("ImportText_Direct failed for property '%s' with value '%s'"), *Pair.Key, *ValStr));
+			FailEntry->SetStringField(TEXT("error"), FString::Printf(TEXT("ImportText_Direct failed for property '%s' with value '%s'"), *MonolithKeyToString(Pair.Key), *ValStr));
 			PropsFailed.Add(MakeShared<FJsonValueObject>(FailEntry));
 		}
 	}
@@ -9513,15 +9576,18 @@ FMonolithActionResult FMonolithNiagaraActions::HandleDuplicateSystem(const TShar
 	FString SavePath = Params->GetStringField(TEXT("save_path"));
 	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: save_path"));
 
+	// Validate the destination before loading the source system or calling AssetTools.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load source system"));
 
 	// Parse save_path into package path + asset name
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash))
-		return FMonolithActionResult::Error(TEXT("Invalid save_path — must contain '/'"));
-	FString DestPath = SavePath.Left(LastSlash);
-	FString NewName = SavePath.Mid(LastSlash + 1);
+	const FString DestPath = FPackageName::GetLongPackagePath(SavePath);
+	const FString NewName = FPackageName::GetLongPackageAssetName(SavePath);
 
 	FAssetToolsModule& ATModule = FModuleManager::Get().LoadModuleChecked<FAssetToolsModule>("AssetTools");
 	UObject* Dup = ATModule.Get().DuplicateAsset(NewName, DestPath, System);
@@ -11090,7 +11156,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetSpawnShape(const TShared
 		for (const auto& Pair : (*ShapeParamsObj)->Values)
 		{
 			// Map friendly param names to module input display names
-			FString InputName = Pair.Key;
+			FString InputName = MonolithKeyToString(Pair.Key);
 			if (InputName == TEXT("radius"))
 			{
 				if      (Shape == TEXT("cylinder")) InputName = TEXT("Cylinder Radius");
@@ -11117,9 +11183,9 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSetSpawnShape(const TShared
 
 			FMonolithActionResult SetResult = HandleSetModuleInputValue(SetParams);
 			if (SetResult.bSuccess)
-				ParamsSet.Add(Pair.Key);
+				ParamsSet.Add(MonolithKeyToString(Pair.Key));
 			else
-				Warnings.Add(FString::Printf(TEXT("Failed to set param '%s': %s"), *Pair.Key, *SetResult.ErrorMessage));
+				Warnings.Add(FString::Printf(TEXT("Failed to set param '%s': %s"), *MonolithKeyToString(Pair.Key), *SetResult.ErrorMessage));
 		}
 	}
 
@@ -11482,11 +11548,10 @@ FMonolithActionResult FMonolithNiagaraActions::HandleRemoveDynamicInput(const TS
 			FNiagaraTypeDefinition PinType = UEdGraphSchema_Niagara::PinToTypeDefinition(Pin);
 			if (PinType == FNiagaraTypeDefinition::GetParameterMapDef()) continue;
 			// This is the data output pin — check what it's linked to
-			for (UEdGraphPin* Linked : Pin->LinkedTo)
+			if (Pin->LinkedTo.Num() > 0)
 			{
 				// The linked pin is the override pin on the upstream override node
-				OverridePin = Linked;
-				break;
+				OverridePin = Pin->LinkedTo[0];
 			}
 			if (OverridePin) break;
 		}
@@ -12354,11 +12419,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateNPC(const TSharedPtr<
 	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: save_path"));
 	if (Namespace.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: namespace"));
 
-	FString PackagePath, AssetName;
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash)) return FMonolithActionResult::Error(TEXT("Invalid save path"));
-	PackagePath = SavePath.Left(LastSlash);
-	AssetName = SavePath.Mid(LastSlash + 1);
+	// Validate the destination before the existing-asset probe or CreatePackage.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
+	const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 	FString FullPath = PackagePath / AssetName;
 
 	// Check for existing asset — CreatePackage with same path returns existing in-memory package
@@ -12673,11 +12741,14 @@ FMonolithActionResult FMonolithNiagaraActions::HandleCreateEffectType(const TSha
 	FString SavePath = Params->GetStringField(TEXT("save_path"));
 	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: save_path"));
 
-	FString PackagePath, AssetName;
-	int32 LastSlash;
-	if (!SavePath.FindLastChar('/', LastSlash)) return FMonolithActionResult::Error(TEXT("Invalid save path"));
-	PackagePath = SavePath.Left(LastSlash);
-	AssetName = SavePath.Mid(LastSlash + 1);
+	// Validate the destination before the existing-asset probe or CreatePackage.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
+	const FString PackagePath = FPackageName::GetLongPackagePath(SavePath);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 	FString FullPath = PackagePath / AssetName;
 
 	// Check for existing asset
@@ -13947,8 +14018,8 @@ static TSharedRef<FJsonObject> DiffJsonObjects(const TSharedPtr<FJsonObject>& A,
 
 	// Collect all keys from both
 	TSet<FString> AllKeys;
-	for (auto& Pair : A->Values) AllKeys.Add(Pair.Key);
-	for (auto& Pair : B->Values) AllKeys.Add(Pair.Key);
+	for (auto& Pair : A->Values) AllKeys.Add(MonolithKeyToString(Pair.Key));
+	for (auto& Pair : B->Values) AllKeys.Add(MonolithKeyToString(Pair.Key));
 
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	for (const FString& Key : AllKeys)
@@ -14303,6 +14374,12 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveEmitterAsTemplate(const
 	if (EmitterHandleId.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: emitter"));
 	if (SavePath.IsEmpty()) return FMonolithActionResult::Error(TEXT("Missing required field: save_path"));
 
+	// Validate the destination before loading the source system or creating the package.
+	if (const FString PathError = MonolithCore::ValidatePackagePath(SavePath); !PathError.IsEmpty())
+	{
+		return FMonolithActionResult::Error(PathError);
+	}
+
 	UNiagaraSystem* System = LoadSystem(SystemPath);
 	if (!System) return FMonolithActionResult::Error(TEXT("Failed to load system"));
 
@@ -14315,18 +14392,7 @@ FMonolithActionResult FMonolithNiagaraActions::HandleSaveEmitterAsTemplate(const
 	if (!SourceEmitter) return FMonolithActionResult::Error(TEXT("Source emitter is null"));
 
 	// Check for existing asset at save path
-	FString PackagePath = SavePath;
-	FString AssetName;
-	int32 LastSlash;
-	if (SavePath.FindLastChar('/', LastSlash))
-	{
-		AssetName = SavePath.Mid(LastSlash + 1);
-		PackagePath = SavePath;
-	}
-	else
-	{
-		AssetName = SavePath;
-	}
+	const FString AssetName = FPackageName::GetLongPackageAssetName(SavePath);
 
 	// Convert /Game/ path to package name
 	FString PackageName = SavePath;

@@ -547,7 +547,7 @@ FMonolithActionResult FMonolithMeshAdvancedLevelActions::PlaceBlueprintActor(con
 	{
 		for (const auto& Pair : (*PropsObj)->Values)
 		{
-			const FString& PropName = Pair.Key;
+			const FString PropName = MonolithKeyToString(Pair.Key);
 			const TSharedPtr<FJsonValue>& PropValue = Pair.Value;
 
 			// Find the property on the actor

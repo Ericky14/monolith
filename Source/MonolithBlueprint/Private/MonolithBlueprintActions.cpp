@@ -1,4 +1,5 @@
 #include "MonolithBlueprintActions.h"
+#include "MonolithBlueprintComponentResolver.h"
 #include "MonolithBlueprintInternal.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
@@ -134,14 +135,15 @@ void FMonolithBlueprintActions::RegisterActions()
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("search_nodes"),
-		TEXT("Search nodes across ALL graphs of a Blueprint (now INCLUDING collapsed composite/macro "
-		     "sub-graphs) by node title, class name, or called-function name. To also match PIN "
-		     "values/literals, input keys, or comments — or when you don't know which graph a node is in — "
-		     "use find_in_blueprint instead."),
+		TEXT("Search nodes across ALL graphs of a Blueprint by node title, class name, called-function "
+		     "name, or input-pin default value (finds string-bound callers like SetTimerByFunctionName "
+		     "targets). Searches recursively, including collapsed-graph composites, macro internals, and "
+		     "interface-implementation graphs. To also match pin NAMES, input keys, or comments, use "
+		     "find_in_blueprint instead."),
 		FMonolithActionHandler::CreateStatic(&HandleSearchNodes),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
-			.Required(TEXT("query"), TEXT("string"), TEXT("Search string to match against node titles, class names, and function names"))
+			.Required(TEXT("query"), TEXT("string"), TEXT("Search string matched (case-insensitive contains) against node titles, class names, function names, and input-pin default values"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("find_in_blueprint"),
@@ -166,14 +168,22 @@ void FMonolithBlueprintActions::RegisterActions()
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_components"),
-		TEXT("Get component hierarchy for a Blueprint — names, classes, parent-child tree, attach sockets"),
+		TEXT("Get component hierarchy for a Blueprint — names, classes, parent-child tree, attach sockets. "
+			 "Also returns inherited_native_components (native subobjects read off THIS Blueprint's own CDO, so "
+			 "they carry this Blueprint's overrides) and inherited_components (components declared on a parent "
+			 "Blueprint's construction script, each flagged has_override)."),
 		FMonolithActionHandler::CreateStatic(&HandleGetComponents),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("blueprint"), TEXT("get_component_details"),
-		TEXT("Get full property dump for a specific component in a Blueprint. Resolves both Blueprint-added (SCS) components and inherited native components declared in the C++ parent class (is_inherited_native flags which). For skeletal-mesh components also surfaces skeletal_mesh, anim_class, and animation_mode defaults explicitly."),
+		TEXT("Get full property dump for a specific component in a Blueprint. Resolves Blueprint-added (SCS) components, "
+			 "inherited native components declared in the C++ parent class, and components inherited from a parent "
+			 "Blueprint; 'source' reports which (scs | cdo_native | ich_override | inherited_scs | parent_cdo_fallback) "
+			 "and 'note' carries any caveat. Friendly aliases resolve: Mesh/SkeletalMesh, StaticMesh, "
+			 "CharacterMovement/Movement, Capsule/CapsuleComponent, Root/RootComponent. For skeletal-mesh components "
+			 "also surfaces skeletal_mesh, anim_class, and animation_mode defaults explicitly."),
 		FMonolithActionHandler::CreateStatic(&HandleGetComponentDetails),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Blueprint asset path"))
@@ -290,7 +300,7 @@ void FMonolithBlueprintActions::RegisterActions()
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),     TEXT("Blueprint asset path"))
 			.Required(TEXT("variable_name"),  TEXT("string"),  TEXT("Name of the member variable to find references to (e.g. 'Health', 'TargetActor')"))
-			.Optional(TEXT("include_inherited"), TEXT("boolean"), TEXT("Also match the variable where it is scoped to a parent class, not just this Blueprint's own class (default: false)"))
+			.Optional(TEXT("include_inherited"), TEXT("boolean"), TEXT("Also match the variable where it is scoped to a parent class (default: true — a deletion audit must over-report; pass false to restrict to references scoped strictly to this Blueprint's own class)"))
 			.Build());
 }
 
@@ -332,6 +342,49 @@ FMonolithActionResult FMonolithBlueprintActions::HandleListGraphs(const TSharedP
 		const FString IfaceName = Iface.Interface ? Iface.Interface->GetName() : FString();
 		MonolithBlueprintInternal::AddGraphArray(GraphsArr, Iface.Graphs, TEXT("interface"), IfaceName);
 	}
+
+	// Nested graphs (collapsed-graph composites, macro-instance internals) live
+	// in SubGraphs, not the top-level arrays. Without them, "graph not listed"
+	// reads as "does not exist" and reference audits go blind to everything
+	// inside a collapsed graph. Append the ones not already listed.
+	{
+		TSet<const UEdGraph*> Listed;
+		auto Collect = [&Listed](const TArray<TObjectPtr<UEdGraph>>& Arr)
+		{
+			for (const auto& G : Arr) { if (G) { Listed.Add(G); } }
+		};
+		Collect(BP->UbergraphPages);
+		Collect(BP->FunctionGraphs);
+		Collect(BP->MacroGraphs);
+		Collect(BP->DelegateSignatureGraphs);
+		for (const FBPInterfaceDescription& Iface : BP->ImplementedInterfaces)
+		{
+			Collect(Iface.Graphs);
+		}
+
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+		for (UEdGraph* G : AllGraphs)
+		{
+			if (!G || Listed.Contains(G)) continue;
+			Listed.Add(G); // GetAllGraphs can surface a graph more than once
+			TSharedPtr<FJsonObject> GObj = MakeShared<FJsonObject>();
+			GObj->SetStringField(TEXT("name"), G->GetName());
+			GObj->SetStringField(TEXT("type"), TEXT("subgraph"));
+			GObj->SetNumberField(TEXT("node_count"), G->Nodes.Num());
+			// Walk the full outer chain: a composite's BoundGraph is outered to
+			// the K2Node_Composite NODE, not the parent graph directly.
+			for (const UObject* Outer = G->GetOuter(); Outer; Outer = Outer->GetOuter())
+			{
+				if (const UEdGraph* ParentGraph = Cast<UEdGraph>(Outer))
+				{
+					GObj->SetStringField(TEXT("parent_graph"), ParentGraph->GetName());
+					break;
+				}
+			}
+			GraphsArr.Add(MakeShared<FJsonValueObject>(GObj));
+		}
+	}
 	Root->SetArrayField(TEXT("graphs"), GraphsArr);
 
 	return FMonolithActionResult::Success(Root);
@@ -359,28 +412,19 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetGraphData(const TShare
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("graph_name"), Graph->GetName());
 
-	FString GraphType = TEXT("unknown");
-	if (BP->UbergraphPages.Contains(Graph)) GraphType = TEXT("event_graph");
-	else if (BP->FunctionGraphs.Contains(Graph)) GraphType = TEXT("function");
-	else if (BP->MacroGraphs.Contains(Graph)) GraphType = TEXT("macro");
-	else if (BP->DelegateSignatureGraphs.Contains(Graph)) GraphType = TEXT("delegate_signature");
-	else
-	{
-		// Interface-implementation function graphs live on a separate array (Gap 7).
-		for (const FBPInterfaceDescription& Iface : BP->ImplementedInterfaces)
-		{
-			if (Iface.Graphs.Contains(Graph))
-			{
-				GraphType = TEXT("interface");
-				if (Iface.Interface)
-				{
-					Root->SetStringField(TEXT("interface"), Iface.Interface->GetName());
-				}
-				break;
-			}
-		}
-	}
+	FString InterfaceName;
+	FString ParentGraph;
+	const FString GraphType = MonolithBlueprintInternal::ClassifyGraphType(
+		BP, Graph, InterfaceName, &ParentGraph);
 	Root->SetStringField(TEXT("graph_type"), GraphType);
+	if (!InterfaceName.IsEmpty())
+	{
+		Root->SetStringField(TEXT("interface"), InterfaceName);
+	}
+	if (!ParentGraph.IsEmpty())
+	{
+		Root->SetStringField(TEXT("parent_graph"), ParentGraph);
+	}
 
 	TArray<TSharedPtr<FJsonValue>> NodesArr;
 	for (UEdGraphNode* Node : Graph->Nodes)
@@ -753,13 +797,24 @@ FMonolithActionResult FMonolithBlueprintActions::HandleSearchNodes(const TShared
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Results;
 
-	// Walk EVERY graph, including collapsed composite / macro sub-graphs (GetAllGraphs flattens them).
+	// Full recursive enumeration (GetAllGraphs) so nodes inside collapsed-graph
+	// composites, macro internals, and interface-implementation graphs are all
+	// searchable — the old top-level walk was blind to composites AND interface
+	// graphs, which turned "no matches" into a false deletion-safety signal.
 	TArray<UEdGraph*> AllGraphs;
 	BP->GetAllGraphs(AllGraphs);
+	TSet<const UEdGraph*> Visited; // GetAllGraphs can surface a graph twice
+
 	for (UEdGraph* Graph : AllGraphs)
 	{
-		if (!Graph) continue;
-		const FString GraphType = MonolithBlueprintInternal::GraphTypeLabel(BP, Graph);
+		if (!Graph || Visited.Contains(Graph)) continue;
+		Visited.Add(Graph);
+
+		FString InterfaceName;
+		FString ParentGraph;
+		const FString Type = MonolithBlueprintInternal::ClassifyGraphType(
+			BP, Graph, InterfaceName, &ParentGraph);
+
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
 			if (!Node) continue;
@@ -772,21 +827,55 @@ FMonolithActionResult FMonolithBlueprintActions::HandleSearchNodes(const TShared
 				FuncName = CallNode->FunctionReference.GetMemberName().ToString();
 			}
 
+			// String-typed pin defaults are how timer/delegate targets are bound
+			// (K2_SetTimer FunctionName="UpdateBossBar") — a caller that node
+			// search cannot see reads as "nobody calls this". Match input-pin
+			// defaults too and report which pin hit.
+			FString MatchedPin;
+			FString MatchedDefault;
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin || Pin->Direction != EGPD_Input) continue;
+				const FString Default = !Pin->DefaultValue.IsEmpty()
+					? Pin->DefaultValue
+					: Pin->DefaultTextValue.ToString();
+				if (!Default.IsEmpty() && Default.ToLower().Contains(QueryLower))
+				{
+					MatchedPin = Pin->PinName.ToString();
+					MatchedDefault = Default;
+					break;
+				}
+			}
+
 			bool bMatch = Title.ToLower().Contains(QueryLower) ||
 						  ClassName.ToLower().Contains(QueryLower) ||
-						  FuncName.ToLower().Contains(QueryLower);
+						  FuncName.ToLower().Contains(QueryLower) ||
+						  !MatchedPin.IsEmpty();
 
 			if (bMatch)
 			{
 				TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
 				RObj->SetStringField(TEXT("graph"), Graph->GetName());
-				RObj->SetStringField(TEXT("graph_type"), GraphType);
+				RObj->SetStringField(TEXT("graph_type"), Type);
+				if (!InterfaceName.IsEmpty())
+				{
+					RObj->SetStringField(TEXT("interface"), InterfaceName);
+				}
+				if (!ParentGraph.IsEmpty())
+				{
+					RObj->SetStringField(TEXT("parent_graph"), ParentGraph);
+				}
 				RObj->SetStringField(TEXT("node_id"), Node->GetName());
 				RObj->SetStringField(TEXT("class"), ClassName);
 				RObj->SetStringField(TEXT("title"), Title);
 				if (!FuncName.IsEmpty())
 				{
 					RObj->SetStringField(TEXT("function"), FuncName);
+				}
+				if (!MatchedPin.IsEmpty())
+				{
+					RObj->SetStringField(TEXT("matched_pin"), MatchedPin);
+					RObj->SetStringField(TEXT("matched_pin_default"), MatchedDefault);
 				}
 				Results.Add(MakeShared<FJsonValueObject>(RObj));
 			}
@@ -1311,35 +1400,67 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetComponents(const TShar
 		ComponentCount = AllNodes.Num();
 	}
 
-	// Also surface inherited native components from the parent class chain
-	TArray<TSharedPtr<FJsonValue>> NativeComponentsArr;
-	if (BP->ParentClass && BP->ParentClass->IsChildOf(AActor::StaticClass()))
-	{
-		AActor* CDO = Cast<AActor>(BP->ParentClass->GetDefaultObject(false));
-		if (CDO)
-		{
-			TArray<UActorComponent*> NativeComps;
-			CDO->GetComponents(NativeComps);
-			for (UActorComponent* Comp : NativeComps)
-			{
-				if (!Comp) continue;
-				TSharedPtr<FJsonObject> NObj = MakeShared<FJsonObject>();
-				NObj->SetStringField(TEXT("name"), Comp->GetName());
-				NObj->SetStringField(TEXT("variable_name"), Comp->GetName());
-				NObj->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
-				NObj->SetBoolField(TEXT("is_scene_component"), Comp->IsA(USceneComponent::StaticClass()));
-				NObj->SetBoolField(TEXT("is_native"), true);
+	// Inherited NATIVE components come off this Blueprint's OWN class-default object, so their
+	// values are this Blueprint's, not the C++ parent's (issue #116 bug 1). When the Blueprint
+	// has no compiled generated class the resolver degrades to the native parent's CDO and says
+	// so — a populated list with a caveat beats an empty array on exactly the broken assets
+	// users ask about.
+	bool bParentCdoFallback = false;
+	AActor* CDO = MonolithBlueprintComponentResolver::ResolveComponentCdo(BP, bParentCdoFallback);
 
-				if (USceneComponent* SceneComp = Cast<USceneComponent>(Comp))
+	TArray<TSharedPtr<FJsonValue>> NativeComponentsArr;
+	if (CDO)
+	{
+		TArray<UActorComponent*> NativeComps;
+		CDO->GetComponents(NativeComps);
+		for (UActorComponent* Comp : NativeComps)
+		{
+			if (!Comp) continue;
+			TSharedPtr<FJsonObject> NObj = MakeShared<FJsonObject>();
+			NObj->SetStringField(TEXT("name"), Comp->GetName());
+			NObj->SetStringField(TEXT("variable_name"), Comp->GetName());
+			NObj->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
+			NObj->SetBoolField(TEXT("is_scene_component"), Comp->IsA(USceneComponent::StaticClass()));
+			NObj->SetBoolField(TEXT("is_native"), true);
+
+			if (USceneComponent* SceneComp = Cast<USceneComponent>(Comp))
+			{
+				if (USceneComponent* AttachParent = SceneComp->GetAttachParent())
 				{
-					if (USceneComponent* AttachParent = SceneComp->GetAttachParent())
-					{
-						NObj->SetStringField(TEXT("parent"), AttachParent->GetName());
-					}
-					NObj->SetBoolField(TEXT("is_root"), SceneComp->GetAttachParent() == nullptr);
+					NObj->SetStringField(TEXT("parent"), AttachParent->GetName());
 				}
-				NativeComponentsArr.Add(MakeShared<FJsonValueObject>(NObj));
+				NObj->SetBoolField(TEXT("is_root"), SceneComp->GetAttachParent() == nullptr);
 			}
+			NativeComponentsArr.Add(MakeShared<FJsonValueObject>(NObj));
+		}
+	}
+
+	// Components declared on a PARENT Blueprint's construction script. They are not on any CDO
+	// (pitfall P6), so without this walk they were invisible to every read action.
+	TArray<TSharedPtr<FJsonValue>> InheritedComponentsArr;
+	{
+		TArray<USCS_Node*> InheritedNodes;
+		MonolithBlueprintComponentResolver::CollectInheritedScsNodes(BP, InheritedNodes);
+		for (USCS_Node* Node : InheritedNodes)
+		{
+			if (!Node) continue;
+			UActorComponent* Override = MonolithBlueprintComponentResolver::FindExistingIchOverride(BP, Node);
+
+			TSharedPtr<FJsonObject> IObj = MakeShared<FJsonObject>();
+			const FString VarName = Node->GetVariableName().ToString();
+			IObj->SetStringField(TEXT("name"), VarName);
+			IObj->SetStringField(TEXT("variable_name"), VarName);
+			IObj->SetStringField(TEXT("class"),
+				Node->ComponentClass ? Node->ComponentClass->GetName() : FString(TEXT("unknown")));
+			IObj->SetBoolField(TEXT("is_scene_component"),
+				Node->ComponentClass && Node->ComponentClass->IsChildOf(USceneComponent::StaticClass()));
+			IObj->SetStringField(TEXT("defining_class"),
+				Node->GetSCS() ? GetNameSafe(Node->GetSCS()->GetOwnerClass()) : FString(TEXT("unknown")));
+			IObj->SetBoolField(TEXT("has_override"), Override != nullptr);
+			IObj->SetStringField(TEXT("source"), MonolithBlueprintComponentResolver::SourceToString(
+				Override ? MonolithBlueprintComponentResolver::ESource::IchOverride
+				         : MonolithBlueprintComponentResolver::ESource::InheritedScs));
+			InheritedComponentsArr.Add(MakeShared<FJsonValueObject>(IObj));
 		}
 	}
 
@@ -1348,6 +1469,18 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetComponents(const TShar
 	if (NativeComponentsArr.Num() > 0)
 	{
 		Root->SetArrayField(TEXT("inherited_native_components"), NativeComponentsArr);
+		Root->SetStringField(TEXT("native_components_source"),
+			MonolithBlueprintComponentResolver::SourceToString(bParentCdoFallback
+				? MonolithBlueprintComponentResolver::ESource::ParentCdoFallback
+				: MonolithBlueprintComponentResolver::ESource::CdoNative));
+	}
+	if (InheritedComponentsArr.Num() > 0)
+	{
+		Root->SetArrayField(TEXT("inherited_components"), InheritedComponentsArr);
+	}
+	if (bParentCdoFallback)
+	{
+		Root->SetStringField(TEXT("note"), MonolithBlueprintComponentResolver::ParentCdoFallbackNote());
 	}
 
 	return FMonolithActionResult::Success(Root);
@@ -1370,55 +1503,40 @@ FMonolithActionResult FMonolithBlueprintActions::HandleGetComponentDetails(const
 		return FMonolithActionResult::Error(TEXT("Missing required parameter: component_name"));
 	}
 
-	// Resolve the component template. BP-added components live on the
-	// SimpleConstructionScript as USCS_Node. Inherited native components
-	// (declared in a C++ parent class — e.g. CharacterMesh0 / Mesh / a custom
-	// SkeletalMeshComponent) do NOT appear in the SCS; they live as default
-	// subobjects on the parent-class CDO. We resolve those via the same
-	// parent-CDO GetComponents() walk used by get_components.
-	UActorComponent* Template = nullptr;
-	bool bIsInheritedNative = false;
+	// One resolver for the whole module — see MonolithBlueprintComponentResolver.h.
+	// This used to read BP->ParentClass's CDO, i.e. the NATIVE class template, so every
+	// inherited component reported Epic's constructor defaults as if they were this
+	// Blueprint's values (issue #116 bug 1). Read-only intent: bCreateIchOverride=false,
+	// so a read never creates an Inheritable Component Handler override.
+	const MonolithBlueprintComponentResolver::FResult Resolved =
+		MonolithBlueprintComponentResolver::Resolve(
+			BP, ComponentName, UActorComponent::StaticClass(), /*bCreateIchOverride=*/false);
 
-	USimpleConstructionScript* SCS = BP->SimpleConstructionScript;
-	if (SCS)
+	if (!Resolved.IsValid())
 	{
-		if (USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName)))
-		{
-			Template = Node->ComponentTemplate;
-		}
+		return FMonolithActionResult::Error(Resolved.Error.IsEmpty()
+			? FString::Printf(TEXT("Component not found: %s"), *ComponentName)
+			: Resolved.Error);
 	}
 
-	// Fallback: inherited native component off the parent-class CDO subobject.
-	if (!Template && BP->ParentClass && BP->ParentClass->IsChildOf(AActor::StaticClass()))
-	{
-		if (AActor* CDO = Cast<AActor>(BP->ParentClass->GetDefaultObject(false)))
-		{
-			TArray<UActorComponent*> NativeComps;
-			CDO->GetComponents(NativeComps);
-			for (UActorComponent* Comp : NativeComps)
-			{
-				if (!Comp) continue;
-				if (Comp->GetName().Equals(ComponentName, ESearchCase::IgnoreCase) ||
-				    Comp->GetFName() == FName(*ComponentName))
-				{
-					Template = Comp;
-					bIsInheritedNative = true;
-					break;
-				}
-			}
-		}
-	}
-
-	if (!Template)
-	{
-		return FMonolithActionResult::Error(FString::Printf(TEXT("Component not found: %s"), *ComponentName));
-	}
+	UActorComponent* Template = Resolved.Template;
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("component_name"), ComponentName);
 	Root->SetStringField(TEXT("class"), Template->GetClass()->GetName());
 	Root->SetBoolField(TEXT("is_scene_component"), Template->IsA(USceneComponent::StaticClass()));
-	Root->SetBoolField(TEXT("is_inherited_native"), bIsInheritedNative);
+	// Retained for back-compat; `source` is the full answer.
+	Root->SetBoolField(TEXT("is_inherited_native"),
+		Resolved.Source == MonolithBlueprintComponentResolver::ESource::CdoNative);
+	Root->SetStringField(TEXT("source"), MonolithBlueprintComponentResolver::SourceToString(Resolved.Source));
+	if (!Resolved.ResolvedName.IsNone())
+	{
+		Root->SetStringField(TEXT("resolved_component"), Resolved.ResolvedName.ToString());
+	}
+	if (!Resolved.Note.IsEmpty())
+	{
+		Root->SetStringField(TEXT("note"), Resolved.Note);
+	}
 
 	// For USceneComponent, include transform explicitly
 	if (USceneComponent* SceneTemplate = Cast<USceneComponent>(Template))
@@ -2746,36 +2864,18 @@ FMonolithActionResult FMonolithBlueprintActions::HandleFindVariableReferences(co
 	}
 	const FName VarName(*VarNameStr);
 
-	bool bIncludeInherited = false;
+	// Default TRUE: a deletion audit must over-report, not under-report. The old
+	// default (false) returned a FALSE ZERO for variables declared on a parent
+	// class with live references in this Blueprint — the single most dangerous
+	// wrong answer this action can give. Pass false explicitly to restrict to
+	// references scoped strictly to this Blueprint's own class.
+	bool bIncludeInherited = true;
 	Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
 
 	// include_inherited: nullptr scope skips ReferencesVariable's scope check
 	// (name-only match, so parent-class-scoped references qualify). Otherwise
 	// restrict to references scoped to this Blueprint's own generated class.
 	const UStruct* Scope = bIncludeInherited ? nullptr : Cast<UStruct>(BP->GeneratedClass);
-
-	// graph_type label for a graph, mirroring HandleGetGraphData's classification.
-	// Sets an "interface" field on the match object for interface-graph hits.
-	auto ClassifyGraph = [&](UEdGraph* Graph, FString& OutInterfaceName) -> FString
-	{
-		OutInterfaceName.Reset();
-		if (BP->UbergraphPages.Contains(Graph))         return TEXT("event_graph");
-		if (BP->FunctionGraphs.Contains(Graph))         return TEXT("function");
-		if (BP->MacroGraphs.Contains(Graph))            return TEXT("macro");
-		if (BP->DelegateSignatureGraphs.Contains(Graph)) return TEXT("delegate_signature");
-		for (const FBPInterfaceDescription& Iface : BP->ImplementedInterfaces)
-		{
-			if (Iface.Graphs.Contains(Graph))
-			{
-				if (Iface.Interface)
-				{
-					OutInterfaceName = Iface.Interface->GetName();
-				}
-				return TEXT("interface");
-			}
-		}
-		return TEXT("unknown");
-	};
 
 	TArray<UEdGraph*> AllGraphs;
 	BP->GetAllGraphs(AllGraphs);
@@ -2792,7 +2892,9 @@ FMonolithActionResult FMonolithBlueprintActions::HandleFindVariableReferences(co
 		// GetAllChildrenGraphs can surface a graph more than once across the
 		// parent arrays; classify against the source graph directly each time.
 		FString InterfaceName;
-		const FString GraphType = ClassifyGraph(Graph, InterfaceName);
+		FString ParentGraph;
+		const FString GraphType = MonolithBlueprintInternal::ClassifyGraphType(
+			BP, Graph, InterfaceName, &ParentGraph);
 
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
@@ -2833,6 +2935,10 @@ FMonolithActionResult FMonolithBlueprintActions::HandleFindVariableReferences(co
 			if (!InterfaceName.IsEmpty())
 			{
 				MObj->SetStringField(TEXT("interface"), InterfaceName);
+			}
+			if (!ParentGraph.IsEmpty())
+			{
+				MObj->SetStringField(TEXT("parent_graph"), ParentGraph);
 			}
 			MObj->SetStringField(TEXT("node_id"), K2Node->GetName());
 			MObj->SetStringField(TEXT("node_title"),

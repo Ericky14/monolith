@@ -22,6 +22,7 @@
 #include "MonolithBulkFillTypes.h"
 #include "Reflection/MonolithReflectionWalker.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "ScopedTransaction.h"
@@ -183,7 +184,7 @@ namespace MonolithMeshBulkFillInternal
 			{
 				RowObj = *RowSubObj;
 			}
-			WriteSurfaceRow(DT, RowStruct, RowKV.Key, RowObj, Spec, Report);
+			WriteSurfaceRow(DT, RowStruct, MonolithKeyToString(RowKV.Key), RowObj, Spec, Report);
 		}
 
 		if (Spec.bStrict && Report.Errors > 0)

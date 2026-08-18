@@ -1,5 +1,6 @@
 // MonolithUIStylingActions.cpp
 #include "MonolithUIStylingActions.h"
+#include "MonolithJsonUtils.h"
 #include "MonolithUIInternal.h"
 #include "MonolithParamSchema.h"
 #include "Styling/SlateTypes.h"
@@ -17,9 +18,9 @@ void FMonolithUIStylingActions::RegisterActions(FMonolithToolRegistry& Registry)
         FParamSchemaBuilder()
             .RequiredAssetPath(TEXT("asset_path"), TEXT("Widget Blueprint asset path"))
             .Required(TEXT("widget_name"), TEXT("string"), TEXT("Target widget name"))
-            .Required(TEXT("property_name"), TEXT("string"), TEXT("Brush property: Background, BarFillStyle.FillImage, etc."))
+            .Optional(TEXT("property_name"), TEXT("string"), TEXT("Brush property: Background, BarFillStyle.FillImage, etc. Omit to auto-resolve by widget class (Image->Brush, Border/RoundedBorder->Background)."))
             .Optional(TEXT("draw_type"), TEXT("string"), TEXT("Draw type: Image, Box, Border, RoundedBox, NoDrawType"), TEXT("Image"))
-            .Optional(TEXT("tint_color"), TEXT("string"), TEXT("Tint color as hex (#RRGGBB) or r,g,b,a floats"))
+            .Optional(TEXT("tint_color"), TEXT("string"), TEXT("Tint color as hex (#RRGGBB) or r,g,b,a floats. Alias: color"), { TEXT("color") })
             .Optional(TEXT("image_size"), TEXT("object"), TEXT("Image size: {\"x\": 64, \"y\": 64}"))
             .Optional(TEXT("margin"), TEXT("object"), TEXT("9-slice margin: {\"left\":0, \"top\":0, \"right\":0, \"bottom\":0}"))
             .Optional(TEXT("corner_radius"), TEXT("object"), TEXT("Corner radius: {\"top_left\":0, \"top_right\":0, \"bottom_right\":0, \"bottom_left\":0}"))
@@ -106,7 +107,8 @@ FMonolithActionResult FMonolithUIStylingActions::HandleSetBrush(const TSharedPtr
 {
     FString AssetPath = Params->GetStringField(TEXT("asset_path"));
     FString WidgetName = Params->GetStringField(TEXT("widget_name"));
-    FString PropertyName = Params->GetStringField(TEXT("property_name"));
+    FString PropertyName;
+    Params->TryGetStringField(TEXT("property_name"), PropertyName);
 
     FMonolithActionResult Err;
     UWidgetBlueprint* WBP = MonolithUIInternal::LoadWidgetBlueprint(AssetPath, Err);
@@ -123,6 +125,35 @@ FMonolithActionResult FMonolithUIStylingActions::HandleSetBrush(const TSharedPtr
             TEXT("Call ui::get_widget_tree to enumerate live widget names."));
         E.WidgetId = FName(*WidgetName);
         return MonolithUIInternal::MakeErrorFromSpecError(E);
+    }
+
+    // Auto-resolve the canonical brush property when property_name is omitted.
+    // UImage exposes its brush as "Brush"; UBorder exposes it as "Background".
+    // URoundedBorder is a UBorder subclass and is intentionally resolved
+    // structurally via Cast<UBorder> to avoid a compile-time dep on the optional
+    // RoundedBorder class. Explicit callers are unaffected — this only fires when
+    // the caller supplied no property_name.
+    if (PropertyName.IsEmpty())
+    {
+        if (Cast<UImage>(Widget))
+        {
+            PropertyName = TEXT("Brush");
+        }
+        else if (Cast<UBorder>(Widget))
+        {
+            PropertyName = TEXT("Background");
+        }
+        else
+        {
+            FUISpecError E = MonolithUIInternal::MakeSpecError(
+                TEXT("MissingInput"),
+                TEXT("/property_name"),
+                FString::Printf(TEXT("Cannot auto-resolve a brush property for widget '%s' (class %s)."),
+                    *WidgetName, *Widget->GetClass()->GetName()),
+                TEXT("property_name auto-resolves only for Image (Brush) and Border/RoundedBorder (Background). For other widgets, name the FSlateBrush property explicitly (e.g. BarFillStyle.FillImage)."));
+            E.WidgetId = FName(*WidgetName);
+            return MonolithUIInternal::MakeErrorFromSpecError(E);
+        }
     }
 
     // Find the FSlateBrush property by name (supports nested like "BarFillStyle.FillImage")
@@ -485,18 +516,19 @@ FMonolithActionResult FMonolithUIStylingActions::HandleSetColorScheme(const TSha
 
     for (const auto& Pair : (*ColorsObj)->Values)
     {
-        const EStyleColor* SlotColor = SlotMap.Find(Pair.Key);
+        const FString PairKeyStr = MonolithKeyToString(Pair.Key);
+        const EStyleColor* SlotColor = SlotMap.Find(PairKeyStr);
         if (!SlotColor)
         {
             return FMonolithActionResult::Error(
-                FString::Printf(TEXT("Unknown color slot: '%s'. Valid: User1-User16"), *Pair.Key));
+                FString::Printf(TEXT("Unknown color slot: '%s'. Valid: User1-User16"), *PairKeyStr));
         }
 
         FString ColorStr = Pair.Value->AsString();
         FLinearColor Color = MonolithUIInternal::ParseColor(ColorStr);
         USlateThemeManager::Get().SetDefaultColor(*SlotColor, Color);
         SlotsSet++;
-        SetNames.Add(Pair.Key);
+        SetNames.Add(PairKeyStr);
     }
 
     if (SlotsSet == 0)

@@ -2,6 +2,7 @@
 // MonolithUIStyleService.cpp — Phase G
 
 #include "Style/MonolithUIStyleService.h"
+#include "MonolithJsonUtils.h"
 
 #if WITH_COMMONUI
 
@@ -65,7 +66,7 @@ namespace
         Keys.Reserve(Object->Values.Num());
         for (const auto& Pair : Object->Values)
         {
-            Keys.Add(Pair.Key);
+            Keys.Add(MonolithKeyToString(Pair.Key));
         }
         Keys.Sort();
 
@@ -77,7 +78,7 @@ namespace
             Out.Append(Keys[i]);
             Out.Append(TEXT("\":"));
 
-            const TSharedPtr<FJsonValue>& Field = Object->Values.FindChecked(Keys[i]);
+            const TSharedPtr<FJsonValue>& Field = Object->Values.FindChecked(MonolithMakeJsonKey(Keys[i]));
             AppendCanonical(Out, Field);
         }
         Out.Append(TEXT("}"));

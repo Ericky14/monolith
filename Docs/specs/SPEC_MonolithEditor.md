@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.20.0 (Beta)
+**Version:** 0.22.0 (Beta)
 
 ---
 
@@ -89,7 +89,7 @@ Pattern table:
 | Action | Description |
 |--------|-------------|
 | `run_python` | Execute Python via `IPythonScriptPlugin::ExecPythonCommandEx`. Modes: `execute_file`, `execute_statement`, `evaluate_statement`. Returns success, captured Python log output (typed: info/warning/error), and evaluated result for `evaluate_statement`. |
-| `load_level` | Wraps `ULevelEditorSubsystem::LoadLevel(AssetPath)`. Single-arg map swap; closes current persistent level without saving. **World-leak guard:** if a PIE world is still resident, the action REFUSES while a smoke session is running (caller must `stop_pie_smoke` first), else it drives PIE teardown to completion (`RequestEndPlayMap` + bounded synchronous `EndPlayMap`) and forces `CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS)` before loading — without this the deferred EndPlayMap leaves the PIE world rooted and `EditorDestroyWorld` asserts `World Memory Leaks: N`. |
+| `load_level` | Wraps `ULevelEditorSubsystem::LoadLevel(AssetPath)`. Single-arg map swap. **Dirty-current-map guard (fail-closed):** `LoadLevel` runs unattended (no save prompt), so if the current world's packages (persistent level, loaded streaming levels, or their loaded external OFPA/actor/data-layer packages) are dirty, the action REFUSES with the dirty package list; pass `dirty_policy:"discard"` to proceed and lose them explicitly (echoed in `discarded_dirty_packages`). **World-leak guard:** if a PIE world is still resident, the action REFUSES while a smoke session is running (caller must `stop_pie_smoke` first), else it drives PIE teardown to completion (`RequestEndPlayMap` + bounded synchronous `EndPlayMap`) and forces `CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS)` before loading — without this the deferred EndPlayMap leaves the PIE world rooted and `EditorDestroyWorld` asserts `World Memory Leaks: N`. **Stale-resident-target guard:** if a rooted in-memory copy of the TARGET world survives a standalone-flag-clear + GC pass (e.g. a Python variable still references it), the action REFUSES instead of tripping the same fatal assert. |
 
 **PIE Control (3 — v0.14.10, PR #54 by @MaxenceEpitech)**
 

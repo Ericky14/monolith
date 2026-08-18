@@ -4,6 +4,8 @@
 #include "MonolithFuzzyMatch.h"
 #include "HAL/PlatformMisc.h"
 #include "Dom/JsonValue.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 // =============================================================================
 //  FMonolithParamSchema — K2 alias rewriting + K3 unknown-key detection
@@ -21,7 +23,7 @@ bool FMonolithParamSchema::ApplyAliases(
 
 	for (const auto& Pair : Schema->Values)
 	{
-		const FString& Canonical = Pair.Key;
+		const FString Canonical = MonolithKeyToString(Pair.Key);
 
 		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
 		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
@@ -86,7 +88,7 @@ TArray<FString> FMonolithParamSchema::FindUnknownKeys(
 	TSet<FString> Allowed;
 	for (const auto& Pair : Schema->Values)
 	{
-		Allowed.Add(Pair.Key);
+		Allowed.Add(MonolithKeyToString(Pair.Key));
 
 		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
 		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
@@ -126,9 +128,10 @@ TArray<FString> FMonolithParamSchema::FindUnknownKeys(
 
 	for (const auto& Pair : Params->Values)
 	{
-		if (!Allowed.Contains(Pair.Key))
+		const FString PairKeyStr = MonolithKeyToString(Pair.Key);
+		if (!Allowed.Contains(PairKeyStr))
 		{
-			Unknown.Add(Pair.Key);
+			Unknown.Add(PairKeyStr);
 		}
 	}
 
@@ -319,6 +322,54 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		}
 	}
 
+	// K4 — string-encoded complex-param recovery. Some MCP clients (Claude
+	// Code among them) serialize array/object argument values to JSON-encoded
+	// strings. batch_execute has long carried a local string-parse fallback for
+	// its `operations` param ("Claude Code quirk"); every other array/object
+	// param silently arrived as a string and failed its handler's typed field
+	// lookup ("<param> array is required" with the value right there). Recover
+	// centrally: when the schema declares array/object and the incoming value
+	// is a string that parses as that JSON kind, replace it with the parsed
+	// value. Strings that don't parse pass through untouched, so a legitimate
+	// string value can never be corrupted.
+	if (ActionInfo.ParamSchema.IsValid())
+	{
+		for (const auto& SchemaPair : ActionInfo.ParamSchema->Values)
+		{
+			const TSharedPtr<FJsonObject>* ParamDefPtr = nullptr;
+			if (!SchemaPair.Value->TryGetObject(ParamDefPtr) || !ParamDefPtr) continue;
+
+			FString DeclaredType;
+			(*ParamDefPtr)->TryGetStringField(TEXT("type"), DeclaredType);
+			const bool bWantsArray  = DeclaredType == TEXT("array");
+			const bool bWantsObject = DeclaredType == TEXT("object");
+			if (!bWantsArray && !bWantsObject) continue;
+
+			const FString KeyStr = MonolithKeyToString(SchemaPair.Key);
+			FString StrVal;
+			if (!EffectiveParams->TryGetStringField(KeyStr, StrVal) || StrVal.IsEmpty()) continue;
+
+			if (bWantsArray)
+			{
+				TArray<TSharedPtr<FJsonValue>> ParsedArr;
+				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(StrVal);
+				if (FJsonSerializer::Deserialize(Reader, ParsedArr))
+				{
+					EffectiveParams->SetArrayField(KeyStr, ParsedArr);
+				}
+			}
+			else
+			{
+				TSharedPtr<FJsonObject> ParsedObj;
+				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(StrVal);
+				if (FJsonSerializer::Deserialize(Reader, ParsedObj) && ParsedObj.IsValid())
+				{
+					EffectiveParams->SetObjectField(KeyStr, ParsedObj);
+				}
+			}
+		}
+	}
+
 	// Validate required params from schema before dispatching.
 	// Skip asset_path — GetAssetPath() accepts both asset_path and system_path aliases
 	// and produces a clear error message itself.
@@ -327,27 +378,28 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 		TArray<FString> Missing;
 		for (const auto& Pair : ActionInfo.ParamSchema->Values)
 		{
-			if (Pair.Key == TEXT("asset_path")) continue;
+			const FString PairKeyStr = MonolithKeyToString(Pair.Key);
+			if (PairKeyStr == TEXT("asset_path")) continue;
 
 			const TSharedPtr<FJsonObject>* ParamDef = nullptr;
 			if (Pair.Value->TryGetObject(ParamDef) && ParamDef)
 			{
 				bool bRequired = false;
 				(*ParamDef)->TryGetBoolField(TEXT("required"), bRequired);
-				if (bRequired && !EffectiveParams->HasField(Pair.Key))
+				if (bRequired && !EffectiveParams->HasField(PairKeyStr))
 				{
 					// Legacy wbp_path / asset_path aliasing: accept asset_path as substitute for wbp_path
 					// (only fires for schemas not migrated to K2 aliases).
-					if (Pair.Key == TEXT("wbp_path") && EffectiveParams->HasField(TEXT("asset_path")))
+					if (PairKeyStr == TEXT("wbp_path") && EffectiveParams->HasField(TEXT("asset_path")))
 						continue;
-					Missing.Add(Pair.Key);
+					Missing.Add(PairKeyStr);
 				}
 			}
 		}
 		if (Missing.Num() > 0)
 		{
 			TArray<FString> Provided;
-			for (const auto& P : EffectiveParams->Values) Provided.Add(P.Key);
+			for (const auto& P : EffectiveParams->Values) Provided.Add(MonolithKeyToString(P.Key));
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s] — inspect the action's parameter schema via monolith_discover(\"<namespace>\") and supply all required fields."),
 					*FString::Join(Missing, TEXT(", ")),
@@ -391,7 +443,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 				continue;
 			}
 
-			const FString& ParamName = SchemaPair.Key;
+			const FString ParamName = MonolithKeyToString(SchemaPair.Key);
 			FString Value;
 			if (!EffectiveParams->TryGetStringField(ParamName, Value))
 			{

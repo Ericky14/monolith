@@ -24,6 +24,7 @@
 #include "MonolithBulkFillTypes.h"
 #include "Reflection/MonolithReflectionWalker.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "ScopedTransaction.h"
@@ -233,12 +234,12 @@ namespace MonolithNiagaraBulkFillInternal
 		{
 			for (const auto& KV : (*ParamsObjPtr)->Values)
 			{
-				if (LooksLikeGPUParam(KV.Key))
+				if (LooksLikeGPUParam(MonolithKeyToString(KV.Key)))
 				{
 					return MakeResolveFailureReport(FString::Printf(
 						TEXT("niagara adapter: parameter '%s' looks like a GPU-sim param — "
 						     "WISHLIST: GPU emitter introspection one-way"),
-						*KV.Key));
+						*MonolithKeyToString(KV.Key)));
 				}
 			}
 		}

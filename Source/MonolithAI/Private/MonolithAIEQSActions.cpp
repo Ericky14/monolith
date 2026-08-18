@@ -1,6 +1,7 @@
 #include "MonolithAIEQSActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
@@ -207,7 +208,7 @@ namespace
 		for (const auto& Pair : PropsObj->Values)
 		{
 			FString Error;
-			if (!SetEQSPropertyValue(Obj, Pair.Key, Pair.Value, Error))
+			if (!SetEQSPropertyValue(Obj, MonolithKeyToString(Pair.Key), Pair.Value, Error))
 			{
 				OutErrors.Add(Error);
 			}

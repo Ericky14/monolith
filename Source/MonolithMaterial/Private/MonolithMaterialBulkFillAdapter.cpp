@@ -28,6 +28,7 @@
 #include "MonolithBulkFillTypes.h"
 #include "Reflection/MonolithReflectionWalker.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "ScopedTransaction.h"
@@ -104,9 +105,10 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*ScalarsObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				const FString KVKeyStr = MonolithKeyToString(KV.Key);
+				if (LooksLikeLayeredParam(KVKeyStr))
 				{
-					RecordField(FString::Printf(TEXT("scalars[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("scalars[%s]"), *KVKeyStr),
 						TEXT("(layered param)"), false,
 						TEXT("MaterialAttributeLayers writes rejected — WISHLIST per design Non-Goals §29"));
 					continue;
@@ -114,7 +116,7 @@ namespace MonolithMaterialBulkFillInternal
 				double V = 0.0;
 				if (!KV.Value->TryGetNumber(V))
 				{
-					RecordField(FString::Printf(TEXT("scalars[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("scalars[%s]"), *KVKeyStr),
 						TEXT(""), false, TEXT("scalar value must be a number"));
 					continue;
 				}
@@ -122,9 +124,9 @@ namespace MonolithMaterialBulkFillInternal
 				if (!Spec.bDryRun)
 				{
 					MIC->SetScalarParameterValueEditorOnly(
-						FMaterialParameterInfo(*KV.Key), FloatV);
+						FMaterialParameterInfo(*KVKeyStr), FloatV);
 				}
-				RecordField(FString::Printf(TEXT("scalars[%s]"), *KV.Key),
+				RecordField(FString::Printf(TEXT("scalars[%s]"), *KVKeyStr),
 					FString::SanitizeFloat(FloatV), true);
 			}
 		}
@@ -135,9 +137,10 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*VectorsObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				const FString KVKeyStr = MonolithKeyToString(KV.Key);
+				if (LooksLikeLayeredParam(KVKeyStr))
 				{
-					RecordField(FString::Printf(TEXT("vectors[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("vectors[%s]"), *KVKeyStr),
 						TEXT("(layered param)"), false,
 						TEXT("MaterialAttributeLayers writes rejected — WISHLIST per design Non-Goals §29"));
 					continue;
@@ -145,7 +148,7 @@ namespace MonolithMaterialBulkFillInternal
 				const TSharedPtr<FJsonObject>* RgbaObj = nullptr;
 				if (!KV.Value->TryGetObject(RgbaObj) || !RgbaObj || !(*RgbaObj).IsValid())
 				{
-					RecordField(FString::Printf(TEXT("vectors[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("vectors[%s]"), *KVKeyStr),
 						TEXT(""), false, TEXT("vector value must be {r,g,b,a} object"));
 					continue;
 				}
@@ -158,9 +161,9 @@ namespace MonolithMaterialBulkFillInternal
 				if (!Spec.bDryRun)
 				{
 					MIC->SetVectorParameterValueEditorOnly(
-						FMaterialParameterInfo(*KV.Key), LC);
+						FMaterialParameterInfo(*KVKeyStr), LC);
 				}
-				RecordField(FString::Printf(TEXT("vectors[%s]"), *KV.Key),
+				RecordField(FString::Printf(TEXT("vectors[%s]"), *KVKeyStr),
 					LC.ToString(), true);
 			}
 		}
@@ -171,9 +174,10 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*TexturesObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				const FString KVKeyStr = MonolithKeyToString(KV.Key);
+				if (LooksLikeLayeredParam(KVKeyStr))
 				{
-					RecordField(FString::Printf(TEXT("textures[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("textures[%s]"), *KVKeyStr),
 						TEXT("(layered param)"), false,
 						TEXT("MaterialAttributeLayers writes rejected — WISHLIST"));
 					continue;
@@ -181,14 +185,14 @@ namespace MonolithMaterialBulkFillInternal
 				FString TexPath;
 				if (!KV.Value->TryGetString(TexPath))
 				{
-					RecordField(FString::Printf(TEXT("textures[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("textures[%s]"), *KVKeyStr),
 						TEXT(""), false, TEXT("texture value must be an asset path string"));
 					continue;
 				}
 				UTexture* Tex = Cast<UTexture>(FMonolithAssetUtils::LoadAssetByPath(TexPath));
 				if (!Tex)
 				{
-					RecordField(FString::Printf(TEXT("textures[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("textures[%s]"), *KVKeyStr),
 						TexPath, false,
 						FString::Printf(TEXT("texture asset '%s' not found"), *TexPath));
 					continue;
@@ -196,9 +200,9 @@ namespace MonolithMaterialBulkFillInternal
 				if (!Spec.bDryRun)
 				{
 					MIC->SetTextureParameterValueEditorOnly(
-						FMaterialParameterInfo(*KV.Key), Tex);
+						FMaterialParameterInfo(*KVKeyStr), Tex);
 				}
-				RecordField(FString::Printf(TEXT("textures[%s]"), *KV.Key), TexPath, true);
+				RecordField(FString::Printf(TEXT("textures[%s]"), *KVKeyStr), TexPath, true);
 			}
 		}
 
@@ -208,9 +212,10 @@ namespace MonolithMaterialBulkFillInternal
 		{
 			for (const auto& KV : (*SwitchesObj)->Values)
 			{
-				if (LooksLikeLayeredParam(KV.Key))
+				const FString KVKeyStr = MonolithKeyToString(KV.Key);
+				if (LooksLikeLayeredParam(KVKeyStr))
 				{
-					RecordField(FString::Printf(TEXT("switches[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("switches[%s]"), *KVKeyStr),
 						TEXT("(layered param)"), false,
 						TEXT("MaterialAttributeLayers writes rejected — WISHLIST"));
 					continue;
@@ -218,7 +223,7 @@ namespace MonolithMaterialBulkFillInternal
 				bool BoolV = false;
 				if (!KV.Value->TryGetBool(BoolV))
 				{
-					RecordField(FString::Printf(TEXT("switches[%s]"), *KV.Key),
+					RecordField(FString::Printf(TEXT("switches[%s]"), *KVKeyStr),
 						TEXT(""), false, TEXT("switch value must be a bool"));
 					continue;
 				}
@@ -228,9 +233,9 @@ namespace MonolithMaterialBulkFillInternal
 					// 2-arg form (no FGuid override) — third FGuid is defaulted
 					// internally by the engine.
 					MIC->SetStaticSwitchParameterValueEditorOnly(
-						FMaterialParameterInfo(*KV.Key), BoolV);
+						FMaterialParameterInfo(*KVKeyStr), BoolV);
 				}
-				RecordField(FString::Printf(TEXT("switches[%s]"), *KV.Key),
+				RecordField(FString::Printf(TEXT("switches[%s]"), *KVKeyStr),
 					BoolV ? TEXT("true") : TEXT("false"), true);
 			}
 		}

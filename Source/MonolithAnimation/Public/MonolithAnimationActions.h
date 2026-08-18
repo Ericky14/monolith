@@ -84,6 +84,9 @@ public:
 	static FMonolithActionResult HandleGetSkeletonSockets(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetSkeletonPreviewAttachedAssets(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetBoneRefPose(const TSharedPtr<FJsonObject>& Params);
+	// T3-2: animated-frame FK-composed transform for one bone (extends get_bone_ref_pose's
+	// bind-pose compose to an evaluated animation frame/time).
+	static FMonolithActionResult HandleGetAnimatedBoneTransform(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetAbpInfo(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Wave 2: Notify CRUD (4) ---
@@ -224,6 +227,16 @@ public:
 	static FMonolithActionResult HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRemoveSyncMarker(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleRenameSyncMarker(const TSharedPtr<FJsonObject>& Params);
+
+	// derive_foot_sync_markers — auto-derive L/R foot-plant sync markers from data
+	// already present in a clip, via a 5-signal availability cascade (first signal
+	// that yields plants wins): existing markers -> footstep notifies -> contact_l/_r
+	// curves -> Phase curve extrema -> component-space foot-bone speed minima. The
+	// foot-speed fallback is a native port of UFootstepAnimEventsModifier's FootBoneSpeed
+	// technique (GetAnimPoseAtTimeIntervals + GetBonePose World space), so the action is
+	// project-agnostic and needs no per-project modifier-config assets. All thresholds,
+	// bone names, marker names and notify-track patterns are overridable. Honours dry_run.
+	static FMonolithActionResult HandleDeriveFootSyncMarkers(const TSharedPtr<FJsonObject>& Params);
 
 	// --- Anim-node bindings: function (Gap 2) + pin property (Gap 12) ---
 	// Function bindings live on UAnimGraphNode_Base's public FMemberReference

@@ -58,7 +58,7 @@ namespace BuildingValidationHelpers
 		if (Params->HasField(Key))
 		{
 			// Handle both bool and string "true"/"false"
-			const TSharedPtr<FJsonValue>& Val = Params->Values.FindChecked(Key);
+			const TSharedPtr<FJsonValue>& Val = Params->Values.FindChecked(MonolithMakeJsonKey(Key));
 			if (Val->Type == EJson::Boolean)
 			{
 				return Val->AsBool();

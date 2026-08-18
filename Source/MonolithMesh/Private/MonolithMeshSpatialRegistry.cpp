@@ -257,7 +257,7 @@ FSpatialBlock FSpatialBlock::FromJson(const TSharedPtr<FJsonObject>& Json)
 			{
 				for (const auto& [Key, Val] : (*TagsPtr)->Values)
 				{
-					R.Tags.Add(Key, Val->AsString());
+					R.Tags.Add(MonolithKeyToString(Key), Val->AsString());
 				}
 			}
 
@@ -343,7 +343,7 @@ FSpatialBlock FSpatialBlock::FromJson(const TSharedPtr<FJsonObject>& Json)
 						Edges.Add(MoveTemp(Edge));
 					}
 				}
-				Block.AdjacencyGraph.Add(RoomId, MoveTemp(Edges));
+				Block.AdjacencyGraph.Add(MonolithKeyToString(RoomId), MoveTemp(Edges));
 			}
 		}
 	}
@@ -1066,7 +1066,7 @@ FMonolithActionResult FMonolithMeshSpatialRegistry::RegisterRoom(const TSharedPt
 	{
 		for (const auto& [Key, Val] : (*TagsPtr)->Values)
 		{
-			Room.Tags.Add(Key, Val->AsString());
+			Room.Tags.Add(MonolithKeyToString(Key), Val->AsString());
 		}
 	}
 
@@ -1274,7 +1274,7 @@ FMonolithActionResult FMonolithMeshSpatialRegistry::QueryRoomsByFilter(const TSh
 			bool bAllTagsMatch = true;
 			for (const auto& [Key, Val] : (*TagsFilterPtr)->Values)
 			{
-				const FString* RoomTag = Room.Tags.Find(Key);
+				const FString* RoomTag = Room.Tags.Find(MonolithKeyToString(Key));
 				if (!RoomTag || *RoomTag != Val->AsString())
 				{
 					bAllTagsMatch = false;

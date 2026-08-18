@@ -1,6 +1,7 @@
 #include "MonolithControlRigWriteActions.h"
 #include "MonolithAssetUtils.h"
 #include "MonolithParamSchema.h"
+#include "MonolithJsonUtils.h"
 
 #include "ControlRigBlueprintLegacy.h"
 #include "RigVMModel/RigVMGraph.h"
@@ -9,7 +10,12 @@
 #include "RigVMModel/RigVMLink.h"
 #include "RigVMModel/RigVMController.h"
 #include "RigVMModel/RigVMClient.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
+// UE 5.8 relocated IRigVMAssetInterface (now an alias of IRigVMEditorAssetInterface).
+#include "RigVMEditorAsset.h"
+#else
 #include "RigVMAsset.h"
+#endif
 #include "RigVMModel/Nodes/RigVMUnitNode.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -346,7 +352,7 @@ FMonolithActionResult FMonolithControlRigWriteActions::HandleAddControlRigNode(c
 				// For objects/arrays, serialize to string
 				FString JsonStr;
 				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonStr);
-				FJsonSerializer::Serialize(KV.Value, KV.Key, Writer);
+				FJsonSerializer::Serialize(KV.Value, MonolithKeyToString(KV.Key), Writer);
 				Value = JsonStr;
 			}
 

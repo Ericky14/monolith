@@ -148,7 +148,7 @@ FDryRunReport FMonolithBlueprintBulkFillAdapter::BlueprintBulkFill(const FBulkFi
 	// the tree touched and fire per-prop.
 	for (const auto& KV : Spec.Tree->Values)
 	{
-		FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(TargetClass, KV.Key);
+		FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(TargetClass, MonolithKeyToString(KV.Key));
 		if (TopProp)
 		{
 			MonolithEditCradle::ReparentTransientInstancedSubobjects(TargetObject, TopProp);

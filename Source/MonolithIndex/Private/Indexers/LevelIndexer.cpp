@@ -204,7 +204,7 @@ void FLevelIndexer::IndexWorldBatch(TArrayView<const FAssetData> Batch, FMonolit
 		if (!World || !World->PersistentLevel)
 		{
 			// Mark package for unload even if we couldn't find the world
-			FMonolithMemoryHelper::TryUnloadPackage(Package);
+			FMonolithMemoryHelper::TryUnloadPackage(Package, /*bWasAlreadyLoaded=*/false);
 			continue;
 		}
 
@@ -326,7 +326,7 @@ void FLevelIndexer::IndexWorldBatch(TArrayView<const FAssetData> Batch, FMonolit
 				}
 
 				// Mark world/package for unloading after indexing
-				FMonolithMemoryHelper::TryUnloadPackage(World);
+				FMonolithMemoryHelper::TryUnloadPackage(World, /*bWasAlreadyLoaded=*/false);
 			}
 		}
 

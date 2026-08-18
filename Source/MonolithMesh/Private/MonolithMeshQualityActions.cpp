@@ -1,5 +1,6 @@
 #include "MonolithMeshQualityActions.h"
 #include "MonolithMeshUtils.h"
+#include "MonolithJsonUtils.h"
 #include "MonolithMeshAnalysis.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
@@ -189,7 +190,7 @@ FMonolithActionResult FMonolithMeshQualityActions::ValidateNamingConventions(con
 			FString Prefix;
 			if (Pair.Value->TryGetString(Prefix))
 			{
-				PrefixRules.Add(Pair.Key, Prefix);
+				PrefixRules.Add(MonolithKeyToString(Pair.Key), Prefix);
 			}
 		}
 	}
@@ -498,7 +499,10 @@ FMonolithActionResult FMonolithMeshQualityActions::GenerateProxyMesh(const TShar
 	MergeSettings.bMergeMeshSockets = true;
 	MergeSettings.bMergePhysicsData = true;
 	MergeSettings.bBakeVertexDataToMesh = false;
+#if !(ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+	// FMeshMergingSettings::bPivotPointAtZero deprecated/renamed in UE 5.8; false was the default.
 	MergeSettings.bPivotPointAtZero = false;
+#endif
 
 	if (bMergeMaterials)
 	{

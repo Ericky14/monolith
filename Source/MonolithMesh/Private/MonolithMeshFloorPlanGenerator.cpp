@@ -1120,7 +1120,7 @@ bool FMonolithMeshFloorPlanGenerator::ParseArchetypeJson(const TSharedPtr<FJsonO
 	{
 		for (const auto& OuterPair : (*AdjMatObj)->Values)
 		{
-			const FString& RoomTypeA = OuterPair.Key;
+			const FString RoomTypeA = MonolithKeyToString(OuterPair.Key);
 			const TSharedPtr<FJsonObject>* InnerObj = nullptr;
 			if (!OuterPair.Value->TryGetObject(InnerObj) || !InnerObj || !(*InnerObj).IsValid())
 				continue;
@@ -1129,7 +1129,7 @@ bool FMonolithMeshFloorPlanGenerator::ParseArchetypeJson(const TSharedPtr<FJsonO
 
 			for (const auto& InnerPair : (*InnerObj)->Values)
 			{
-				const FString& RoomTypeB = InnerPair.Key;
+				const FString RoomTypeB = MonolithKeyToString(InnerPair.Key);
 				FString RelStr;
 				if (InnerPair.Value->TryGetString(RelStr))
 				{

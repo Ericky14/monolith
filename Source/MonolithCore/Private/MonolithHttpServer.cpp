@@ -30,10 +30,9 @@ bool FMonolithHttpServer::Start(int32 Port)
 	}
 
 	// On a fresh editor launch, the OS keeps the port in TIME_WAIT for up to
-	// 2*MSL (~30s on macOS/Linux) after the previous editor shut down. UE's
-	// HttpServerModule also caches a broken listener internally and won't
-	// rebind until StopAllListeners() is called. Budget ~40s total so a
-	// rapid close+reopen cycle doesn't drop the MCP server on the floor.
+	// 2*MSL (~30s on macOS/Linux) after the previous editor shut down. Budget
+	// ~40s total so a rapid close+reopen cycle doesn't drop the MCP server on
+	// the floor.
 	constexpr int32 MaxAttempts = 20;
 	constexpr float BackoffSeconds = 2.0f;
 
@@ -45,20 +44,13 @@ bool FMonolithHttpServer::Start(int32 Port)
 				Attempt, MaxAttempts, Port, BackoffSeconds);
 			FPlatformProcess::Sleep(BackoffSeconds);
 
-			// Drop our router handle + routes so GetHttpRouter can evict failed listener.
-			if (HttpRouter.IsValid())
-			{
-				for (const FHttpRouteHandle& Handle : RouteHandles)
-				{
-					HttpRouter->UnbindRoute(Handle);
-				}
-			}
-			RouteHandles.Empty();
-			HttpRouter.Reset();
-
-			// Full module reset — the HttpServerModule caches a failed listener
-			// and refuses to re-bind the same port until we explicitly stop it.
-			FHttpServerModule::Get().StopAllListeners();
+			// Drop our routes only. We deliberately do NOT call
+			// StopAllListeners() — it is process-wide and would stop every
+			// other subsystem's listener too. Leaving the module's
+			// bHttpListenersEnabled flag true is what lets the GetHttpRouter
+			// call below evict a failed listener and build a fresh one; with
+			// listeners disabled it would hand back the dead one instead.
+			DeactivateRoutes();
 		}
 
 		HttpRouter = FHttpServerModule::Get().GetHttpRouter(Port, true);
@@ -89,15 +81,7 @@ bool FMonolithHttpServer::Start(int32 Port)
 	UE_LOG(LogMonolith, Error, TEXT("Failed to bind Monolith MCP server on port %d after %d attempts (~%ds total)"),
 		Port, MaxAttempts, static_cast<int32>(MaxAttempts * BackoffSeconds));
 	// Clean up
-	if (HttpRouter.IsValid())
-	{
-		for (const FHttpRouteHandle& Handle : RouteHandles)
-		{
-			HttpRouter->UnbindRoute(Handle);
-		}
-	}
-	RouteHandles.Empty();
-	HttpRouter.Reset();
+	DeactivateRoutes();
 	return false;
 }
 
@@ -108,20 +92,30 @@ void FMonolithHttpServer::Stop()
 		return;
 	}
 
+	DeactivateRoutes();
+
+	UE_LOG(LogMonolith, Log, TEXT("Monolith MCP server stopped"));
+}
+
+void FMonolithHttpServer::DeactivateRoutes()
+{
 	if (HttpRouter.IsValid())
 	{
 		for (const FHttpRouteHandle& Handle : RouteHandles)
 		{
 			HttpRouter->UnbindRoute(Handle);
 		}
-		RouteHandles.Empty();
 	}
+	RouteHandles.Empty();
 
-	FHttpServerModule::Get().StopAllListeners();
-	HttpRouter.Reset();
-
+	// The HttpRouter and the module's listeners are intentionally left alone.
+	// FHttpServerModule::StopAllListeners() is process-wide: it would silently
+	// kill Web Remote Control, PerfCounters, ExternalRpcRegistry and every
+	// other plugin's HTTP routes along with ours. Unbinding our own handles is
+	// enough to take Monolith off the wire; the listener keeps holding the
+	// port until the editor exits.
 	bIsRunning = false;
-	UE_LOG(LogMonolith, Log, TEXT("Monolith MCP server stopped"));
+	BoundPort = 0;
 }
 
 void FMonolithHttpServer::BindRoutes()
@@ -173,8 +167,26 @@ bool FMonolithHttpServer::ProbePort(int32 Port)
 	FSocket* Socket = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("MonolithProbe"), false);
 	if (!Socket) return false;
 
-	Socket->SetNonBlocking(false);
-	const bool bConnected = Socket->Connect(*Addr);
+	bool bConnected = false;
+
+	if (Socket->SetNonBlocking(true))
+	{
+		// Connect() on a non-blocking socket reports success for both
+		// SE_EWOULDBLOCK and SE_EINPROGRESS, so its return value says nothing
+		// about whether anything is listening. Wait for writability, then ask
+		// the socket for its actual state — that is the verdict. Without this,
+		// a probe of a closed port would "succeed" and we would log that we
+		// are listening having bound nothing.
+		Socket->Connect(*Addr);
+		Socket->Wait(ESocketWaitConditions::WaitForWrite, FTimespan::FromMilliseconds(100));
+		bConnected = Socket->GetConnectionState() == SCS_Connected;
+	}
+	else
+	{
+		// Platform refused the mode change — fall back to a blocking connect.
+		bConnected = Socket->Connect(*Addr);
+	}
+
 	Socket->Close();
 	SocketSubsystem->DestroySocket(Socket);
 	return bConnected;
@@ -182,22 +194,15 @@ bool FMonolithHttpServer::ProbePort(int32 Port)
 
 bool FMonolithHttpServer::Restart(int32 Port)
 {
-	// Unbind our routes
-	if (HttpRouter.IsValid())
-	{
-		for (const FHttpRouteHandle& Handle : RouteHandles)
-		{
-			HttpRouter->UnbindRoute(Handle);
-		}
-	}
-	RouteHandles.Empty();
+	DeactivateRoutes();
+
+	// Drop our router handle so Start() re-fetches one. The module's listeners
+	// stay enabled, which is what lets GetHttpRouter evict a wedged listener
+	// and rebuild it — StopAllListeners() would disable them and make the
+	// module hand back the dead listener instead (besides stopping every other
+	// plugin's routes).
 	HttpRouter.Reset();
 
-	// Full stop — safe here because we own the listener
-	FHttpServerModule::Get().StopAllListeners();
-
-	bIsRunning = false;
-	BoundPort = 0;
 	return Start(Port);
 }
 
@@ -481,7 +486,8 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleInitialize(const TSharedPtr<F
 		TEXT("Monolith MCP server for Unreal Engine. ")
 		TEXT("Before calling a domain action, check its schema instead of guessing: ")
 		TEXT("monolith_discover() lists namespaces, monolith_discover('<namespace>') lists a ")
-		TEXT("namespace's actions, and describe_query('action_schema', ...) returns an action's ")
+		TEXT("namespace's action names + descriptions (terse by default — pass detail=true to ")
+		TEXT("inline param schemas), and describe_query('action_schema', ...) returns one action's ")
 		TEXT("exact parameter schema. monolith_guide(section='recipes') gives cross-namespace ")
 		TEXT("workflows, decision matrices, and gotchas."));
 
@@ -570,7 +576,7 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsList(const TSharedPtr<FJ
 			}
 
 			const FString Description = FString::Printf(
-				TEXT("Query the %s domain. Call monolith_discover(\"%s\") for the action list."),
+				TEXT("Query the %s domain. Call monolith_discover(\"%s\") for the action list (name + description); pass detail=true or call describe_query action_schema for an action's full param schema."),
 				*Namespace, *Namespace);
 			Tool->SetStringField(TEXT("description"), Description);
 
@@ -592,11 +598,12 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsList(const TSharedPtr<FJ
 			ActionProp->SetArrayField(TEXT("enum"), EnumValues);
 			Properties->SetObjectField(TEXT("action"), ActionProp);
 
-			// "params" property — keep lightweight; full per-action schemas available via monolith_discover
+			// "params" property — keep lightweight; per-action schemas come from
+			// describe_query action_schema (or monolith_discover detail=true).
 			TSharedPtr<FJsonObject> ParamsProp = MakeShared<FJsonObject>();
 			ParamsProp->SetStringField(TEXT("type"), TEXT("object"));
 			ParamsProp->SetStringField(TEXT("description"),
-				FString::Printf(TEXT("Parameters for the action. Call monolith_discover(\"%s\") for full parameter schemas."), *Namespace));
+				FString::Printf(TEXT("Parameters for the action. monolith_discover(\"%s\") is terse by default (name + description); pass detail=true for full param schemas, or call describe_query action_schema for one action."), *Namespace));
 			Properties->SetObjectField(TEXT("params"), ParamsProp);
 
 			InputSchema->SetObjectField(TEXT("properties"), Properties);
@@ -722,7 +729,16 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 		}
 		else
 		{
-			// No nested "params" — use top-level fields as params directly
+			// No nested "params" object — use top-level fields as params directly.
+			// If a "params" field exists but is NOT an object (or an object-parsable
+			// string), it is an ACTION param that happens to be named "params"
+			// (e.g. set_event_dispatcher_params) — keep it instead of silently
+			// dropping it; the registry's string-recovery pass restores its
+			// declared type.
+			if (TSharedPtr<FJsonValue> RawParamsField = Arguments->TryGetField(TEXT("params")))
+			{
+				TopLevelExtras->SetField(TEXT("params"), RawParamsField);
+			}
 			Arguments = TopLevelExtras;
 		}
 	}
@@ -791,7 +807,16 @@ TSharedPtr<FJsonObject> FMonolithHttpServer::HandleToolsCall(const TSharedPtr<FJ
 		}
 		else
 		{
-			// No nested "params" — use top-level fields as params directly
+			// No nested "params" object — use top-level fields as params directly.
+			// If a "params" field exists but is NOT an object (or an object-parsable
+			// string), it is an ACTION param that happens to be named "params"
+			// (e.g. set_event_dispatcher_params) — keep it instead of silently
+			// dropping it; the registry's string-recovery pass restores its
+			// declared type.
+			if (TSharedPtr<FJsonValue> RawParamsField = Arguments->TryGetField(TEXT("params")))
+			{
+				TopLevelExtras->SetField(TEXT("params"), RawParamsField);
+			}
 			Arguments = TopLevelExtras;
 		}
 	}

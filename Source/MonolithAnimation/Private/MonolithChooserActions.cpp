@@ -1,5 +1,6 @@
 #include "MonolithChooserActions.h"
 #include "MonolithParamSchema.h"
+#include "MonolithJsonUtils.h" // MonolithKeyToString (5.7/5.8 JSON key shim)
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -544,7 +545,7 @@ FMonolithActionResult FMonolithChooserActions::HandleDuplicateChooserTree(const 
 			FString Val;
 			if (Pair.Value.IsValid() && Pair.Value->TryGetString(Val))
 			{
-				Remap.Add(NormalizePackagePath(Pair.Key), Val);
+				Remap.Add(NormalizePackagePath(MonolithKeyToString(Pair.Key)), Val);
 			}
 		}
 	}

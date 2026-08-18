@@ -277,7 +277,7 @@ bool FMonolithAudioAssetActions::JsonToStruct(const TSharedPtr<FJsonObject>& Jso
 
 	for (const auto& Pair : Json->Values)
 	{
-		const FString& FieldName = Pair.Key;
+		const FString FieldName = MonolithKeyToString(Pair.Key);
 		const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
 
 		FProperty* Prop = StructDef->FindPropertyByName(FName(*FieldName));

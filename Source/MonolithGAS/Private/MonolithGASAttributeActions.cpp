@@ -1189,11 +1189,11 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleSetAttributeDefaults(c
 			}
 
 			// Find the property
-			FProperty* Prop = FindAttributeProperty(SetClass, Pair.Key);
+			FProperty* Prop = FindAttributeProperty(SetClass, MonolithKeyToString(Pair.Key));
 			FStructProperty* StructProp = CastField<FStructProperty>(Prop);
 			if (!StructProp || !StructProp->Struct || !StructProp->Struct->IsChildOf(AttrDataStruct))
 			{
-				NotFound.Add(Pair.Key);
+				NotFound.Add(MonolithKeyToString(Pair.Key));
 				continue;
 			}
 
@@ -1250,8 +1250,9 @@ FMonolithActionResult FMonolithGASAttributeActions::HandleSetAttributeDefaults(c
 		double Value = 0.0;
 		if (!Pair.Value->TryGetNumber(Value)) continue;
 
-		FString InitCall = FString::Printf(TEXT("Init%s("), *Pair.Key);
-		FString NewInitLine = FString::Printf(TEXT("\tInit%s(%.1f);"), *Pair.Key, Value);
+		const FString PairKeyStr = MonolithKeyToString(Pair.Key);
+		FString InitCall = FString::Printf(TEXT("Init%s("), *PairKeyStr);
+		FString NewInitLine = FString::Printf(TEXT("\tInit%s(%.1f);"), *PairKeyStr, Value);
 
 		int32 InitIdx = SourceContent.Find(InitCall);
 		if (InitIdx != INDEX_NONE)

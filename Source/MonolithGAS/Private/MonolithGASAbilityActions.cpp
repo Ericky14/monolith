@@ -2,6 +2,7 @@
 #include "MonolithParamSchema.h"
 #include "MonolithGASInternal.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Abilities/GameplayAbility.h"
@@ -2191,7 +2192,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleBuildAbilityFromSpec(con
 				{
 					TSharedPtr<FJsonObject> TagParams = MakeShared<FJsonObject>();
 					TagParams->SetStringField(TEXT("asset_path"), SavePath);
-					TagParams->SetStringField(TEXT("container"), Pair.Key);
+					TagParams->SetStringField(TEXT("container"), MonolithKeyToString(Pair.Key));
 					TagParams->SetArrayField(TEXT("tags"), *TagArr);
 					TagParams->SetStringField(TEXT("mode"), TEXT("set"));
 					HandleSetAbilityTags(TagParams);
@@ -2408,7 +2409,7 @@ FMonolithActionResult FMonolithGASAbilityActions::HandleDuplicateAbility(const T
 			TMap<FString, FString> RenameMap;
 			for (const auto& Pair : (*RenameTagsObj)->Values)
 			{
-				RenameMap.Add(Pair.Key, Pair.Value->AsString());
+				RenameMap.Add(MonolithKeyToString(Pair.Key), Pair.Value->AsString());
 			}
 
 			// Apply to all tag containers

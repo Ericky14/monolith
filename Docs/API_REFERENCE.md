@@ -1,16 +1,16 @@
 # Monolith API Reference
 
-**Version:** v0.20.0 · **Last updated:** 2026-06-14
+**Version:** v0.22.0 · **Last updated:** 2026-08-01
 
-**In-tree action total is approximate: ~1,500+ actions across 25+ in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
+**In-tree action total is approximate: ~1,400+ actions across 25+ in-tree namespaces** (public, in-tree only; all active by default, plus 45 experimental town-gen actions that register only when `bEnableProceduralTownGen=true`). The surface is too large to track to the unit — **query `monolith_discover()` (its `total_actions` field) for the exact live figure.** The `ui` namespace re-exports 4 GAS UI binding actions as aliases. v0.19.0 adds an LLM C++ authoring ergonomics pack (`source`, 8 actions + `editor.get_build_errors` fix hints), live-PIE introspection + driving and stat-group readout (`editor`), anim-node binding read/write and time-series PIE sampling (`animation`), a Blueprint variable census + contract reconciliation (`blueprint`), and T3D asset-text export (`project`); plus two first-launch fixes (issue #70) and a ~40% smaller `tools/list` manifest. The `monolith_*` meta-tools (`discover`, `status`, `update`, `reindex`, `guide`) plus the `bulk_fill_query` and `describe_query` framework dispatchers round out the MCP tool count. This total EXCLUDES sibling-plugin actions — they ship in their own repos and are never in the public release zip.
 
 The per-namespace numbers in the Table of Contents and body sections below are kept for structure, not precision — they drift with every action added and are no longer maintained to the unit. Treat them as ballpark; the live figure always comes from `monolith_discover()`.
 
 > Auto-generated and hand-curated. Each action is dispatched via HTTP POST to `http://localhost:<port>` with JSON body `{ "namespace": "<ns>", "action": "<action>", "params": { ... } }`, or via the MCP `tools/list` surface that AI clients see at session start.
 >
-> For the most current param schemas, call `monolith_discover("<namespace>")` at runtime — it returns live schemas straight out of the plugin. This document is a curated reference, not a source-of-truth substitute.
+> `monolith_discover("<namespace>")` is terse by default — it lists each action's name plus a one-line description, NOT the full param schemas. For a single action's exhaustive live param schema, call `describe_query("action_schema", target_namespace="<ns>", target_action="<name>")`, or pass `detail=true` (alias `verbose=true`) to `monolith_discover` to inline all schemas. Discover also accepts `filter` (case-insensitive substring on name or description), `offset`, and `limit` (default 0 = full list). This document is a curated reference, not a source-of-truth substitute.
 >
-> **0.15.0:** the namespace counts in the Table of Contents and the per-namespace body sections below were regenerated against live `monolith_discover()` on 2026-05-23 — the 0.14.8 → 0.15.0 additions are reflected (the `bulk_fill` / `describe` framework, the blueprint dataset read/edit pack, the UI/Blueprint gap-closure actions, `monolith_guide`, `editor` Python/PIE/console verbs, the `level_sequence` namespace, and the audio MetaSound document-introspection actions). Body sections list every action by category; deep-dive param tables cover the high-traffic ones. For the exhaustive live param schema of any action, call `monolith_discover("<namespace>")` or `describe_query("action_schema", ...)`.
+> **0.15.0:** the namespace counts in the Table of Contents and the per-namespace body sections below were regenerated against live `monolith_discover()` on 2026-05-23 — the 0.14.8 → 0.15.0 additions are reflected (the `bulk_fill` / `describe` framework, the blueprint dataset read/edit pack, the UI/Blueprint gap-closure actions, `monolith_guide`, `editor` Python/PIE/console verbs, the `level_sequence` namespace, and the audio MetaSound document-introspection actions). Body sections list every action by category; deep-dive param tables cover the high-traffic ones. For the exhaustive live param schema of any action, call `describe_query("action_schema", ...)` (or pass `detail=true` to `monolith_discover("<namespace>")`).
 
 ---
 
@@ -21,7 +21,7 @@ The per-namespace numbers in the Table of Contents and body sections below are k
 | [monolith](#monolith) | 5 | Core server tools (discover, status, update, reindex, guide) |
 | [blueprint](#blueprint) | 111 | Blueprint read/write, variable/component/graph CRUD, node ops, compile, auto-layout, spawn actors, dataset read/edit pack (DataTable/CurveTable/StringTable + `seed_data_asset`), cross-class property access, parent-function overrides |
 | [material](#material) | 63 | Material graph editing, inspection, CRUD, material functions, PBR pipeline |
-| [animation](#animation) | 145 | Curves, bone tracks, sync markers, root motion, compression, blend spaces (incl. baking + interpolation control), ABPs (incl. an AnimGraph-authoring pack — additive/slot/cached-pose/blend (by int + by enum)/sync/layered-blend/Control Rig/linked-layer/conduit nodes + output wiring — custom anim-graph nodes + state-machine teardown + compound expression transition rules), montages, skeletons, PoseSearch, IKRig, Control Rig |
+| [animation](#animation) | 145 | Curves, bone tracks, sync markers, root motion, compression, blend spaces (incl. baking + interpolation control), ABPs (incl. an AnimGraph-authoring pack — additive/slot/cached-pose/blend (by int + by enum)/sync/layered-blend/Control Rig/linked-layer/conduit nodes + output wiring — ABP-native animation layer graphs, custom anim-graph nodes + state-machine teardown + compound expression transition rules), montages, skeletons, PoseSearch, IKRig, Control Rig |
 | [niagara](#niagara) | 119 | Niagara VFX (emitters, modules, params, renderers, HLSL, dynamic inputs, event handlers, sim stages, effect types, event-aware summaries + validate_system event-chain reasoning, temporal-control composite writers + read aggregators, stateless-emitter factory) |
 | [editor](#editor) | 29 | Live Coding builds, compile output capture, editor logs, scene capture, texture import, map creation, module status, automation test list/run, Python escape-hatch, persistent-level swap |
 | [config](#config) | 6 | INI config inspection and search |
@@ -69,7 +69,7 @@ The aliased GAS UI binding actions live in **both** `ui::*` and `gas::*` namespa
 
 ## Recent API Changes (v0.14.8 → v0.15.0)
 
-These releases added the `level_sequence` namespace, the `bulk_fill` / `describe` ergonomics framework, a blueprint dataset read/edit pack, a UI/Blueprint gap-closure sweep, `monolith_guide`, and editor automation verbs. The per-namespace body sections below now document these; full param schemas for everything are also live via `monolith_discover("<namespace>")`.
+These releases added the `level_sequence` namespace, the `bulk_fill` / `describe` ergonomics framework, a blueprint dataset read/edit pack, a UI/Blueprint gap-closure sweep, `monolith_guide`, and editor automation verbs. The per-namespace body sections below now document these; full param schemas for everything are live via `describe_query("action_schema", ...)` (or `monolith_discover("<namespace>", detail=true)`).
 
 | Action | Change | Reason |
 |--------|--------|--------|
@@ -131,6 +131,8 @@ Re-index the Monolith project database. Incremental by default (delta only). Pas
 |-----------|------|----------|-------------|
 | `force` | bool | optional | Full wipe + rebuild instead of incremental delta. Default: `false` |
 
+**Returns:** `{ "status", "message" }`. `status` is `reindex_started` when a run actually began, or `reindex_not_started` when the subsystem declined it — indexing was already in progress, or the index database is not open. Before 0.22.0 this always reported `reindex_started`, including for requests that never ran. `module_not_loaded` / `subsystem_unavailable` / `function_not_found` are returned when the index subsystem is not reachable.
+
 ---
 
 ### `monolith.guide`
@@ -154,7 +156,29 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 - `add_property_access_node` (reflective `K2Node_PropertyAccess` for thread-safe property reads), `set_function_thread_safe` (mark a Blueprint function `BlueprintThreadSafe`). `scaffold_locomotion_anim_values` now emits a fully-wired thread-safe body via Property Access and can target a named function graph.
 - `get_component_details` falls back to inherited native components (reports `is_inherited_native`, `skeletal_mesh`, `anim_class`, `animation_mode`); `get_blueprint_info` adds `native_component_count`; `get_inherited_component_override` reads the effective component template value + source; `seed_data_asset` gained `read_back_values`; `get_cdo_properties` routes through the shared reflection reader as the canonical verify-after-write path.
 
-> For full param schemas, call `monolith_discover("blueprint")` at runtime. The action surface is too broad to enumerate here without bloat — high-traffic actions are documented below; the rest are listed and discoverable.
+**New in v0.22.0 (unified component resolver — issue #116, PR #102 part 1):**
+- **Component reads now report this Blueprint's values, not the C++ parent's.** `get_component_details` and
+  `get_components` read the Blueprint's OWN class-default object; they previously read `ParentClass`'s CDO, so
+  every inherited component reported Epic's native constructor defaults (a capsule overridden to 96 read back 88).
+- **New response fields.** `get_component_details` returns `source`, `resolved_component`, and `note`
+  (`is_inherited_native` is retained and equals `source == "cdo_native"`). `get_components` returns
+  `inherited_components[]` (components declared on a parent Blueprint's construction script, with
+  `defining_class` / `has_override` / `source`) and `native_components_source`. `set_component_property` returns
+  `source`, `resolved_component`, and `persisted`. `get_inherited_component_override`'s `source` values changed
+  from `cdo_native` / `ich` / `scs` to the five-value set below.
+- **`source` values:** `scs`, `cdo_native`, `ich_override`, `inherited_scs`, `parent_cdo_fallback`.
+  `parent_cdo_fallback` means the Blueprint has no compiled generated class and the values shown are native
+  defaults — the accompanying `note` says so.
+- **`set_component_property` can now write components inherited from a parent Blueprint**, via an Inheritable
+  Component Handler override on the child. `persisted: false` means the value equalled the inherited default and
+  the override record was pruned on compile.
+- **Aliases** resolve on all four actions and carry their own target class: `Mesh`/`SkeletalMesh`, `StaticMesh`,
+  `CharacterMovement`/`Movement`, `Capsule`/`CapsuleComponent`, `Root`/`RootComponent`. An alias matching more
+  than one component of its class is reported as an ambiguity with candidate names rather than silently
+  resolving to the first.
+- **`get_inherited_component_override` accepts `asset_path` as an alias for `bp_path`.**
+
+> For full param schemas, call `describe_query("action_schema", target_namespace="blueprint", target_action="<name>")` (or `monolith_discover("blueprint", detail=true)`). Plain `monolith_discover("blueprint")` is terse — action names + one-line descriptions only. The action surface is too broad to enumerate here without bloat — high-traffic actions are documented below; the rest are listed and discoverable.
 
 **Action categories:**
 
@@ -165,7 +189,7 @@ Full read/write access to Blueprint graphs, variables, components, functions, no
 | Components | 7 | `get_components`, `get_component_details`, `add_component`, `remove_component`, `rename_component`, `reparent_component`, `set_component_property`, `duplicate_component` |
 | Functions / Macros / Events | 12 | `get_functions`, `add_function`, `remove_function`, `rename_function`, `add_macro`, `remove_macro`, `rename_macro`, `add_event_dispatcher`, `remove_event_dispatcher`, `set_function_params`, `set_event_dispatcher_params`, `get_function_signature` |
 | Interfaces | 4 | `implement_interface`, `remove_interface`, `get_interfaces`, `scaffold_interface_implementation` |
-| Node ops | 11 | `add_node`, `remove_node`, `connect_pins`, `disconnect_pins`, `set_pin_default`, `set_node_position`, `resolve_node`, `add_event_node`, `add_comment_node`, `promote_pin_to_variable`, `add_nodes_bulk` |
+| Node ops | 11 | `add_node` (v0.21.0: `K2Node_SwitchEnum` user-enum resolution via `enum`/`enum_path`; `K2Node_CallFunction` resolves BP-defined funcs), `remove_node`, `connect_pins` (v0.21.0: cross-graph node-ID disambiguation, suggests `graph_name`), `disconnect_pins`, `set_pin_default`, `set_node_position`, `resolve_node` (shares both v0.21.0 resolvers), `add_event_node`, `add_comment_node`, `promote_pin_to_variable`, `add_nodes_bulk` |
 | Bulk / batch | 4 | `batch_execute`, `add_nodes_bulk`, `connect_pins_bulk`, `set_pin_defaults_bulk` |
 | Timelines | 4 | `add_timeline`, `add_timeline_track`, `set_timeline_keys`, `get_timeline_data` |
 | Compile / validate | 3 | `compile_blueprint`, `validate_blueprint`, `get_dependencies` |
@@ -201,7 +225,7 @@ Lightweight overview with node id/class/title and exec connections only. ~10 KB 
 
 ### `blueprint.build_blueprint_from_spec`
 
-The crown jewel — author an entire Blueprint (parent class, variables, components, functions, event graph nodes, connections) from a single JSON spec. Validates and compiles in one call. See `monolith_discover("blueprint")` for the full spec schema.
+The crown jewel — author an entire Blueprint (parent class, variables, components, functions, event graph nodes, connections) from a single JSON spec. Validates and compiles in one call. See `describe_query("action_schema", target_namespace="blueprint", target_action="build_blueprint_from_spec")` for the full spec schema.
 
 ### `blueprint.spawn_blueprint_actor`
 
@@ -322,7 +346,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithBlueprint.md` for the deep dive.
 
 Material graph editing, inspection, CRUD, material functions, instances, custom HLSL nodes, PBR pipeline. **63 actions.**
 
-> For full param schemas, call `monolith_discover("material")` at runtime.
+> For full param schemas, call `describe_query("action_schema", target_namespace="material", target_action="<name>")` (or `monolith_discover("material", detail=true)`). Plain `monolith_discover("material")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -355,7 +379,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithMaterial.md` for full graph_spec s
 
 ## animation
 
-Animation curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch, IKRig, Control Rig, Motion Matching authoring, state machines, and live PIE anim telemetry. Count is approximate — query `monolith_discover("animation")` for the live figure.
+Animation curves, bone tracks, sync markers, root motion, compression, blend spaces, ABPs, montages, skeletons, PoseSearch, IKRig, retargeting (retarget pose + op-stack tuning + per-bone translation retargeting), locomotion authoring (root-motion speed, distance-curve baking), Control Rig, Motion Matching authoring, state machines, and live PIE anim telemetry. Count is approximate — query `monolith_discover("animation")` for the live figure.
 
 **New in v0.18.1 (Motion Matching pack):**
 - **Pose Search / database:** `create_normalization_set`, `add_database_to_normalization_set`, `set_database_normalization_set`, `add_database_entry`, `set_database_entry_tags`, `configure_schema_channel`, `derive_schema_channels_from_skeleton`, `add_pose_search_notify`, `validate_pose_search_database`.
@@ -368,9 +392,21 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 - **Blend spaces:** `bake_blend_space` (rebuild a blend space's `FBlendSpaceData` triangulation via `ResampleData()` + mark dirty — repairs blend spaces authored externally or before the auto-bake fix; returns `has_blendspace_data`, `sample_count`, `baked`, and a `warning` when a 2D blend space has fewer than 3 samples), `set_blend_space_interpolation` (set `bInterpolateUsingGrid` via `use_grid` + a `preferred_triangulation_direction` of `None`/`Tangential`/`Radial`, then resample). In grid mode the triangulation is intentionally empty, so `has_blendspace_data` is `false` — correct, not a failure. The four blend space mutators (`add_blendspace_sample`, `edit_blendspace_sample`, `delete_blendspace_sample`, `set_blend_space_axis`) now auto-bake the triangulation after each edit, so MCP-authored blend spaces no longer ship empty and evaluate to the bind/reference pose at runtime.
 - **State machines:** `remove_anim_state` (remove a state + tear down its inner anim graph; `remove_dependent_transitions` default `true`; refuses to remove the machine's current entry state — re-point first), `set_anim_entry_state` (re-point the Entry node at an existing state; returns the previous target, `unchanged:true` fast-path), `remove_anim_transition` (remove a from→to transition; reports `matched_transition_count`).
 - **IKRig:** `remove_ik_solver` (remove a solver by 0-based `solver_index`, validated against the solver count; returns `removed_index`, `solver_count_after`). `add_ik_solver` now resolves `solver_type` against the live solver-struct table (friendly alias → exact struct name → unique substring; ambiguous input errors with the candidate list) instead of a hardcoded reflected path that did not resolve in UE 5.7, so Full Body IK now adds correctly and `root_bone` is meaningful for FBIK.
-- **AnimGraph authoring (14):** `add_apply_additive` / `add_apply_mesh_space_additive` (Apply Additive / mesh-space additive nodes), `add_slot_node` (slot name validated against the skeleton's slot groups), `add_save_cached_pose` / `add_use_cached_pose` (paired by `cache_name`), `set_output_pose_source` (wire a node into the AnimGraph Output / Root result pin), `set_state_result_source` (wire a node into a state machine state's result pin), `add_blend_by_int` (grown to `num_poses` pose pins), `add_blend_by_enum` (Blend Poses by Enum bound to a `UEnum` via `enum_path`; one pose pin per exposed enumerator plus a Default/else pin, skipping the auto `_MAX` sentinel and `Hidden` enumerators; optional `enumerators` exposes a subset), `set_sync_group` (player node sync group name / role / method), `set_layered_blend_bones` (per-bone branch filters on a Layered Blend Per Bone node), `add_anim_control_rig_node` (`control_rig_class`; IO pins regenerate), `add_linked_anim_layer` (`layer_name` + optional `interface_class`), `add_conduit` (a state-machine conduit whose bound graph is a transition-logic graph, not an anim graph). Plus 3 extensions: `set_anim_node_pin_binding` now bootstraps the binding object on previously-unbound nodes; `auto_layout` gained a Blueprint-Assist-free `builtin` formatter (also the `auto` fallback) so layout works in release builds where Blueprint Assist is compiled out; `set_transition_rule` gained an `expression` kind (compound multi-term `terms[]` — each `{lhs, op, rhs, abs?, negate?}` — folded through Boolean AND/OR via `combine`), extending the existing `bool` / `auto` / `compare` kinds.
+- **AnimGraph authoring (14):** `add_apply_additive` / `add_apply_mesh_space_additive` (Apply Additive / mesh-space additive nodes), `add_slot_node` (slot name validated against the skeleton's slot groups), `add_save_cached_pose` / `add_use_cached_pose` (paired by `cache_name`), `set_output_pose_source` (wire a node into the AnimGraph Output / Root result pin), `set_state_result_source` (wire a node into a state machine state's result pin), `add_blend_by_int` (grown to `num_poses` pose pins), `add_blend_by_enum` (Blend Poses by Enum bound to a `UEnum` via `enum_path`; one pose pin per exposed enumerator plus a Default/else pin, skipping the auto `_MAX` sentinel and `Hidden` enumerators; optional `enumerators` exposes a subset), `set_sync_group` (player node sync group name / role / method), `set_layered_blend_bones` (per-bone branch filters on a Layered Blend Per Bone node), `add_anim_control_rig_node` (`control_rig_class`; IO pins regenerate), `add_linked_anim_layer` (`layer_name` + optional `interface_class` / `instance_class`; resolves interface-declared layers first and ABP-native layers as SELF layers otherwise — see below), `add_conduit` (a state-machine conduit whose bound graph is a transition-logic graph, not an anim graph). Plus 3 extensions: `set_anim_node_pin_binding` now bootstraps the binding object on previously-unbound nodes; `auto_layout` gained a Blueprint-Assist-free `builtin` formatter (also the `auto` fallback) so layout works in release builds where Blueprint Assist is compiled out; `set_transition_rule` gained an `expression` kind (compound multi-term `terms[]` — each `{lhs, op, rhs, abs?, negate?}` — folded through Boolean AND/OR via `combine`), extending the existing `bool` / `auto` / `compare` kinds.
 
-> For full param schemas, call `monolith_discover("animation")` at runtime.
+**New (Unreleased) — ABP-native animation layers:**
+- **`add_anim_layer_graph`** creates an animation layer that belongs to the Animation Blueprint itself: a `UAnimationGraph` carrying `UAnimationGraphSchema` in the ABP's own `FunctionGraphs`, which is what the editor's My Blueprint → **+** → Animation Layer button produces. No `UAnimLayerInterface` asset is required, so ABP variants need not share a layer signature. The anim schema is what makes the anim compiler emit a real `FAnimBlueprintFunction` (`blueprint add_function` yields an inert K2 graph instead), and the Output Pose root node is created for free. Params: `asset_path`, `layer_name`, optional `input_poses` (pose NAMES only — `["InPose"]` or `[{"name": "InPose"}]`, capped at 16, unique ABP-wide), optional `compile` (default `true`). Returns `asset_path`, `graph_name`, `graph_class`, `schema_class`, `node_count`, `input_poses`, `compiled`, `saved`. Refuses a duplicate graph name (it never renames or replaces an incumbent), the reserved name `AnimGraph`, child ABPs, macro libraries, and interface Blueprints.
+- **`add_linked_anim_layer` now resolves native layers.** When no implemented `UAnimLayerInterface` declares `layer_name`, it scans the ABP's own animation-schema graphs and binds a SELF layer (null Interface, invalid `InterfaceGuid`, null `InstanceClass`) — mirroring the engine, which derives "self" from interface-lookup failure rather than storing a flag. Interface layers win when a name exists in both; passing `interface_class` disables the native fallback; `instance_class` is rejected for a self layer. A self bind is discriminated in the payload by `interface_class: "<self>"` + `guid_resolved: false`, and `get_linked_layers` shows the node title `"<Layer>\nAnim Layer (self)"`.
+- **Ordering constraint:** self-layer pose pins resolve against the ABP's `SkeletonGeneratedClass`, so `add_anim_layer_graph(compile=false)` followed straight away by `add_linked_anim_layer` places a node with no pose pins. Keep the default `compile=true`, or recompile before placing.
+
+**New (Unreleased) — retargeting + locomotion authoring + inspection:**
+- **Retarget pose + op-stack tuning (8):** `align_retarget_pose` (auto-align a source/target retarget pose via AutoAlign + SnapBoneToGround), `get_retarget_pose` / `set_retarget_pose` (read/edit a retarget pose — `set` `mode`: `from_reference` or `bone_deltas`; `from_animation` deferred), `get_retarget_chain_settings` / `set_retarget_chain_settings` (read/write a chain's FK & IK op-stack settings — rotation/translation modes, IK blend, etc.), `set_retarget_root_settings` (Pelvis Motion op: vertical scale, floor constraint, affect-IK), `enable_foot_ground_lock` (Speed Planting op foot ground-lock on named IK chains), `set_bone_translation_retargeting` / `get_bone_translation_retargeting` (per-bone `USkeleton` translation-retargeting modes — `Animation` / `Skeleton` / `AnimationScaled` / `AnimationRelative` / `OrientAndScale` — plus a `biped_locomotion` preset on the setter).
+- **Locomotion authoring (3):** `get_root_motion_speed` (authored root-motion ground speed in cm/s, with an explicit "unknowable" signal for root-locked / no-root-motion clips), `bake_distance_curve` (bake a `Distance` curve onto a sequence via the engine `DistanceCurveModifier` — removes any existing same-named curve first, then persists into the asset's modifier stack), `bind_threadsafe_update_function` (wire a Blueprint-library static call into an AnimBP's `BlueprintThreadSafeUpdateAnimation` graph — v1a: known-signature).
+- **IK Rig bone settings (2):** `set_ik_rig_bone_settings` / `get_ik_rig_bone_settings` (write/read a bone's per-solver IK Rig bone settings, reflective).
+- **Inspection (1):** `get_animated_bone_transform` (FK-composed bone transform at a frame/time, component or world space).
+- **Extensions (no new actions):** `get_retargeter_info` now emits an `ops[]` array (per-op type + settings); `apply_anim_modifier` now accepts a `properties` reflective field set + a `persist` flag (register into the `AnimationModifiers` stack); `get_blend_space_info` now reports per-sample authored root-motion speed + `triangulation_baked` / `interpolate_using_grid`; `get_anim_node_pin_bindings` now also emits wire-linked input pins (`type:"Link"` with source node/pin); `derive_foot_sync_markers` gains a `from_bones` mode (foot plants from per-frame foot-bone height + planar-speed minima); `get_curve_keys` now reports `monotonic` + `sign` flags; `set_anim_node_function_binding` now calls `RequestRefreshExtensions` so the recompile regenerates the anim-subsystem set (prevents a null `NodeRelevancy` subsystem at runtime).
+
+> For full param schemas, call `describe_query("action_schema", target_namespace="animation", target_action="<name>")` (or `monolith_discover("animation", detail=true)`). Plain `monolith_discover("animation")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -378,9 +414,9 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 |----------|---------|----------|
 | Sequence ops | 12 | `get_sequence_info`, `get_sequence_notifies`, `set_sequence_properties`, `set_additive_settings`, `set_compression_settings`, `set_root_motion_settings`, `create_sequence`, `duplicate_sequence`, `build_sequence_from_poses` |
 | Bone tracks | 6 | `add_bone_track`, `remove_bone_track`, `set_bone_track_keys`, `get_bone_track_keys`, `list_bone_tracks`, `copy_bone_pose_between_sequences` |
-| Curves | 6 | `add_curve`, `remove_curve`, `set_curve_keys`, `get_curve_keys`, `list_curves`, `get_skeleton_curves` |
+| Curves | 6 | `add_curve`, `remove_curve`, `set_curve_keys`, `get_curve_keys` (reports `monotonic` + `sign`), `list_curves`, `get_skeleton_curves`, `bake_distance_curve` |
 | Notifies | 9 | `add_notify`, `add_notify_state`, `remove_notify`, `set_notify_time`, `set_notify_duration`, `set_notify_track`, `set_notify_properties`, `bulk_add_notify`, `clone_notify_setup` |
-| Sync markers | 4 | `get_sync_markers`, `add_sync_marker`, `remove_sync_marker`, `rename_sync_marker` |
+| Sync markers | 5 | `get_sync_markers`, `add_sync_marker`, `remove_sync_marker`, `rename_sync_marker`, `derive_foot_sync_markers` (gains a `from_bones` mode) |
 | Skeleton | 5 | `get_skeleton_info`, `get_skeletal_mesh_info`, `add_socket`, `remove_socket`, `set_socket_transform`, `get_skeleton_sockets`, `add_virtual_bone`, `remove_virtual_bones`, `compare_skeletons` |
 | Skeleton (read/compat, v0.14.10) | 5 | `get_skeleton_preview_attached_assets`, `get_bone_ref_pose`, `get_compatible_skeletons`, `add_compatible_skeleton`, `remove_compatible_skeleton` |
 | Montages | 9 | `get_montage_info`, `create_montage`, `set_montage_blend`, `add_montage_section`, `delete_montage_section`, `set_section_next`, `set_section_time`, `add_montage_slot`, `set_montage_slot`, `add_montage_anim_segment`, `create_montage_from_sections` |
@@ -388,11 +424,13 @@ Animation curves, bone tracks, sync markers, root motion, compression, blend spa
 | ABPs | 9 | `get_abp_info`, `create_anim_blueprint`, `get_state_machines`, `get_state_info`, `get_transitions`, `get_blend_nodes`, `get_linked_layers`, `get_graphs`, `get_nodes`, `get_abp_variables`, `get_abp_linked_assets` |
 | State machines (write) | 6 | `add_state_to_machine`, `add_transition`, `set_transition_rule` (`bool` / `auto` / `compare` / `expression` kinds — `expression` folds multi-term `terms[]` through Boolean AND/OR), `remove_anim_state`, `set_anim_entry_state`, `remove_anim_transition` |
 | ABP graph (write) | 5 | `add_anim_graph_node` (aliases or generic `UAnimGraphNode_Base` class path/name via `node_type` / `node_class`), `connect_anim_graph_pins`, `set_state_animation`, `add_variable_get`, `set_anim_graph_node_property` |
-| ABP graph authoring (Unreleased) | 14 | `add_apply_additive`, `add_apply_mesh_space_additive`, `add_slot_node`, `add_save_cached_pose`, `add_use_cached_pose`, `set_output_pose_source`, `set_state_result_source`, `add_blend_by_int`, `add_blend_by_enum` (Blend Poses by Enum bound to a `UEnum`; one pin per exposed enumerator + Default, skips `_MAX` + `Hidden`), `set_sync_group`, `set_layered_blend_bones`, `add_anim_control_rig_node`, `add_linked_anim_layer`, `add_conduit` |
+| ABP graph authoring (Unreleased) | 15 | `add_anim_layer_graph` (create an ABP-native animation layer graph — anim schema, auto Output Pose, optional `input_poses`), `add_apply_additive`, `add_apply_mesh_space_additive`, `add_slot_node`, `add_save_cached_pose`, `add_use_cached_pose`, `set_output_pose_source`, `set_state_result_source`, `add_blend_by_int`, `add_blend_by_enum` (Blend Poses by Enum bound to a `UEnum`; one pin per exposed enumerator + Default, skips `_MAX` + `Hidden`), `set_sync_group`, `set_layered_blend_bones`, `add_anim_control_rig_node`, `add_linked_anim_layer`, `add_conduit` |
 | Composites | 3 | `get_composite_info`, `add_composite_segment`, `remove_composite_segment`, `create_composite` |
-| IKRig / Retarget | 7 | `get_ikrig_info`, `add_ik_solver`, `remove_ik_solver`, `get_retargeter_info`, `set_retarget_chain_mapping`, `add_retarget_chain`, `remove_retarget_chain`, `set_retarget_chain_bones` |
+| IKRig / Retarget | 7 | `get_ikrig_info`, `add_ik_solver`, `remove_ik_solver`, `set_ik_rig_bone_settings`, `get_ik_rig_bone_settings`, `get_retargeter_info` (emits `ops[]`), `set_retarget_chain_mapping`, `add_retarget_chain`, `remove_retarget_chain`, `set_retarget_chain_bones` |
+| Retarget pose + ops (Unreleased) | 9 | `align_retarget_pose`, `get_retarget_pose`, `set_retarget_pose`, `get_retarget_chain_settings`, `set_retarget_chain_settings`, `set_retarget_root_settings`, `enable_foot_ground_lock`, `set_bone_translation_retargeting`, `get_bone_translation_retargeting` |
+| Locomotion / inspection (Unreleased) | 3 | `get_root_motion_speed`, `bind_threadsafe_update_function`, `get_animated_bone_transform` |
 | Control Rig | 7 | `get_control_rig_info`, `get_control_rig_variables`, `add_control_rig_element`, `get_control_rig_graph`, `add_control_rig_node`, `connect_control_rig_pins` |
-| Anim modifiers | 2 | `apply_anim_modifier`, `list_anim_modifiers` |
+| Anim modifiers | 2 | `apply_anim_modifier` (accepts `properties` + `persist`), `list_anim_modifiers` |
 | Physics asset | 10 | `get_physics_asset_info`, `analyze_physics_asset`, `set_body_properties`, `set_constraint_properties`, `set_physics_body_geometry`, `snap_constraint_to_bone`, `set_physics_constraint_frames`, `set_physics_collision_pairs`, `add_physics_body`, `remove_physics_body` |
 | PoseSearch | 13 | `get_pose_search_schema`, `get_pose_search_database`, `add_database_sequence`, `remove_database_sequence`, `get_database_stats`, `create_pose_search_schema`, `create_pose_search_database`, `set_database_sequence_properties`, `add_schema_channel`, `remove_schema_channel`, `set_channel_weight`, `rebuild_pose_search_index`, `set_database_search_mode` |
 | Layout / batch | 2 | `auto_layout`, `batch_execute` |
@@ -405,7 +443,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithAnimation.md` for the deep dive.
 
 Niagara VFX system editing — emitters, modules, params, renderers, HLSL, dynamic inputs, event handlers, sim stages, NPC, effect types, temporal control, stateless-emitter factory. **129 actions** (108 baseline + 1 layout + 9 temporal-control + 1 stateless-emitter factory + 7 issue #64 Tranche 2 search + 2 PR #65 CustomHlsl-text read/write).
 
-> For full param schemas, call `monolith_discover("niagara")` at runtime.
+> For full param schemas, call `describe_query("action_schema", target_namespace="niagara", target_action="<name>")` (or `monolith_discover("niagara", detail=true)`). Plain `monolith_discover("niagara")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -477,7 +515,7 @@ Check compile status: `compiling`, `last_result`, `last_compile_time`, `errors_s
 
 ### `editor.get_build_summary` · `editor.search_build_output` · `editor.get_compile_output`
 
-Build summary, search-build-log-by-pattern, structured compile report. See `monolith_discover("editor")` for params.
+Build summary, search-build-log-by-pattern, structured compile report. See `describe_query("action_schema", target_namespace="editor", target_action="<name>")` for params.
 
 ### `editor.get_recent_logs` · `editor.search_logs` · `editor.tail_log` · `editor.get_log_categories` · `editor.get_log_stats`
 
@@ -798,6 +836,8 @@ Unreal Engine C++ source code navigation. 1M+ symbols indexed. **12 actions** (1
 
 `trigger_reindex` does a full clean build (engine + shaders + project). `trigger_project_reindex` is incremental (project Source/ + Plugins/ only). Both take *no parameters*.
 
+**Returns:** a text confirmation that indexing started. Since 0.22.0 both report failure honestly: if the run does not start — a reindex is already in flight, the worker thread could not be created, or (for `trigger_project_reindex`) `EngineSource.db` does not exist yet — the action returns an **error** naming the cause instead of a success message. Earlier builds always claimed the reindex had started.
+
 ### `source.audit_module_dep_reality`
 
 **New v0.17.0 (Reflection Intelligence, Phase 2).** Catches the LNK2019 bug class where a UPROPERTY (or any reflection-touching declaration) references a foreign-module type whose owning module is missing from the declaring module's `Build.cs` `Private/PublicDependencyModuleNames`. UHT generates `Z_Construct_*_NoRegister` calls that link against the foreign module's API macro at link time, so the failure surfaces as a confusing unresolved external. The audit regex-parses every `*.Build.cs` for declared deps, extracts type-bearing reflection declarations from every `*.h` / `*.cpp`, resolves each type against `EngineSource.db`'s symbol → owning-module mapping, and emits a violation when the owning module isn't declared and isn't on the implicit-deps whitelist (`Core`, `CoreUObject`, `Engine`, `Projects`, `RHI`, `RenderCore`). Read-only, idempotent, cursor-paginated. Owned by `MonolithReflectionIntel` but registered onto `source` for caller ergonomics.
@@ -817,7 +857,7 @@ Unreal Engine C++ source code navigation. 1M+ symbols indexed. **12 actions** (1
 
 Mesh inspection, scene manipulation, spatial queries, level blockout, GeometryScript, procedural geometry, lighting, audio, performance, mesh import (incl. skeletal + animation, PR #58), and **experimental** procedural town generation. **194 actions** (always registered, in the public count) + 45 experimental town gen (gated on `bEnableProceduralTownGen=true`, default `false`) = 239 when town-gen is on.
 
-> For full param schemas, call `monolith_discover("mesh")` at runtime. The action surface is too broad for full enumeration — see categories below.
+> For full param schemas, call `describe_query("action_schema", target_namespace="mesh", target_action="<name>")` (or `monolith_discover("mesh", detail=true)`). Plain `monolith_discover("mesh")` is terse — names + one-line descriptions only. The action surface is too broad for full enumeration — see categories below.
 
 **Action categories (core, always registered):**
 
@@ -864,16 +904,16 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithMesh.md` for the full action catal
 
 UMG widget Blueprint CRUD, templates, styling, animation (v1 + v2), the schema-driven **Spec / EffectSurface** architecture, settings scaffolding, accessibility, **CommonUI**, and GAS UI bindings. **138 actions** — the UMG + Spec/EffectSurface baseline (66 always-on, incl. the v0.15.0 navigation/conversion gap-closure + headline scaffolders) + 51 CommonUI (registered when `WITH_COMMONUI=1`) + 4 GAS UI binding aliases. The four CommonUI-surface gap-closure actions (`convert_border_to_common`, `convert_textblock_to_common`, `set_action_bar_button_class`, `apply_token_binding`) are `#if WITH_COMMONUI`-gated.
 
-> For full param schemas, call `monolith_discover("ui")` at runtime. The surface is large — categories below; the v0.15.0-new actions are flagged.
+> For full param schemas, call `describe_query("action_schema", target_namespace="ui", target_action="<name>")` (or `monolith_discover("ui", detail=true)`). Plain `monolith_discover("ui")` is terse — names + one-line descriptions only. The surface is large — categories below; the v0.15.0-new actions are flagged.
 
 **Action categories (UMG + Spec baseline, always registered):**
 
 | Category | Actions | Examples |
 |----------|---------|----------|
-| Widget CRUD | 9 | `create_widget_blueprint`, `get_widget_tree`, `add_widget`, `remove_widget`, `set_widget_property` (accepts `value` alias), `compile_widget` (returns `errors[]`/`warnings[]`), `list_widget_types`, `rename_widget`, `dump_blueprint_compile_log` |
+| Widget CRUD | 9 | `create_widget_blueprint`, `get_widget_tree`, `add_widget` (v0.21.0: `parent` alias for `parent_name`), `remove_widget`, `set_widget_property` (accepts `value` alias; v0.21.0: common `UWidget` props allowlisted by default), `compile_widget` (returns `errors[]`/`warnings[]`), `list_widget_types`, `rename_widget`, `dump_blueprint_compile_log` |
 | Variable flags (v0.15.0) | 3 | `add_widget_variable`, `set_widget_is_variable`, `list_widget_property_enums` |
 | Root / reparent (v0.15.0) | 1 | `reparent_widget_root` |
-| Slot / layout | 4 | `set_slot_property`, `set_anchor_preset`, `move_widget`, `set_brush` |
+| Slot / layout | 4 | `set_slot_property` (v0.21.0: grid-slot `row`/`column`/`row_span`/`column_span`), `set_anchor_preset`, `move_widget`, `set_brush` (v0.21.0: `property_name` optional/auto-resolved, `color` alias for `tint_color`) |
 | Styling | 6 | `set_font`, `set_color_scheme`, `batch_style`, `set_text`, `set_image`, `setup_list_view` |
 | Templates / scaffolds | 13 | `create_hud_element`, `create_menu`, `create_settings_panel`, `create_dialog`, `create_notification_toast`, `create_loading_screen`, `create_inventory_grid`, `create_save_slot_list`, `scaffold_game_user_settings`, `scaffold_save_game`, `scaffold_save_subsystem`, `scaffold_audio_settings`, `scaffold_input_remapping` |
 | Headline scaffolders (v0.15.0) | 3 | `scaffold_main_menu`, `scaffold_settings_panel_with_tabs`, `scaffold_pause_menu` |
@@ -921,7 +961,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithUI.md` for the deep dive including
 
 Gameplay Ability System integration. **135 actions** across 11 categories — covers the full GAS authoring pipeline. **Conditional on `#if WITH_GBA`** — projects without the GameplayAbilities plugin register 0 GAS actions.
 
-> For full param schemas, call `monolith_discover("gas")` at runtime.
+> For full param schemas, call `describe_query("action_schema", target_namespace="gas", target_action="<name>")` (or `monolith_discover("gas", detail=true)`). Plain `monolith_discover("gas")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -941,7 +981,7 @@ Gameplay Ability System integration. **135 actions** across 11 categories — co
 
 ### `gas.grant_ability_to_pawn` · NEW in Phase J F8
 
-Grant a `UGameplayAbility` to a pawn's `UAbilitySystemComponent` directly without scaffold-side wiring or `apply_effect` ceremony. See `monolith_discover("gas")` for params.
+Grant a `UGameplayAbility` to a pawn's `UAbilitySystemComponent` directly without scaffold-side wiring or `apply_effect` ceremony. See `describe_query("action_schema", target_namespace="gas", target_action="grant_ability_to_pawn")` for params.
 
 See `Plugins/Monolith/Docs/specs/SPEC_MonolithGAS.md` for the deep dive.
 
@@ -982,7 +1022,7 @@ Behavior Trees, State Trees, EQS, Blackboards, AI Controllers, Perception, Smart
 
 **Conditional on `#if WITH_STATETREE` + `#if WITH_SMARTOBJECTS`** — projects missing either plugin register 0 AI actions.
 
-> For full param schemas, call `monolith_discover("ai")` at runtime.
+> For full param schemas, call `describe_query("action_schema", target_namespace="ai", target_action="<name>")` (or `monolith_discover("ai", detail=true)`). Plain `monolith_discover("ai")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -1012,7 +1052,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithAI.md` for the deep dive — it's 
 
 Logic Driver Pro state machines: graph CRUD, node configuration, runtime PIE control, scaffolds, dialogue, text graph extraction. **66 actions.** **Conditional on `#if WITH_LOGICDRIVER`** — requires the Logic Driver Pro marketplace plugin. Reflection-only (precompiled marketplace plugin).
 
-> For full param schemas, call `monolith_discover("logicdriver")` at runtime.
+> For full param schemas, call `describe_query("action_schema", target_namespace="logicdriver", target_action="<name>")` (or `monolith_discover("logicdriver", detail=true)`). Plain `monolith_discover("logicdriver")` is terse — names + one-line descriptions only.
 
 **Action categories:**
 
@@ -1042,7 +1082,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithLogicDriver.md`.
 
 Sound Cue + MetaSound graph CRUD + on-disk document introspection, attenuation/class/mix/submix/concurrency, batch ops, Sound Cue templates, perception bindings, and a small batch of test helpers. **98 actions.**
 
-> For full param schemas, call `monolith_discover("audio")` at runtime. MetaSound graph + document actions are conditional on `#if WITH_METASOUND` — projects without MetaSound get Sound Cue + CRUD + batch actions but no MetaSound graph building or document walk. The 12 document-introspection actions (PR #18, v0.14.10) read **on-disk document state** for arbitrary assets without an active builder session — distinct from the Builder-side graph actions which read live builder state during mutation.
+> For full param schemas, call `describe_query("action_schema", target_namespace="audio", target_action="<name>")` (or `monolith_discover("audio", detail=true)`). Plain `monolith_discover("audio")` is terse — names + one-line descriptions only. MetaSound graph + document actions are conditional on `#if WITH_METASOUND` — projects without MetaSound get Sound Cue + CRUD + batch actions but no MetaSound graph building or document walk. The 12 document-introspection actions (PR #18, v0.14.10) read **on-disk document state** for arbitrary assets without an active builder session — distinct from the Builder-side graph actions which read live builder state during mutation.
 
 **Action categories:**
 
@@ -1651,9 +1691,10 @@ generate_floor_plan → create_building_from_grid → generate_facade → genera
 Before writing any client code:
 
 1. `monolith_discover()` — list all namespaces and their actions.
-2. `monolith_discover("<namespace>")` — get full param schemas for one namespace.
-3. `project_query("search", {query: "..."})` — find assets by name/type.
-4. `source_query("search_source", {query: "..."})` — verify UE 5.7 API signatures.
+2. `monolith_discover("<namespace>")` — list one namespace's action names + one-line descriptions (terse). Pass `detail=true` to inline all param schemas.
+3. `describe_query("action_schema", target_namespace="<ns>", target_action="<name>")` — get one action's full param schema.
+4. `project_query("search", {query: "..."})` — find assets by name/type.
+5. `source_query("search_source", {query: "..."})` — verify UE 5.7 API signatures.
 
 **Golden rule:** never fabricate action names. The cogitator will be displeased.
 
@@ -1670,7 +1711,7 @@ Both invoke the same SQLite indexes the live MCP uses.
 
 **Reflection Intelligence offline parity.** All four RI namespaces are now fully servable offline — `cppreflect` (6 actions), `network` (4), `decision` (5), `risk` (5) — and emit JSON **byte-identical to the live MCP server** (same field names, types, ordering, row data, `%.17g` float formatting, and base64 cursor tokens). Earlier builds covered only 4 of the 20 with divergent shapes; the phantom `risk.list_hotspots` action has been removed. Two intentional, documented differences from the live payload remain (not bugs): the offline CLI adds a top-level `success` flag (its in-band status channel — the live MCP carries success/error out-of-band, so live has no `success` key; the nested DATA payload is byte-identical), and wall-clock fields (`cutoff_unix` / `since_unix` and the `risk.get_release_window_hotspots` cursor whose filter-hash includes them) differ by the run-time gap across process invocations on both live and offline.
 
-`Scripts/verify_offline_parity.py` byte-diffs exe vs py across all 20 RI actions as a ship-blocking gate in `make_release.ps1`; `Scripts/check_offline_exe_fresh.py` flags a stale exe by comparing its `--version` `source_hash` against a fresh hash of `monolith_query.cpp`.
+`Scripts/verify_offline_parity.py` byte-diffs exe vs py across all 20 RI actions as a ship-blocking gate in `make_release.ps1`; `Scripts/check_offline_exe_fresh.py` flags a stale exe by comparing its `--version` `source_hash` against a fresh hash of `monolith_query.cpp`, and is likewise a ship-blocking gate in `make_release.ps1`. It hashes `monolith_query.cpp` only — a failure originating in `ThirdParty/sqlite3.c`, a ThirdParty header, or the toolchain is covered by `build.bat`'s exit code instead.
 
 ---
 

@@ -1757,7 +1757,10 @@ static UClass* ResolvePoseSearchNotifyClass(const FString& Kind)
 	if (Kind.Equals(TEXT("SamplingEvent"), ESearchCase::IgnoreCase))       return UAnimNotifyState_PoseSearchSamplingEvent::StaticClass();
 	if (Kind.Equals(TEXT("SamplingAttribute"), ESearchCase::IgnoreCase))   return UAnimNotifyState_PoseSearchSamplingAttribute::StaticClass();
 	if (Kind.Equals(TEXT("BranchIn"), ESearchCase::IgnoreCase))            return UAnimNotifyState_PoseSearchBranchIn::StaticClass();
+#if !(ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+	// UAnimNotifyState_PoseSearchIKWindow was removed in UE 5.8.
 	if (Kind.Equals(TEXT("IKWindow"), ESearchCase::IgnoreCase))            return UAnimNotifyState_PoseSearchIKWindow::StaticClass();
+#endif
 	return nullptr;
 }
 

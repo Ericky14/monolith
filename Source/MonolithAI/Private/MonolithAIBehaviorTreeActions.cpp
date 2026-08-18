@@ -1,6 +1,7 @@
 #include "MonolithAIBehaviorTreeActions.h"
 #include "MonolithParamSchema.h"
 #include "MonolithAssetUtils.h"
+#include "MonolithJsonUtils.h"
 
 #include "Misc/Optional.h"
 
@@ -784,7 +785,7 @@ namespace
 		for (const auto& Pair : PropsObj->Values)
 		{
 			FString Error;
-			if (!SetPropertyValue(Obj, Pair.Key, Pair.Value, BT, Error))
+			if (!SetPropertyValue(Obj, MonolithKeyToString(Pair.Key), Pair.Value, BT, Error))
 			{
 				OutErrors.Add(Error);
 			}

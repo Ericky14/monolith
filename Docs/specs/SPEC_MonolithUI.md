@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.20.0 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
+**Version:** 0.22.0 (Beta) — architecture expansion Phase A–L landed 2026-04-26 (plan: [`Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md`](../../../../Docs/plans/2026-04-25-monolith-ui-architecture-expansion.md)); optional EffectSurface provider decouple (Wave 1/2 + Final.1) landed 2026-04-27.
 
 ---
 
@@ -86,9 +86,9 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 |--------|--------|-------------|
 | `create_widget_blueprint` | `save_path`, `parent_class` | Create a new Widget Blueprint asset |
 | `get_widget_tree` | `asset_path` | Get the full widget hierarchy tree. An empty/missing `asset_path` now returns a clear `missing required asset_path parameter` error instead of a confusing downstream "not found" (2026-05-23). |
-| `add_widget` | `asset_path`, `widget_class`, `parent_slot` | Add a widget to the widget tree |
+| `add_widget` | `asset_path`, `widget_class`, `parent_slot`, `parent_name` (alias `parent`) | Add a widget to the widget tree. `parent` is accepted as an alias for `parent_name` (v0.21.0, #74), so a non-root panel can be targeted directly. |
 | `remove_widget` | `asset_path`, `widget_name` | Remove a widget from the widget tree |
-| `set_widget_property` | `asset_path`, `widget_name`, `property_name`, `value` (alias: `property_value`) | Set a property on a widget via reflection. Allowlist-gated unless `raw_mode=true`. `value` and `property_value` are accepted as aliases since the 2026-05-16 Bug #6 fix. |
+| `set_widget_property` | `asset_path`, `widget_name`, `property_name`, `value` (alias: `property_value`) | Set a property on a widget via reflection. Allowlist-gated unless `raw_mode=true`. `value` and `property_value` are accepted as aliases since the 2026-05-16 Bug #6 fix. As of v0.21.0 (#74) common `UWidget` properties are allowlisted by default (no `raw_mode` needed) — see § "Common UWidget property allowlist". |
 | `compile_widget` | `asset_path` | Compile the Widget Blueprint. Returns `errors[]`, `warnings[]`, `notes[]`, `error_count`, `warning_count` on success — shape mirrors `blueprint_query::compile_blueprint`. On BS_Error, the diagnostic list is packed into `valid_options[]` of the structured error (Bug #5 fix, 2026-05-16). |
 | `list_widget_types` | none | List all available widget classes that can be instantiated |
 | `rename_widget` | `wbp_path`, `old_name`, `new_name` | Rename a UWidget's FName in a WBP's tree. Uniqueness check runs against the full WidgetTree before the rename. Recompiles via `FKismetEditorUtilities::CompileBlueprint`. If `bIsVariable=true`, also walks `FBlueprintEditorUtils::RenameMemberVariable` so the BPVAR entry stays consistent with the new FName. Phase 2 Item #7 (2026-05-16 UI Gap Audit). |
@@ -97,7 +97,7 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 **Slot Operations (3)**
 | Action | Params | Description |
 |--------|--------|-------------|
-| `set_slot_property` | `asset_path`, `widget_name`, `property_name`, `value` | Set a layout slot property (padding, alignment, size, etc.) |
+| `set_slot_property` | `asset_path`, `widget_name`, `property_name`, `value` | Set a layout slot property (padding, alignment, size, etc.). As of v0.21.0 (#74) grid slots are supported — `row`, `column`, `row_span`, `column_span` on `UUniformGridSlot` and `UGridSlot`. |
 | `set_anchor_preset` | `asset_path`, `widget_name`, `preset` | Apply an anchor preset to a Canvas Panel slot |
 | `move_widget` | `asset_path`, `widget_name`, `new_parent`, `slot_index` | Move a widget to a different parent slot |
 
@@ -116,7 +116,7 @@ Counts re-verified against `RegisterAction(TEXT("ui"), ...)` call sites on 2026-
 **Styling (6)**
 | Action | Params | Description |
 |--------|--------|-------------|
-| `set_brush` | `asset_path`, `widget_name`, `brush_property`, `texture_path` | Set a brush/image property on a widget |
+| `set_brush` | `asset_path`, `widget_name`, `property_name`?, `texture_path` | Set a brush/image property on a widget. As of v0.21.0 (#74) `property_name` is optional — it auto-resolves from the widget type (`Image` → `Brush`, `Border` → `Background`); `color` is accepted as an alias for `tint_color`. |
 | `set_font` | `asset_path`, `widget_name`, `font_asset`, `size` | Set the font and size on a text widget |
 | `set_color_scheme` | `asset_path`, `color_map` | Apply a color scheme (name->LinearColor map) across the widget |
 | `batch_style` | `asset_path`, `style_operations` | Apply multiple styling operations in a single transaction |
@@ -335,6 +335,22 @@ The following correctness bugs were fixed in the 2026-05-16 sprint (plan: [`Docs
 - **Bug #6 — `set_widget_property` schema clarification.** The new value can now be supplied as `value` OR `property_value` (alias). Missing-value error preserves `wbp_path`, `widget_name`, `property_name` in the message body for caller-side context.
 
 ---
+
+## Common UWidget property allowlist (v0.21.0, #74)
+
+Prior to v0.21.0, `set_widget_property` only had curated allowlist entries for a handful of typed widgets (e.g. `CommonButtonBase`), so setting a base `UWidget` property required `raw_mode=true`. v0.21.0 adds a base `UWidget` curated block, so these common properties write without `raw_mode` on **every** widget type:
+
+| Property | Type | Notes |
+|----------|------|-------|
+| `Visibility` | `ESlateVisibility` | enum name (`Visible`, `Collapsed`, `Hidden`, `HitTestInvisible`, `SelfHitTestInvisible`) |
+| `RenderOpacity` | `float` | 0..1 |
+| `ToolTipText` | `FText` | |
+| `bIsEnabled` | `bool` | |
+| `RenderTransform.Angle` | `float` | render-transform rotation (degrees) |
+| `RenderTransform.Scale` | `FVector2D` | render-transform scale |
+| `RenderTransform.Translation` | `FVector2D` | render-transform offset |
+
+These are inherited by every `UWidget` subclass through the per-class allowlist walk, so a typed widget's own curated entries stack on top of the base set. Anything not on a curated allowlist still routes through `raw_mode=true`.
 
 ## CommonUI Property Allowlist Coverage
 
@@ -725,7 +741,7 @@ Slot.* paths (`Slot.Padding`, `Slot.HAlign`, `Slot.VAlign`, `Slot.Anchors`, `Slo
 | Action | Params | Description |
 |--------|--------|-------------|
 | `dump_property_allowlist` | `widget_type` (string) | Returns `{type, registered, container_kind, max_children, widget_class, allowed_paths:[...], allowed_path_count}`. Unknown types return `registered:false` with a hint that the type isn't in the registry. |
-| `add_widget_variable` | `wbp_path`, `var_name`, `var_type`, `default_value?`, `var_category?` | Wraps `FBlueprintEditorUtils::AddMemberVariable` to stamp a user-variable onto a WBP. `var_type` accepts the MCP-friendly token grammar (`bool`/`int`/`int64`/`float`/`double`/`string`/`name`/`text`/`byte`/`object:Class`/`class:Class`/`struct:Name`/`enum:Name`/`softobject:Class`/`softclass:Class`/`exec`/`wildcard`, with container prefixes `array:`/`set:`/`map:Key:Value`). AddMemberVariable defaults flags `CPF_Edit | CPF_BlueprintVisible | CPF_DisableEditOnInstance` — matches the editor's "add variable" affordance. Phase 2 Item #8 (2026-05-16 UI Gap Audit). |
+| `add_widget_variable` | `wbp_path`, `var_name`, `var_type`, `default_value?`, `var_category?` | Wraps `FBlueprintEditorUtils::AddMemberVariable` to stamp a user-variable onto a WBP. `var_type` accepts the MCP-friendly token grammar (`bool`/`int`/`int64`/`float`/`double`/`string`/`name`/`text`/`byte`/`object:Class`/`class:Class`/`struct:Name`/`enum:Name`/`softobject:Class`/`softclass:Class`/`exec`/`wildcard`, with container prefixes `array:`/`set:`/`map:Key:Value`). AddMemberVariable defaults flags `CPF_Edit | CPF_BlueprintVisible | CPF_DisableEditOnInstance` — matches the editor's "add variable" affordance. **`enum:` grammar:** `enum:<Name>` builds `PC_Byte` + the `UEnum` as `PinSubCategoryObject`, never `PC_Enum` — see the rule in [SPEC_MonolithBlueprint.md](SPEC_MonolithBlueprint.md). The name resolves as a native enum short name (`enum:ESlateVisibility`, with an `E`-prefix retry so `enum:SlateVisibility` also works), a `UUserDefinedEnum` asset short name, or a full object path (`enum:/Script/UMG.ESlateVisibility`, `enum:/Game/Enums/E_Ammo`). Parsing goes through the shared `MonolithPinTypeGrammar::TryParsePinType`, which fails **by token** — an unresolvable `enum:`/`struct:`/`object:`/`class:`/`softobject:`/`softclass:` sub-object, an unknown base token, or a bad container value type returns `-32602` with the reason instead of silently creating a wrongly-typed variable. Phase 2 Item #8 (2026-05-16 UI Gap Audit); enum grammar corrected for issue #115. |
 | `list_widget_property_enums` | `wbp_path?`, `widget_class?`, `property_name?` | Walks a widget class (or WBP's generated class) and returns every enum-typed property with its enumerator names. Surfaces both `FEnumProperty` (modern `enum class`) AND `FByteProperty` with non-null `Enum` (legacy `TEnumAsByte<EFoo>`). Use to discover the legal value set for `set_widget_property` writes against enum fields. At least one of `wbp_path`/`widget_class` is required. Phase 2 Item #11 (2026-05-16 UI Gap Audit). |
 | `set_widget_is_variable` | `wbp_path` (alias `asset_path`), `widget_name`, `is_variable` (bool) | First-class flip of `UWidget::bIsVariable` — marks or unmarks a tree widget as an exposed Blueprint variable. Calls `Modify()` + a direct member write, then recompiles. Returns `{widget_name, is_variable, changed}` (`changed=false` when the flag already matched). Always-on (not `WITH_COMMONUI`-gated). Phase 4 (2026-05-23 UI Blueprint Gap Audit). |
 

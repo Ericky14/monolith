@@ -1,6 +1,7 @@
 // Copyright Monolith. All Rights Reserved.
 
 #include "MonolithBlueprintSpawnActions.h"
+#include "MonolithJsonUtils.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithParamUtils.h"
@@ -86,7 +87,7 @@ void ApplyPropertiesToActor(
 
 	for (const auto& Pair : PropsObj->Values)
 	{
-		const FString& PropName = Pair.Key;
+		const FString PropName = MonolithKeyToString(Pair.Key);
 		const TSharedPtr<FJsonValue>& PropValue = Pair.Value;
 
 		FProperty* Prop = Actor->GetClass()->FindPropertyByName(FName(*PropName));

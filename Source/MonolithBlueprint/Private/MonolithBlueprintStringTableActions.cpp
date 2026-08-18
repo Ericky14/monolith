@@ -204,7 +204,12 @@ FMonolithActionResult FMonolithBlueprintStringTableActions::HandleSetStringTable
 		(*EntryObjPtr)->TryGetStringField(TEXT("source_string"), SourceString);
 
 		// SetSourceString replaces any existing data for that key (upsert).
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
+		// UE 5.8 editor builds (WITH_EDITORONLY_DATA) expose only the 3-arg overload with dev notes.
+		Table->SetSourceString(FTextKey(*Key), SourceString, FString());
+#else
 		Table->SetSourceString(FTextKey(*Key), SourceString);
+#endif
 		++EntriesWritten;
 	}
 

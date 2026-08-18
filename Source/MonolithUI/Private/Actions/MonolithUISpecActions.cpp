@@ -17,6 +17,7 @@
 
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
+#include "MonolithJsonUtils.h"
 
 #include "Spec/UISpec.h"
 #include "Spec/UISpecValidator.h"
@@ -364,8 +365,9 @@ namespace MonolithUI::SpecActionsInternal
         // Styles map.
         if (SpecObj->TryGetObjectField(TEXT("styles"), Sub) && Sub)
         {
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Sub)->Values)
+            for (const auto& PairIt : (*Sub)->Values)
             {
+                const TPair<FString, TSharedPtr<FJsonValue>> Pair(MonolithKeyToString(PairIt.Key), PairIt.Value);
                 const TSharedPtr<FJsonObject>* StyleObj = nullptr;
                 if (Pair.Value.IsValid() && Pair.Value->TryGetObject(StyleObj) && StyleObj)
                 {

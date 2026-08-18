@@ -433,7 +433,7 @@ FMonolithActionResult FMonolithUIAnimationActions::HandleCreateAnimation(const T
 
     // Create the UMovieScene
     UMovieScene* MovieScene = NewObject<UMovieScene>(
-        NewAnim, FName(*(AnimationName + TEXT("_MovieScene"))), RF_Transactional);
+        NewAnim, NewAnim->GetFName(), RF_Transactional);
     NewAnim->MovieScene = MovieScene;
 
     // Configure tick resolution and display rate
@@ -904,10 +904,9 @@ FMonolithActionResult FMonolithUIAnimationActions::HandleRemoveAnimation(const T
             UMovieScene* MovieScene = WBP->Animations[i]->GetMovieScene();
             if (MovieScene)
             {
-                for (int32 p = 0; p < MovieScene->GetPossessableCount(); ++p)
+                if (MovieScene->GetPossessableCount() > 0)
                 {
-                    AnimGuid = MovieScene->GetPossessable(p).GetGuid();
-                    break; // We just need one to identify bindings
+                    AnimGuid = MovieScene->GetPossessable(0).GetGuid(); // We just need one to identify bindings
                 }
             }
             break;

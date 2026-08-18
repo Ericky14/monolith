@@ -2,7 +2,7 @@
 
 **Parent:** [SPEC_CORE.md](../SPEC_CORE.md)
 **Engine:** Unreal Engine 5.7+
-**Version:** 0.20.0 (Beta)
+**Version:** 0.22.0 (Beta)
 
 ---
 
@@ -34,16 +34,37 @@
 
 | Symbol | Header | Responsibility |
 |--------|--------|---------------|
-| `MonolithCore::ValidatePackagePath(const FString&)` | `MonolithPackagePathValidator.h` (inline) | Wraps `FPackageName::IsValidLongPackageName` with an empty-string-on-success / error-msg-on-failure contract. Rejects empty input, double-slash (`//Game/...`), missing `/Game/` root, trailing slash, illegal chars. Added `dv.367` after a fatal `UObjectGlobals.cpp:1012` ensure from a malformed `//Game/...` JSON payload reaching `CreatePackage`. Currently routed at three sites: `HandleCreateWidgetBlueprint` (direct crash site), `MonolithAIInternal::GetOrCreatePackage` (~17 AI callers), `MonolithGASInternal::GetOrCreatePackage` (~6 GAS callers). ~24 of 80 `CreatePackage` call sites guarded; remaining ~56 sites across MonolithBlueprint / MonolithMaterial / MonolithLogicDriver / MonolithUITemplateActions / MonolithCommonUI* / MonolithMesh are follow-up backlog. |
+| `MonolithPinTypeGrammar::{TryParsePinType, ParsePinTypeFromString, PinTypeToString, ContainerPrefix, ResolveEnumByNameOrPath}` | `MonolithPinTypeGrammar.h` (header-only inline) | The single implementation of the MCP-friendly pin-type token grammar and its inverse — `bool` / `int` / `struct:Vector` / `enum:ESlateVisibility` / `array:object:StaticMesh` / `map:string:int` and so on. It previously existed twice (MonolithBlueprint + MonolithUI) and the copies drifted, which is what shipped enum widget variables that compiled to `int` (issue #115). `TryParsePinType` is the preferred entry point: it fails **by token** — an `object:` / `class:` / `struct:` / `enum:` / `softobject:` / `softclass:` sub-object that does not resolve, an unknown base token, or a bad container value type is a hard `false` with a caller-facing reason, and `Out` is left untouched. `ParsePinTypeFromString` keeps the historical best-effort shape (bool fallback, null sub-object) for un-migrated call sites. **Linkage invariant:** MonolithCore does not link `BlueprintGraph`, so this header is inline-only and must NEVER be included from a MonolithCore `.cpp` (or a MonolithCore test) — the `UEdGraphSchema_K2::PC_*` constants are dllimport'd from `BlueprintGraph` and referencing them from a MonolithCore translation unit is an LNK2019. Same pattern, and same reason, as `MonolithPropertyAccessReader.h` and `MonolithAnimNodeBindingReader.h`. The modules that do link `BlueprintGraph` and may include it from a `.cpp`: MonolithAI, MonolithAnimation, MonolithBlueprint, MonolithComboGraph, MonolithGAS, MonolithIndex, MonolithLevelSequence, MonolithLogicDriver, MonolithUI. |
+| `MonolithCore::ValidatePackagePath(const FString&)` | `MonolithPackagePathValidator.h` (inline) | Wraps `FPackageName::IsValidLongPackageName` with an empty-string-on-success / error-msg-on-failure contract. Rejects empty input, double-slash (`//Game/...`), missing `/Game/` root, trailing slash, illegal chars. Added `dv.367` after a fatal `UObjectGlobals.cpp:1012` ensure from a malformed `//Game/...` JSON payload reaching `CreatePackage`. Routing is incremental and module-keyed. Current owners: MonolithUI (`HandleCreateWidgetBlueprint`, the original crash site), MonolithAI (`MonolithAIInternal::GetOrCreatePackage`), MonolithGAS (`MonolithGASInternal::GetOrCreatePackage`); MonolithBlueprint, MonolithMaterial and MonolithNiagara are being wired now. Grep the Source tree for `ValidatePackagePath` for the current owner list rather than trusting a count here. |
 
 ### Actions (4 — namespace: "monolith")
 
 | Action | MCP Tool | Description |
 |--------|----------|-------------|
-| `discover` | `monolith_discover` | List available tool namespaces and their actions. Optional `namespace` filter |
+| `discover` | `monolith_discover` | List available tool namespaces and their actions. Optional `namespace` filter. **Per-namespace branch is terse by default** (action name + one-line description; param schemas omitted). Optional params: `detail` (bool, default false — `true` inlines every action's full `params` schema), `verbose` (alias for `detail`), `filter` (case-insensitive substring on name OR full description), `offset`/`limit` (opt-in pagination; `limit=0` = ALL). See "Terse per-namespace discover" below |
 | `status` | `monolith_status` | Server health: version, uptime, port, action count, engine_version, project_name |
 | `update` | `monolith_update` | Check/install updates from GitHub Releases. `action`: "check" or "install" |
 | `reindex` | `monolith_reindex` | Trigger project re-index. Defaults to incremental (hash-based delta); pass `force=true` for full wipe-and-rebuild (via reflection to MonolithIndex, no hard dependency) |
+
+#### Terse per-namespace discover
+
+`monolith_discover(namespace)` is **terse by default**: for each action it returns `action` (name) + a one-line `description` only. The full per-action `params` JSON-Schema is NOT emitted by default — fetch a single action's schema with `describe_query action_schema` (the lazy-fetch target, ~54 tokens) or inline every action's schema with `detail=true`. Terse mode cuts per-namespace discover payload by ≥70% vs the pre-change shape (the win is dropping the eager `params` object, not truncating the action list).
+
+**One-line description trim (terse only).** Each `description` is trimmed to its first sentence (sentence terminator at index ≥25 followed by a space or end-of-string), else hard-capped at 150 chars on a word boundary, with an ASCII `"..."` suffix appended when trimmed; already-short descriptions are returned verbatim (no suffix). The FULL untrimmed description is preserved in detail mode and via `describe_query action_schema`.
+
+**Optional params:**
+
+| Param | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `detail` | bool | `false` (terse) | `true` inlines every action's full `params` schema — reproduces the pre-change response shape byte-for-byte (`action`/`description`/`category`/`params` per action). Canonical flag. |
+| `verbose` | bool | unset | Accepted ALIAS for `detail` (read only when `detail` is unset). `verbose=true` == `detail=true`. |
+| `filter` | string | — | Case-insensitive substring matched against the action name OR the FULL description. Applied after any `category` filter, before pagination. |
+| `offset` | int | `0` | Opt-in pagination start, clamped to `[0, total]`. Only meaningful with `limit > 0`. |
+| `limit` | int | `0` (= ALL) | `0` = no cap (the COMPLETE post-filter action list — no action hidden). Any `limit > 0` clamps to `[0, total]`. Pagination is purely OPT-IN. |
+
+**Top-level response fields:** `total` (always; post-filter count); `next_offset` (only when a positive `limit` was supplied AND more remain); `schema_hint` (terse only). The `schema_hint` string is: `Param schemas omitted. Call describe_query(action_schema, target_namespace="<ns>", target_action="<name>") for one action's full schema, or pass detail=true to inline all.`
+
+**Unchanged:** the full `discover()` (no namespace) response is untouched. `describe_query action_schema` is the unchanged lazy-fetch target for a single action's full schema.
 
 ### Actions (2 — namespace: "bulk_fill")
 

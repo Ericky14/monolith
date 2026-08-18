@@ -31,6 +31,7 @@
 // race against the editor's DataTable mutation cradle.
 
 #include "MonolithUIBulkFillAdapter.h"
+#include "MonolithJsonUtils.h"
 #include "MonolithBulkFillRegistry.h"
 #include "MonolithBulkFillTypes.h"
 #include "MonolithAssetUtils.h"
@@ -195,7 +196,7 @@ namespace MonolithUIBulkFillInternal
 		int32 FieldErrors = 0;
 		for (const auto& FieldKV : RowObj->Values)
 		{
-			const FString& FieldName = FieldKV.Key;
+			const FString FieldName = MonolithKeyToString(FieldKV.Key);
 			FBulkFillFieldWrite FieldWrite;
 			FieldWrite.Path = FString::Printf(TEXT("rows[%s].%s"), *RowName, *FieldName);
 
@@ -341,7 +342,7 @@ namespace MonolithUIBulkFillInternal
 			{
 				RowObj = *RowObjPtr;
 			}
-			WriteDataTableRow(DT, RowStruct, RowKV.Key, RowObj, Spec, Report);
+			WriteDataTableRow(DT, RowStruct, MonolithKeyToString(RowKV.Key), RowObj, Spec, Report);
 		}
 
 		// Strict-mode rejects the whole batch.
@@ -424,7 +425,7 @@ namespace MonolithUIBulkFillInternal
 			{
 				RowObj = *RowObjPtr;
 			}
-			WriteDataTableRow(DT, InputActionStruct, RowKV.Key, RowObj, Spec, Report);
+			WriteDataTableRow(DT, InputActionStruct, MonolithKeyToString(RowKV.Key), RowObj, Spec, Report);
 		}
 
 		if (Spec.bStrict && Report.Errors > 0)
