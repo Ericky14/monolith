@@ -8056,7 +8056,7 @@ FMonolithActionResult FMonolithMaterialActions::CreatePbrMaterialFromDisk(const 
 
 	for (const auto& MapEntry : MapsObj->Values)
 	{
-		FString MapType = FString(MapEntry.Key).ToLower();
+		FString MapType = MapEntry.Key.ToLower();
 		FString DiskPath = MapEntry.Value->AsString();
 
 		if (DiskPath.IsEmpty())

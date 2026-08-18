@@ -656,7 +656,7 @@ void FMonolithReflectionWalker::WriteStruct(FStructProperty* StructProp, void* V
 		{
 			FBulkFillFieldWrite W;
 			W.Path = FString::Printf(TEXT("%s.%s"), *PathPrefix, *Pair.Key);
-			FProperty* InnerProp = FindPropertyForwarding(StructProp->Struct, FString(Pair.Key));
+			FProperty* InnerProp = FindPropertyForwarding(StructProp->Struct, Pair.Key);
 			if (!InnerProp)
 			{
 				W.bOk = false;
@@ -715,7 +715,7 @@ FDryRunReport FMonolithReflectionWalker::WriteTree(
 	{
 		FBulkFillFieldWrite W;
 		W.Path = Pair.Key;
-		FProperty* Prop = FindPropertyForwarding(TopStruct, FString(Pair.Key));
+		FProperty* Prop = FindPropertyForwarding(TopStruct, Pair.Key);
 		if (!Prop)
 		{
 			W.bOk = false;
@@ -724,7 +724,7 @@ FDryRunReport FMonolithReflectionWalker::WriteTree(
 			continue;
 		}
 		void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
-		DispatchByPropertyType(Prop, ValuePtr, Pair.Value, OwnerForCradle, Spec, Report, FString(Pair.Key), W);
+		DispatchByPropertyType(Prop, ValuePtr, Pair.Value, OwnerForCradle, Spec, Report, Pair.Key, W);
 		Report.FieldWrites.Add(W);
 	}
 
@@ -763,7 +763,7 @@ FDryRunReport FMonolithReflectionWalker::InspectTree(
 	{
 		FBulkFillFieldWrite W;
 		W.Path = Pair.Key;
-		FProperty* Prop = FindPropertyForwarding(TopStruct, FString(Pair.Key));
+		FProperty* Prop = FindPropertyForwarding(TopStruct, Pair.Key);
 		if (!Prop)
 		{
 			W.bOk = false;
@@ -776,7 +776,7 @@ FDryRunReport FMonolithReflectionWalker::InspectTree(
 		// against the scratch; destroy. The real container is never touched.
 		void* Scratch = FMemory::Malloc(Prop->GetSize(), Prop->GetMinAlignment());
 		Prop->InitializeValue(Scratch);
-		DispatchByPropertyType(Prop, Scratch, Pair.Value, nullptr, Spec, Report, FString(Pair.Key), W);
+		DispatchByPropertyType(Prop, Scratch, Pair.Value, nullptr, Spec, Report, Pair.Key, W);
 		Prop->DestroyValue(Scratch);
 		FMemory::Free(Scratch);
 

@@ -1221,10 +1221,7 @@ FMonolithActionResult FMonolithMeshFurnishingActions::ListFurniturePresets(const
 			{
 				TArray<TSharedPtr<FJsonValue>> DensityModes;
 				TArray<FString> Keys;
-				for (const auto& Pair : (*OverridesObj)->Values)
-				{
-					Keys.Add(FString(Pair.Key));
-				}
+				(*OverridesObj)->Values.GetKeys(Keys);
 				for (const FString& K : Keys)
 				{
 					DensityModes.Add(MakeShared<FJsonValueString>(K));

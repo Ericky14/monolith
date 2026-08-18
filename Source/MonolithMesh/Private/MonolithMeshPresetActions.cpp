@@ -966,9 +966,9 @@ FMonolithActionResult FMonolithMeshPresetActions::CreateTensionProfile(const TSh
 
 	for (const auto& Pair : (*FactorsPtr)->Values)
 	{
-		if (!KnownFactors.Contains(FString(Pair.Key)))
+		if (!KnownFactors.Contains(Pair.Key))
 		{
-			UnknownFactors.Add(FString(Pair.Key));
+			UnknownFactors.Add(Pair.Key);
 		}
 
 		const TSharedPtr<FJsonObject>* FactorObjPtr;

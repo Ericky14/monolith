@@ -974,7 +974,7 @@ FMonolithActionResult FMonolithAudioSoundCueActions::AddSoundCueNode(const TShar
 		for (const auto& Pair : (*PropsObj)->Values)
 		{
 			FString PropError;
-			if (!SetNodeProperty(NewNode, FString(Pair.Key), Pair.Value, PropError))
+			if (!SetNodeProperty(NewNode, Pair.Key, Pair.Value, PropError))
 			{
 				UE_LOG(LogMonolith, Warning, TEXT("add_sound_cue_node: property '%s' error: %s"), *Pair.Key, *PropError);
 			}
@@ -1465,7 +1465,7 @@ FMonolithActionResult FMonolithAudioSoundCueActions::BuildSoundCueFromSpec(const
 				for (const auto& Pair : (*PropsObj)->Values)
 				{
 					FString PropError;
-					if (!SetNodeProperty(*FoundNode, FString(Pair.Key), Pair.Value, PropError))
+					if (!SetNodeProperty(*FoundNode, Pair.Key, Pair.Value, PropError))
 					{
 						UE_LOG(LogMonolith, Warning, TEXT("build_sound_cue_from_spec: node '%s' property '%s' error: %s"),
 							*Id, *Pair.Key, *PropError);

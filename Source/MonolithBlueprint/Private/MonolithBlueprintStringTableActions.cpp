@@ -204,7 +204,7 @@ FMonolithActionResult FMonolithBlueprintStringTableActions::HandleSetStringTable
 		(*EntryObjPtr)->TryGetStringField(TEXT("source_string"), SourceString);
 
 		// SetSourceString replaces any existing data for that key (upsert).
-		Table->SetSourceString(FTextKey(*Key), SourceString, FString());
+		Table->SetSourceString(FTextKey(*Key), SourceString);
 		++EntriesWritten;
 	}
 

@@ -784,7 +784,7 @@ namespace
 		for (const auto& Pair : PropsObj->Values)
 		{
 			FString Error;
-			if (!SetPropertyValue(Obj, FString(Pair.Key), Pair.Value, BT, Error))
+			if (!SetPropertyValue(Obj, Pair.Key, Pair.Value, BT, Error))
 			{
 				OutErrors.Add(Error);
 			}

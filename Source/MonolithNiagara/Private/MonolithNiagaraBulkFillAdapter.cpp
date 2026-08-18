@@ -233,7 +233,7 @@ namespace MonolithNiagaraBulkFillInternal
 		{
 			for (const auto& KV : (*ParamsObjPtr)->Values)
 			{
-				if (LooksLikeGPUParam(FString(KV.Key)))
+				if (LooksLikeGPUParam(KV.Key))
 				{
 					return MakeResolveFailureReport(FString::Printf(
 						TEXT("niagara adapter: parameter '%s' looks like a GPU-sim param — "

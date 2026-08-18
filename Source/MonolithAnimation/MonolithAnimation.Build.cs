@@ -18,8 +18,6 @@ public class MonolithAnimation : ModuleRules
 		{
 			"MonolithCore",
 			"UnrealEd",
-			"Slate",               // STableRow/SBorder instantiation — UE 5.8 stopped
-			"SlateCore",           // re-exporting these transitively via UnrealEd
 			"AnimGraph",
 			"AnimGraphRuntime",
 			"BlueprintGraph",

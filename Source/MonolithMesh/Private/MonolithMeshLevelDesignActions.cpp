@@ -1771,7 +1771,7 @@ FMonolithActionResult FMonolithMeshLevelDesignActions::SetActorComponentProperti
 
 	for (const auto& Pair : (*PropertiesObj)->Values)
 	{
-		const FString PropName(Pair.Key);
+		const FString& PropName = Pair.Key;
 		const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
 
 		FProperty** FoundProp = PropertyMap.Find(PropName);

@@ -195,7 +195,7 @@ namespace MonolithUIBulkFillInternal
 		int32 FieldErrors = 0;
 		for (const auto& FieldKV : RowObj->Values)
 		{
-			const FString FieldName(FieldKV.Key);
+			const FString& FieldName = FieldKV.Key;
 			FBulkFillFieldWrite FieldWrite;
 			FieldWrite.Path = FString::Printf(TEXT("rows[%s].%s"), *RowName, *FieldName);
 
@@ -341,7 +341,7 @@ namespace MonolithUIBulkFillInternal
 			{
 				RowObj = *RowObjPtr;
 			}
-			WriteDataTableRow(DT, RowStruct, FString(RowKV.Key), RowObj, Spec, Report);
+			WriteDataTableRow(DT, RowStruct, RowKV.Key, RowObj, Spec, Report);
 		}
 
 		// Strict-mode rejects the whole batch.
@@ -424,7 +424,7 @@ namespace MonolithUIBulkFillInternal
 			{
 				RowObj = *RowObjPtr;
 			}
-			WriteDataTableRow(DT, InputActionStruct, FString(RowKV.Key), RowObj, Spec, Report);
+			WriteDataTableRow(DT, InputActionStruct, RowKV.Key, RowObj, Spec, Report);
 		}
 
 		if (Spec.bStrict && Report.Errors > 0)

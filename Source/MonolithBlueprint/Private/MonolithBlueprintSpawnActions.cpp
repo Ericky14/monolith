@@ -86,7 +86,7 @@ void ApplyPropertiesToActor(
 
 	for (const auto& Pair : PropsObj->Values)
 	{
-		const FString PropName(Pair.Key);
+		const FString& PropName = Pair.Key;
 		const TSharedPtr<FJsonValue>& PropValue = Pair.Value;
 
 		FProperty* Prop = Actor->GetClass()->FindPropertyByName(FName(*PropName));

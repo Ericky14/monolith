@@ -246,11 +246,11 @@ void FMonolithPoseSearchActions::RegisterActions(FMonolithToolRegistry& Registry
 
 	// Task 2.4 — add_pose_search_notify
 	Registry.RegisterAction(TEXT("animation"), TEXT("add_pose_search_notify"),
-		TEXT("Add a PoseSearch anim-notify-state (ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn) to an animation"),
+		TEXT("Add a PoseSearch anim-notify-state (ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn, IKWindow) to an animation"),
 		FMonolithActionHandler::CreateStatic(&HandleAddPoseSearchNotify),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("anim_path"), TEXT("Animation sequence/composite asset path"))
-			.Required(TEXT("notify_kind"), TEXT("string"), TEXT("ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn"))
+			.Required(TEXT("notify_kind"), TEXT("string"), TEXT("ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn, IKWindow"))
 			.Required(TEXT("start_time"), TEXT("number"), TEXT("Notify start time in seconds"))
 			.Required(TEXT("duration"), TEXT("number"), TEXT("Notify duration in seconds"))
 			.Optional(TEXT("cost_bias"), TEXT("number"), TEXT("CostAddend for ModifyCost / OverrideContinuingPoseCostBias kinds"))
@@ -1747,7 +1747,7 @@ static FMonolithActionResult HandleConfigureSchemaChannel(const TSharedPtr<FJson
 // ---------------------------------------------------------------------------
 
 /** Map a notify_kind string to the concrete UAnimNotifyState_PoseSearch* UClass.
-  * Returns nullptr if unrecognized. (IKWindow was removed in UE 5.8.) */
+  * 8 concrete classes exist in UE 5.7. Returns nullptr if unrecognized. */
 static UClass* ResolvePoseSearchNotifyClass(const FString& Kind)
 {
 	if (Kind.Equals(TEXT("ExcludeFromDatabase"), ESearchCase::IgnoreCase)) return UAnimNotifyState_PoseSearchExcludeFromDatabase::StaticClass();
@@ -1757,6 +1757,7 @@ static UClass* ResolvePoseSearchNotifyClass(const FString& Kind)
 	if (Kind.Equals(TEXT("SamplingEvent"), ESearchCase::IgnoreCase))       return UAnimNotifyState_PoseSearchSamplingEvent::StaticClass();
 	if (Kind.Equals(TEXT("SamplingAttribute"), ESearchCase::IgnoreCase))   return UAnimNotifyState_PoseSearchSamplingAttribute::StaticClass();
 	if (Kind.Equals(TEXT("BranchIn"), ESearchCase::IgnoreCase))            return UAnimNotifyState_PoseSearchBranchIn::StaticClass();
+	if (Kind.Equals(TEXT("IKWindow"), ESearchCase::IgnoreCase))            return UAnimNotifyState_PoseSearchIKWindow::StaticClass();
 	return nullptr;
 }
 
@@ -1781,7 +1782,7 @@ static FMonolithActionResult HandleAddPoseSearchNotify(const TSharedPtr<FJsonObj
 	UClass* NotifyClass = ResolvePoseSearchNotifyClass(NotifyKind);
 	if (!NotifyClass)
 		return FMonolithActionResult::Error(FString::Printf(
-			TEXT("Unknown notify_kind '%s'. Supported: ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn"), *NotifyKind));
+			TEXT("Unknown notify_kind '%s'. Supported: ExcludeFromDatabase, BlockTransition, ModifyCost, OverrideContinuingPoseCostBias, SamplingEvent, SamplingAttribute, BranchIn, IKWindow"), *NotifyKind));
 
 	UAnimNotifyState* NewNotify = NewObject<UAnimNotifyState>(Seq, NotifyClass);
 	if (!NewNotify)

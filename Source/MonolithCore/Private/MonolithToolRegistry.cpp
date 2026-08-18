@@ -21,7 +21,7 @@ bool FMonolithParamSchema::ApplyAliases(
 
 	for (const auto& Pair : Schema->Values)
 	{
-		const FString Canonical(Pair.Key);
+		const FString& Canonical = Pair.Key;
 
 		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
 		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
@@ -86,7 +86,7 @@ TArray<FString> FMonolithParamSchema::FindUnknownKeys(
 	TSet<FString> Allowed;
 	for (const auto& Pair : Schema->Values)
 	{
-		Allowed.Add(FString(Pair.Key));
+		Allowed.Add(Pair.Key);
 
 		const TSharedPtr<FJsonObject>* ParamDef = nullptr;
 		if (!Pair.Value->TryGetObject(ParamDef) || !ParamDef)
@@ -126,10 +126,9 @@ TArray<FString> FMonolithParamSchema::FindUnknownKeys(
 
 	for (const auto& Pair : Params->Values)
 	{
-		FString Key(Pair.Key);
-		if (!Allowed.Contains(Key))
+		if (!Allowed.Contains(Pair.Key))
 		{
-			Unknown.Add(MoveTemp(Key));
+			Unknown.Add(Pair.Key);
 		}
 	}
 
@@ -341,14 +340,14 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 					// (only fires for schemas not migrated to K2 aliases).
 					if (Pair.Key == TEXT("wbp_path") && EffectiveParams->HasField(TEXT("asset_path")))
 						continue;
-					Missing.Add(FString(Pair.Key));
+					Missing.Add(Pair.Key);
 				}
 			}
 		}
 		if (Missing.Num() > 0)
 		{
 			TArray<FString> Provided;
-			for (const auto& P : EffectiveParams->Values) Provided.Add(FString(P.Key));
+			for (const auto& P : EffectiveParams->Values) Provided.Add(P.Key);
 			return FMonolithActionResult::Error(
 				FString::Printf(TEXT("Missing required param(s): [%s]. Provided keys: [%s] — inspect the action's parameter schema via monolith_discover(\"<namespace>\") and supply all required fields."),
 					*FString::Join(Missing, TEXT(", ")),
@@ -392,7 +391,7 @@ FMonolithActionResult FMonolithToolRegistry::ExecuteAction(
 				continue;
 			}
 
-			const FString ParamName(SchemaPair.Key);
+			const FString& ParamName = SchemaPair.Key;
 			FString Value;
 			if (!EffectiveParams->TryGetStringField(ParamName, Value))
 			{

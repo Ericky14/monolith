@@ -717,7 +717,7 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleAddDataTableRow(con
 
 	for (const auto& Pair : (*ValuesObj)->Values)
 	{
-		const FString FieldName(Pair.Key);
+		const FString& FieldName = Pair.Key;
 		const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
 
 		// Find property by name — try exact, case-insensitive, then display name
@@ -1257,7 +1257,7 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleSeedDataAsset(const
 	// Post-write cradle for the top-level fields the tree touched.
 	for (const auto& KV : Tree->Values)
 	{
-		FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(ResolvedClass, FString(KV.Key));
+		FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(ResolvedClass, KV.Key);
 		if (TopProp)
 		{
 			MonolithEditCradle::ReparentTransientInstancedSubobjects(NewAsset, TopProp);
@@ -1292,7 +1292,7 @@ FMonolithActionResult FMonolithBlueprintStructActions::HandleSeedDataAsset(const
 		TSharedPtr<FJsonObject> Values = MakeShared<FJsonObject>();
 		for (const auto& KV : Tree->Values)
 		{
-			FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(ResolvedClass, FString(KV.Key));
+			FProperty* TopProp = FMonolithReflectionWalker::FindPropertyForwarding(ResolvedClass, KV.Key);
 			if (TopProp)
 			{
 				const void* ValuePtr = TopProp->ContainerPtrToValuePtr<void>(NewAsset);

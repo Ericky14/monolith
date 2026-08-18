@@ -6764,7 +6764,7 @@ namespace MonolithEditorNavHarness
 		}
 		for (const auto& Pair : PropObj->Values)
 		{
-			const FString PropName(Pair.Key);
+			const FString& PropName = Pair.Key;
 			const TSharedPtr<FJsonValue>& Value = Pair.Value;
 			FProperty* Prop = Actor->GetClass()->FindPropertyByName(FName(*PropName));
 			if (!Prop)
