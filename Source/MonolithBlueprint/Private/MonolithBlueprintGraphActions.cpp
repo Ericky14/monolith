@@ -868,15 +868,25 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 		const FEdGraphPinType& PinType, EEdGraphPinDirection Direction)
 	{
 		if (!Owner) return;
+		bool bReplaced = false;
 		for (const TSharedPtr<FUserPinInfo>& Existing : Owner->UserDefinedPins)
 		{
 			if (Existing.IsValid() && Existing->PinName == PinName)
 			{
 				Owner->RemoveUserDefinedPin(Existing);
+				bReplaced = true;
 				break;
 			}
 		}
-		Owner->CreateUserDefinedPin(PinName, PinType, Direction);
+		// Uniquification MUST be off on the replace path. UK2Node_FunctionTerminator::
+		// CreateUniquePinName tests `FindPin(Name) || FindFProperty(CompiledFunction, Name)`,
+		// so a parameter that has already survived one compile still reads as taken even after
+		// its pin is removed -- the replacement then lands as "Damage1" and the edit silently
+		// does the opposite of what it says. Removal has already cleared both the UEdGraphPin
+		// and the FUserPinInfo, and the stale UFunction property is rebuilt from UserDefinedPins
+		// on the next compile, so reusing the name here is safe. A genuinely new pin keeps
+		// uniquification, so real collisions still resolve.
+		Owner->CreateUserDefinedPin(PinName, PinType, Direction, /*bUseUniqueName=*/!bReplaced);
 	};
 
 	// Parse EVERY requested pin type BEFORE touching the graph. Strict parse — a
@@ -963,7 +973,9 @@ FMonolithActionResult FMonolithBlueprintGraphActions::HandleSetFunctionParams(co
 
 		for (const TPair<FName, FEdGraphPinType>& Output : NewOutputs)
 		{
-			ResultNode->CreateUserDefinedPin(Output.Key, Output.Value, EGPD_Input);
+			// Same replace semantics as inputs -- the action's contract is "re-using a
+			// parameter name replaces it", and a return value is a parameter too.
+			ReplaceUserPin(ResultNode, Output.Key, Output.Value, EGPD_Input);
 			++OutputsAdded;
 		}
 	}
