@@ -105,6 +105,22 @@ FMonolithActionResult FProjectSearchAction::Execute(const TSharedPtr<FJsonObject
 		Entry->SetStringField(TEXT("module_name"), SR.ModuleName);
 		Entry->SetStringField(TEXT("match_context"), SR.MatchContext);
 		Entry->SetNumberField(TEXT("rank"), SR.Rank);
+		// Node hits carry their address, so a match is directly actionable: `graph` feeds
+		// get_graph_data / get_node_details / remove_node / connect_pins as graph_name, and
+		// node_id addresses the node within it. Emitted only when populated -- an asset-table
+		// hit has no node behind it, and rows indexed before schema v3 have no address stored.
+		if (!SR.GraphName.IsEmpty())
+		{
+			Entry->SetStringField(TEXT("graph"), SR.GraphName);
+		}
+		if (!SR.NodeObjectName.IsEmpty())
+		{
+			Entry->SetStringField(TEXT("node_id"), SR.NodeObjectName);
+		}
+		if (!SR.NodeClass.IsEmpty())
+		{
+			Entry->SetStringField(TEXT("node_class"), SR.NodeClass);
+		}
 		ResultsArr.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
