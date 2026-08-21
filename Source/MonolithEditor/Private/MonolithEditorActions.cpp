@@ -10,6 +10,8 @@
 #include "Misc/PackageName.h" // resolve virtual /Game output dirs to on-disk paths (capture footgun fix)
 #include "Misc/App.h"
 #include "Misc/AutomationTest.h"
+#include "AssetRegistry/AssetRegistryModule.h" // delete_assets redirector guard
+#include "UObject/ObjectRedirector.h"
 
 // Item 8: fix_hints — borrow the shared source DB (LNK2019 owner-module +
 // C4996 deprecation resolution). MonolithEditor already PrivateDependsOn
@@ -800,7 +802,7 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("delete_assets"),
-		TEXT("Delete UE assets by path. Optional safety: restrict to allowed path prefixes"),
+		TEXT("Delete UE assets by path. Redirector-safe: a path holding an ObjectRedirector deletes the REDIRECTOR (never its followed target), and a load that resolves outside the requested package is refused. The response reports files_still_on_disk — trust that, not the counts. Optional safety: restrict to allowed path prefixes"),
 		FMonolithActionHandler::CreateStatic(&HandleDeleteAssets),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of UE asset paths to delete"))
@@ -4190,16 +4192,70 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 	bool bForce = false;
 	Params->TryGetBoolField(TEXT("force"), bForce);
 
-	// Load and delete each asset
+	// Load and delete each asset.
+	//
+	// ⚠ REDIRECTOR GUARD (2026-08-20, after this exact hole nearly destroyed a real asset via
+	// the equivalent Python path): a rename leaves an ObjectRedirector at the old path, and the
+	// generic load APIs FOLLOW it — so "delete /Game/Old" would load and delete the MOVED asset
+	// at its new home, with every return value reading success. The asset registry knows what
+	// actually sits at a path, and FAssetData::GetAsset() is documented to NOT handle redirects
+	// — for a redirector entry it returns the UObjectRedirector itself. So: resolve through the
+	// registry, delete redirectors AS redirectors, and refuse outright if a load ever resolves
+	// into a package the caller never named.
+	IAssetRegistry& AssetRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+
 	TArray<UObject*> ObjectsToDelete;
 	TArray<FString> NotFound;
+	TArray<FString> PackagesToVerify;
+	int32 NumRedirectors = 0;
 
 	for (const FString& Path : AssetPaths)
 	{
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
+		const FString PackageName = FPackageName::ObjectPathToPackageName(Path);
+
+		TArray<FAssetData> AssetsInPackage;
+		AssetRegistry.GetAssetsByPackageName(FName(*PackageName), AssetsInPackage, /*bIncludeOnlyOnDiskAssets=*/false);
+
+		UObject* Asset = nullptr;
+		for (const FAssetData& Data : AssetsInPackage)
+		{
+			if (Data.IsRedirector())
+			{
+				Asset = Data.GetAsset();
+				if (Asset)
+				{
+					NumRedirectors++;
+				}
+				break;
+			}
+		}
+		if (!Asset && AssetsInPackage.Num() > 0)
+		{
+			Asset = AssetsInPackage[0].GetAsset();
+		}
+		if (!Asset)
+		{
+			// Registry has no entry (not yet scanned): fall back to the plain load, which the
+			// package check below still keeps honest.
+			Asset = UEditorAssetLibrary::LoadAsset(Path);
+		}
+
 		if (Asset)
 		{
+			// Belt and braces: whatever loaded must LIVE in the requested package. If it does
+			// not, a redirector was followed after all — deleting it would destroy an asset
+			// the caller never named.
+			const FString LoadedPackage = Asset->GetOutermost()->GetName();
+			if (!LoadedPackage.Equals(PackageName, ESearchCase::IgnoreCase))
+			{
+				return FMonolithActionResult::Error(FString::Printf(
+					TEXT("'%s' resolved to '%s' in a DIFFERENT package — a redirector was followed. ")
+					TEXT("Refusing to delete an asset the caller never named; pass the target's own path if that is intended."),
+					*Path, *Asset->GetPathName()));
+			}
 			ObjectsToDelete.Add(Asset);
+			PackagesToVerify.Add(PackageName);
 		}
 		else
 		{
@@ -4262,11 +4318,27 @@ FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 			: ObjectTools::DeleteObjects(ObjectsToDelete, /*bShowConfirmation=*/false);
 	}
 
+	// ON-DISK TRUTH (2026-08-20): the counts above come from ObjectTools and are not evidence —
+	// delete calls have returned success while leaving the .uasset on disk (registry forgets it,
+	// file stays; documented the hard way). Check the filesystem and report it, so the caller
+	// never has to trust the count.
+	TArray<TSharedPtr<FJsonValue>> FilesStillOnDisk;
+	for (const FString& PackageName : PackagesToVerify)
+	{
+		if (FPackageName::DoesPackageExist(PackageName))
+		{
+			FilesStillOnDisk.Add(MakeShared<FJsonValueString>(PackageName));
+		}
+	}
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("success"), NumDeleted == ObjectsToDelete.Num() && NotFound.Num() == 0);
+	Result->SetBoolField(TEXT("success"),
+		NumDeleted == ObjectsToDelete.Num() && NotFound.Num() == 0 && FilesStillOnDisk.Num() == 0);
 	Result->SetNumberField(TEXT("deleted"), NumDeleted);
 	Result->SetNumberField(TEXT("requested"), AssetPaths.Num());
 	Result->SetNumberField(TEXT("found"), ObjectsToDelete.Num());
+	Result->SetNumberField(TEXT("redirectors_deleted"), NumRedirectors);
+	Result->SetArrayField(TEXT("files_still_on_disk"), FilesStillOnDisk);
 
 	// Surface partial failures. The ObjectTools API returns only a count, not
 	// which objects survived, so this is count-derived: when fewer objects were
