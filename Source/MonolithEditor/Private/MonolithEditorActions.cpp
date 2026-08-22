@@ -815,6 +815,21 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 		FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
 		MakeShared<FJsonObject>());
 
+	Registry.RegisterAction(TEXT("editor"), TEXT("set_viewport_camera"),
+		TEXT("Move the editor viewport camera WITHOUT breaking user navigation. The engine's "
+		     "scripted setter (UUnrealEditorSubsystem::SetLevelViewportCameraInfo, what python "
+		     "set_level_viewport_camera_info calls) plants a stale orbit look-at anchor via "
+		     "SetViewLocationForOrbiting - afterwards the user's orbit/pan input rubber-bands "
+		     "around that anchor ('my camera is frozen'). This action sets location/rotation "
+		     "directly, drops orbit mode, and re-anchors the look-at ahead of the camera. "
+		     "Called with NO params it is a pure in-place navigation repair (unfreeze) that "
+		     "does not move the camera."),
+		FMonolithActionHandler::CreateStatic(&HandleSetViewportCamera),
+		FParamSchemaBuilder()
+			.Optional(TEXT("location"), TEXT("array"), TEXT("[x,y,z] camera location in cm (omit to keep current)"))
+			.Optional(TEXT("rotation"), TEXT("array"), TEXT("[pitch,yaw,roll] camera rotation in degrees (omit to keep current)"))
+			.Build());
+
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_viewport"),
 		TEXT("Capture the active editor viewport as a PNG screenshot. Returns the file path. Optionally set camera position/rotation before capture, and set include_ui to composite the UMG/Slate layer (PIE HUD) rather than the 3D scene alone."),
 		FMonolithActionHandler::CreateStatic(&HandleCaptureViewport),
@@ -3919,6 +3934,62 @@ FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(
 	Result->SetNumberField(TEXT("fov"), FOV);
 	Result->SetBoolField(TEXT("realtime"), ViewportClient->IsRealtime());
 
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleSetViewportCamera(
+	const TSharedPtr<FJsonObject>& Params)
+{
+	FLevelEditorModule* LevelEditor = FModuleManager::GetModulePtr<FLevelEditorModule>("LevelEditor");
+	if (!LevelEditor)
+	{
+		return FMonolithActionResult::Error(TEXT("LevelEditor module not loaded"));
+	}
+	TSharedPtr<SLevelViewport> LevelViewport = LevelEditor->GetFirstActiveLevelViewport();
+	if (!LevelViewport.IsValid())
+	{
+		return FMonolithActionResult::Error(TEXT("No active level viewport found"));
+	}
+	FLevelEditorViewportClient& ViewportClient = LevelViewport->GetLevelViewportClient();
+
+	bool bMoved = false;
+	const TArray<TSharedPtr<FJsonValue>>* LocArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("location"), LocArr) && LocArr && LocArr->Num() >= 3)
+	{
+		ViewportClient.SetViewLocation(FVector(
+			(*LocArr)[0]->AsNumber(), (*LocArr)[1]->AsNumber(), (*LocArr)[2]->AsNumber()));
+		bMoved = true;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* RotArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("rotation"), RotArr) && RotArr && RotArr->Num() >= 3)
+	{
+		ViewportClient.SetViewRotation(FRotator(
+			(*RotArr)[0]->AsNumber(), (*RotArr)[1]->AsNumber(), (*RotArr)[2]->AsNumber()));
+		bMoved = true;
+	}
+
+	// Navigation repair - the reason this action exists (see registration comment).
+	// Drop orbit mode and re-anchor the look-at a fixed distance AHEAD of the
+	// (possibly unchanged) camera, which is what normal fly navigation maintains.
+	ViewportClient.ToggleOrbitCamera(false);
+	const FVector Loc = ViewportClient.GetViewLocation();
+	const FRotator Rot = ViewportClient.GetViewRotation();
+	ViewportClient.SetLookAtLocation(Loc + Rot.Vector() * 1024.0);
+	ViewportClient.Invalidate();
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("moved"), bMoved);
+	Result->SetBoolField(TEXT("navigation_repaired"), true);
+	TArray<TSharedPtr<FJsonValue>> OutLoc;
+	OutLoc.Add(MakeShared<FJsonValueNumber>(Loc.X));
+	OutLoc.Add(MakeShared<FJsonValueNumber>(Loc.Y));
+	OutLoc.Add(MakeShared<FJsonValueNumber>(Loc.Z));
+	Result->SetArrayField(TEXT("camera_location"), OutLoc);
+	TArray<TSharedPtr<FJsonValue>> OutRot;
+	OutRot.Add(MakeShared<FJsonValueNumber>(Rot.Pitch));
+	OutRot.Add(MakeShared<FJsonValueNumber>(Rot.Yaw));
+	OutRot.Add(MakeShared<FJsonValueNumber>(Rot.Roll));
+	Result->SetArrayField(TEXT("camera_rotation"), OutRot);
 	return FMonolithActionResult::Success(Result);
 }
 
